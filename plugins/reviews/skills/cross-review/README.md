@@ -1,6 +1,6 @@
 # cross-review
 
-One Claude model and one OpenAI Codex model review independently, then challenge each other's findings.
+Two different provider models review independently, then challenge each other's findings.
 Choose models once during setup, change them anytime, or override them for one run.
 
 ## Requirements
@@ -8,7 +8,8 @@ Choose models once during setup, change them anytime, or override them for one r
 - Node.js 22 or later.
 - A harness supporting isolated Claude subagents with explicit model selection
   and resumed exchanges. Claude Code is the primary target.
-- Codex CLI installed and authenticated with access to the chosen OpenAI model.
+- The runtime selected for each seat: Claude harness, authenticated Codex CLI,
+  or OpenCode with an authenticated configured provider.
 - Git recommended for best-effort source-change auditing.
 
 Model/effort support is checked in your runtime; installing this skill does not
@@ -35,9 +36,11 @@ not provide Claude subagents.
 /cross-review reset
 ```
 
-Setup asks for both models and optional effort before the first review.
-Run setup again or say "change cross-review's second reviewer to MODEL" to update
-saved choices. Say "use MODEL for this review only" for a temporary override.
+Setup asks for provider, runtime, model, and optional effort for both seats.
+Codex offers GPT-6 Astra and GPT-5.6 Luna/Sol/Terra. Claude offers Fable when
+the harness exposes it. Run setup again or say "change cross-review's second
+provider to PROVIDER" to update saved choices. Say "use MODEL for this review
+only" for a temporary override.
 Config shows settings; reset removes only this skill's preferences.
 These are conversational skill commands, not standalone executables.
 
@@ -70,8 +73,8 @@ metadata is unavailable.
 See [SKILL.md](SKILL.md) for the workflow and
 [review protocol](references/review-protocol.md) for evidence and reporting rules.
 
-The optional OpenCode helper is retained for existing integrations. It is not
-part of the default Claude + Codex workflow and is not a fallback provider.
+OpenCode is an explicit provider bridge for configured non-Claude/non-Codex
+vendors. It is never a fallback provider.
 
 ## Contributing and license
 

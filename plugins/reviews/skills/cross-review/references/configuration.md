@@ -8,14 +8,18 @@ account entitlements or dispatch a paid model call.
 
 1. Resolve `<skill-dir>` to the directory containing the loaded SKILL.md.
    Run `node "<skill-dir>/scripts/review-config.mjs" show`.
-2. If unconfigured, ask for both reviewer models and optional effort. Present
-   only choices verified available in the current harness, or accept exact IDs
-   from the user and validate them before review. Examples are not defaults.
+2. For cross-review, run `catalog`. Ask for both reviewer providers, runtimes,
+   models, and optional effort. For pair-review, ask for two distinct
+   Claude-harness models and optional effort. Present current curated choices,
+   then verify availability in the selected runtime. Codex must show the GPT-6
+   Astra and GPT-5.6 Luna/Sol/Terra choices; Claude must include Fable when its
+   harness exposes it. For OpenCode, show only `opencode models` results.
+   Examples are not defaults.
    If the user already supplied both choices, use them without asking again.
 3. Validate runtime support as described in
    [model-capabilities.md](model-capabilities.md). The helper validates structure
    only. For pair-review check that aliases resolve to distinct Claude models;
-   for cross-review check Claude in A and OpenAI in B.
+   for cross-review check that the two selected provider IDs differ.
 4. Save using `setup`, then read back with `show`. State both models, effort,
    and the saved path. A first review request continues after setup; a setup-only
    request ends without dispatch.
@@ -52,8 +56,10 @@ and user-selected model IDs. Placeholders here document arguments, not defaults.
 
 ```text
 node "<skill-dir>/scripts/review-config.mjs" show
-node "<skill-dir>/scripts/review-config.mjs" setup --a MODEL_A --b MODEL_B
-node "<skill-dir>/scripts/review-config.mjs" setup --b NEW_MODEL_B --b-effort high
+node "<cross-review-dir>/scripts/review-config.mjs" catalog
+node "<cross-review-dir>/scripts/review-config.mjs" setup --a-provider anthropic --a-runtime claude --a fable --b-provider openai --b-runtime codex --b gpt-5.6-sol
+node "<cross-review-dir>/scripts/review-config.mjs" setup --b-provider google --b-runtime opencode --b google/MODEL_ID
+node "<pair-review-dir>/scripts/review-config.mjs" setup --a fable --b sonnet
 node "<skill-dir>/scripts/review-config.mjs" resolve --a TEMPORARY_MODEL_A
 node "<skill-dir>/scripts/review-config.mjs" reset
 ```
@@ -67,7 +73,8 @@ adversarial for cross-review). Pair-review accepts `--mode collaborate`,
 `--mode adversarial`, or `--mode none`.
 
 Explicit run values > saved preferences > effort/mode defaults.
-There is no built-in model default. First setup needs both model IDs.
+There is no built-in model default. Cross-review first setup needs both complete
+reviewer selections; pair-review needs two distinct Claude-harness model IDs.
 Do not persist run overrides unless asked.
 
 ## During an active review

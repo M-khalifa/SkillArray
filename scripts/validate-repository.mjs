@@ -64,7 +64,7 @@ async function main() {
 
   const reviews = await readJson("plugins/reviews/.claude-plugin/plugin.json");
   assert(reviews.name === "skill-array-reviews", "unexpected reviews plugin name");
-  assert(reviews.version === "1.1.0", "reviews plugin version must be 1.1.0");
+  assert(reviews.version === "1.2.0", "reviews plugin version must be 1.2.0");
 
   const pairVersion = await readSkillVersion(
     "plugins/reviews/skills/pair-review/SKILL.md",

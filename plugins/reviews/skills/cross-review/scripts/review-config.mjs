@@ -1,14 +1,16 @@
 #!/usr/bin/env node
-// Local preferences only. Model availability is checked by the review harness.
+// Local reviewer preferences. Runtime availability is checked before dispatch.
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { catalog, isSupportedPair } from './provider-catalog.mjs';
 
 const SKILLS = ['pair-review', 'cross-review'];
 const MODES = ['collaborate', 'adversarial', 'none'];
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+const EFFORT = /^[a-z][a-z0-9_-]*$/;
 
 export function configPath(skill, env = process.env, home = os.homedir()) {
   if (!SKILLS.includes(skill)) throw new Error('Unknown review skill');
@@ -18,83 +20,120 @@ export function configPath(skill, env = process.env, home = os.homedir()) {
   return path.join(root, `${skill}.json`);
 }
 
-export function validateConfig(config, skill) {
-  if (!config || config.version !== 1 || config.skill !== skill) {
-    throw new Error('Unsupported configuration version or wrong skill');
+function defaultRuntime(provider) {
+  return provider === 'anthropic' ? 'claude' : provider === 'openai' ? 'codex' : 'opencode';
+}
+
+function normalizeConfig(config, skill) {
+  if (!config || config.skill !== skill) throw new Error('Unsupported configuration version or wrong skill');
+  if (config.version === 2) return structuredClone(config);
+  if (config.version !== 1) throw new Error('Unsupported configuration version or wrong skill');
+  const migrated = structuredClone(config);
+  migrated.version = 2;
+  for (const seat of Object.values(migrated.reviewers || {})) {
+    if (seat && !seat.runtime) seat.runtime = defaultRuntime(seat.provider);
   }
-  if (!MODES.includes(config.mode) || (skill === 'cross-review' && config.mode !== 'adversarial')) {
+  return migrated;
+}
+
+function validateSeat(seat, role) {
+  if (!seat || typeof seat.provider !== 'string' || !TOKEN.test(seat.provider) ||
+      typeof seat.runtime !== 'string' || !TOKEN.test(seat.runtime) ||
+      !isSupportedPair(seat.provider, seat.runtime) || typeof seat.model !== 'string' ||
+      !TOKEN.test(seat.model) || seat.model === 'inherit' || typeof seat.effort !== 'string' ||
+      !EFFORT.test(seat.effort)) {
+    throw new Error(`Invalid reviewer ${role}; supply explicit provider, runtime, model, and effort or default`);
+  }
+}
+
+export function validateConfig(config, skill) {
+  const normalized = normalizeConfig(config, skill);
+  if (!MODES.includes(normalized.mode) || (skill === 'cross-review' && normalized.mode !== 'adversarial')) {
     throw new Error('Invalid review mode');
   }
-  for (const [role, provider] of [['A', 'anthropic'], ['B', skill === 'pair-review' ? 'anthropic' : 'openai']]) {
-    const seat = config.reviewers?.[role];
-    if (!seat || seat.provider !== provider || typeof seat.model !== 'string' ||
-        !TOKEN.test(seat.model) || seat.model === 'inherit' ||
-        typeof seat.effort !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(seat.effort)) {
-      throw new Error(`Invalid reviewer ${role}; supply an explicit model and effort or default`);
+  for (const role of ['A', 'B']) validateSeat(normalized.reviewers?.[role], role);
+  const { A, B } = normalized.reviewers;
+  if (skill === 'pair-review') {
+    if (A.provider !== 'anthropic' || B.provider !== 'anthropic' || A.runtime !== 'claude' || B.runtime !== 'claude') {
+      throw new Error('Pair review requires two Claude-harness reviewers');
     }
+    if (A.model === B.model) throw new Error('Pair review requires two distinct models');
+  } else if (A.provider === B.provider) {
+    throw new Error('Cross review requires two different providers');
   }
-  if (skill === 'pair-review' && config.reviewers.A.model === config.reviewers.B.model) {
-    throw new Error('Pair review requires two distinct models');
-  }
-  return config;
+  return normalized;
 }
 
 export async function readConfig(file, skill) {
   let raw;
   try { raw = await fs.readFile(file, 'utf8'); }
-  catch (err) {
-    if (err.code === 'ENOENT') return null;
-    throw err;
-  }
+  catch (err) { if (err.code === 'ENOENT') return null; throw err; }
   let parsed;
   try { parsed = JSON.parse(raw.replace(/^\uFEFF/, '')); }
   catch (err) { throw new SyntaxError(`${file} is not valid JSON (${err.message}); fix it or run reset`); }
   return validateConfig(parsed, skill);
 }
 
-export function resolveConfig(saved, skill, options = {}) {
-  const config = saved ? structuredClone(validateConfig(saved, skill)) : {
-    version: 1, skill, mode: skill === 'pair-review' ? 'collaborate' : 'adversarial',
+function emptyConfig(skill) {
+  return {
+    version: 2, skill, mode: skill === 'pair-review' ? 'collaborate' : 'adversarial',
     reviewers: {
-      A: { provider: 'anthropic', model: '', effort: 'default' },
-      B: { provider: skill === 'pair-review' ? 'anthropic' : 'openai', model: '', effort: 'default' },
+      A: { provider: 'anthropic', runtime: 'claude', model: '', effort: 'default' },
+      B: skill === 'pair-review'
+        ? { provider: 'anthropic', runtime: 'claude', model: '', effort: 'default' }
+        : { provider: 'openai', runtime: 'codex', model: '', effort: 'default' },
     },
   };
+}
+
+export function resolveConfig(saved, skill, options = {}) {
+  const config = saved ? structuredClone(validateConfig(saved, skill)) : emptyConfig(skill);
   if (options.mode !== undefined) config.mode = options.mode;
   for (const role of ['A', 'B']) {
     const key = role.toLowerCase();
-    // Effort selections are model-specific; a model change clears the old effort.
-    if (options[key] !== undefined && options[key] !== config.reviewers[role].model) {
-      config.reviewers[role].model = options[key];
-      config.reviewers[role].effort = 'default';
+    const seat = config.reviewers[role];
+    const providerKey = `${key}-provider`;
+    const runtimeKey = `${key}-runtime`;
+    if (options[providerKey] !== undefined && options[providerKey] !== seat.provider) {
+      seat.provider = options[providerKey];
+      seat.runtime = defaultRuntime(seat.provider);
+      seat.model = '';
+      seat.effort = 'default';
     }
-    if (options[`${key}-effort`] !== undefined) config.reviewers[role].effort = options[`${key}-effort`];
+    if (options[runtimeKey] !== undefined && options[runtimeKey] !== seat.runtime) {
+      seat.runtime = options[runtimeKey];
+      seat.model = '';
+      seat.effort = 'default';
+    }
+    if (options[key] !== undefined && options[key] !== seat.model) {
+      seat.model = options[key];
+      seat.effort = 'default';
+    }
+    if (options[`${key}-effort`] !== undefined) seat.effort = options[`${key}-effort`];
   }
   return validateConfig(config, skill);
 }
 
 export async function writeConfig(file, config) {
-  validateConfig(config, config.skill);
+  const normalized = validateConfig(config, config.skill);
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
-    await fs.writeFile(temp, JSON.stringify(config, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+    await fs.writeFile(temp, JSON.stringify(normalized, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     await fs.rename(temp, file);
   } finally {
-    try { await fs.unlink(temp); }
-    catch (err) { if (err.code !== 'ENOENT') throw err; }
+    try { await fs.unlink(temp); } catch (err) { if (err.code !== 'ENOENT') throw err; }
   }
 }
 
 export function parseOptions(argv) {
   const [command = 'show', ...rest] = argv;
-  if (!['show', 'setup', 'resolve', 'reset', '--help'].includes(command)) throw new Error('Unknown command');
+  if (!['show', 'setup', 'resolve', 'reset', 'catalog', '--help'].includes(command)) throw new Error('Unknown command');
   const options = {};
+  const allowed = ['a', 'b', 'a-effort', 'b-effort', 'a-provider', 'b-provider', 'a-runtime', 'b-runtime', 'mode'];
   for (let i = 0; i < rest.length; i += 2) {
     const key = rest[i].replace(/^--/, '');
-    if (!rest[i].startsWith('--') || !['a', 'b', 'a-effort', 'b-effort', 'mode'].includes(key)) {
-      throw new Error(`Unknown option: ${rest[i]}`);
-    }
+    if (!rest[i].startsWith('--') || !allowed.includes(key)) throw new Error(`Unknown option: ${rest[i]}`);
     if (options[key] !== undefined) throw new Error(`Duplicate option: ${rest[i]}`);
     if (!rest[i + 1] || rest[i + 1].startsWith('--')) throw new Error(`${rest[i]} requires a value`);
     options[key] = rest[i + 1];
@@ -107,11 +146,11 @@ async function main() {
   const skill = path.basename(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
   const { command, options } = parseOptions(process.argv.slice(2));
   if (command === '--help') {
-    process.stdout.write('review-config.mjs show|setup|resolve|reset\n' +
-      'setup/resolve: --a MODEL --b MODEL [--a-effort LEVEL] [--b-effort LEVEL] [--mode MODE]\n' +
-      'setup saves; resolve overrides for one run without saving; reset removes only this skill config.\n');
+    process.stdout.write('review-config.mjs show|catalog|setup|resolve|reset\n' +
+      'setup/resolve: --a-provider PROVIDER --a-runtime RUNTIME --a MODEL [--a-effort LEVEL] (same for B) [--mode MODE]\n');
     return;
   }
+  if (command === 'catalog') { process.stdout.write(JSON.stringify(catalog(), null, 2) + '\n'); return; }
   const file = configPath(skill);
   if (command === 'reset') {
     await fs.rm(file, { force: true });

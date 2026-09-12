@@ -8,13 +8,13 @@ verification, and shared engineering knowledge.
 | Skill | Purpose | Requirements |
 |---|---|---|
 | `pair-review` | Two distinct Claude models review independently, then collaborate or challenge each other. | Claude Code with access to two distinct models; Node.js 22+ |
-| `cross-review` | One Claude reviewer and one OpenAI Codex reviewer independently review and cross-examine findings. | Claude Code; authenticated Codex CLI; Node.js 22+ |
+| `cross-review` | Two different providers independently review and cross-examine findings. Supports Claude/Fable, Codex/OpenAI, and configured OpenCode providers. | Selected runtime(s); Node.js 22+ |
 | `shared-brain` | Search, capture, and migrate durable engineering knowledge across projects. | Compatible MCP knowledge backend; Python 3.11+ for profile validation |
 
 The review skills preserve independent first passes, require evidence for
 findings, retain unresolved disagreements, and record requested versus observed
-model configuration. `cross-review` sends reviewed material to both Anthropic
-and OpenAI.
+provider, runtime, model, and effort configuration. `cross-review` requires two
+different selected providers.
 
 ## Install
 
@@ -38,8 +38,10 @@ Install Shared Brain separately when its MCP backend is configured:
 
 ## Configure review models
 
-The first review asks for model choices and optional effort levels. Settings
-are saved outside the repository and can be changed at any time.
+The first review asks for provider, runtime, model, and optional effort choices.
+Codex setup offers `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6-luna`; Claude setup includes Fable when exposed by the harness.
+Settings are saved outside the repository and can be changed at any time.
 
 ```text
 /pair-review setup

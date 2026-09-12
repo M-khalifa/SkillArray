@@ -11,7 +11,7 @@ compatibility: >-
   reviewers with explicit model selection and resume or relay their findings.
   Claude Code is the primary target. Model access depends on the user's account.
 metadata:
-  version: 1.1.0
+  version: 1.2.0
 ---
 
 # Pair Review

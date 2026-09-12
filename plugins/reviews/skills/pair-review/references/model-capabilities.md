@@ -4,7 +4,7 @@ Do not ship a fixed model catalog as an entitlement list. Model names, supported
 effort levels, aliases, and access vary by account, provider, and harness version.
 Resolve availability at setup and revalidate before each review.
 
-## Claude seat
+## Claude-harness seat
 
 Inspect the current harness's model-selection interface and tool schema.
 A model available to the main chat is not necessarily selectable for a subagent.
@@ -27,11 +27,17 @@ a pinned ID.
 Source: [Claude Code subagent configuration](https://code.claude.com/docs/en/sub-agents).
 Runtime behavior takes precedence over examples; inspect the installed version.
 
+Fable is a selectable Claude-harness candidate when the installed model picker
+exposes it. Do not claim it is available merely because it appears in setup.
+
 ## Codex seat
 
 Verify CLI help and model availability in the installed CLI. Read only relevant
 nonsecret model/provider configuration if needed; do not dump authentication files.
-Cross-review requires the OpenAI provider, not merely a model name resembling GPT.
+When Codex is selected, the provider must be OpenAI, not merely a model name
+resembling GPT. Current curated choices are `gpt-6-astra`, `gpt-5.6-sol`,
+`gpt-5.6-terra`, and `gpt-5.6-luna`. The installed CLI and account entitlement
+remain authoritative.
 
 The bundled dispatcher forwards:
 - `--model MODEL` to Codex's `--model MODEL`.
@@ -49,6 +55,14 @@ effort took effect. Use `default` only in the preferences helper; omit
 Sources: [Codex CLI reference](https://developers.openai.com/codex/cli/reference)
 and [configuration reference](https://developers.openai.com/codex/config-reference).
 Run local CLI help before dispatch; no release-specific model default is assumed.
+
+## OpenCode seats
+
+OpenCode is an explicit bridge for configured providers such as Google, xAI,
+Mistral, Moonshot, DeepSeek, or OpenRouter. Run `opencode models` during setup
+and use only the provider/model IDs it advertises. Do not invent a provider
+catalog, assume a configured credential, or silently substitute OpenCode when
+the user selected another runtime.
 
 ## Reporting
 

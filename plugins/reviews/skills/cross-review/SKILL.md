@@ -1,32 +1,37 @@
 ---
 name: cross-review
 description: >-
-  Review code, designs, or documents with one Claude reviewer and one
-  OpenAI Codex reviewer, then cross-examine their findings. Includes
+  Review code, designs, or documents with two reviewer providers, then
+  cross-examine their findings. Supports Claude/Fable, OpenAI Codex, and
+  OpenCode-routed providers, with first-run model setup and saved preferences.
   first-run model setup, saved preferences, and changing models anytime.
   Use for cross-vendor review, Claude plus Codex review, or /cross-review.
 license: MIT
 compatibility: >-
-  Requires Node.js 22+, an installed authenticated Codex CLI, and a harness
-  that can run an isolated Claude reviewer and background shell processes.
+  Requires Node.js 22+, a selected reviewer runtime, and a harness that can run
+  an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.1.0
+  version: 1.2.0
 ---
 
 # Cross Review
 
-Reviewer A uses Claude; reviewer B uses OpenAI through Codex CLI.
-The orchestrator is neither reviewer. Choosing this skill opts into reviewing
-the supplied material through both providers; state the resolved pairing before
+Reviewer A and B use two different providers. The orchestrator is neither
+reviewer. A seat can use the Claude harness, Codex CLI, or OpenCode's configured
+provider bridge. State the resolved provider, runtime, model, and effort before
 dispatch. Do not change authentication or provider configuration during setup.
 
 ## Start here: model setup
 
 Read [references/configuration.md](references/configuration.md) before dispatch.
-Run the bundled configuration helper's `show` command. Without saved choices,
-ask the user to choose the Claude model, the OpenAI model, and optional effort
-levels before the first review. Do not inherit an unidentified Codex default.
+Run the bundled configuration helper's `show` and `catalog` commands. Without
+saved choices, ask for each seat's provider, runtime, model, and optional effort.
+Show the catalog returned by the helper. Fable must be offered with the Claude
+choices. Codex choices must include `gpt-6-astra`, `gpt-5.6-sol`,
+`gpt-5.6-terra`, and `gpt-5.6-luna`; never offer deprecated GPT-5.1 choices.
+For an OpenCode seat, run `opencode models` and show only configured providers
+and model IDs. Do not inherit an unidentified runtime default.
 
 `/cross-review setup` changes choices anytime; `/cross-review config` shows them.
 Natural-language requests to change either seat also enter setup. Setup, config,
@@ -38,16 +43,17 @@ and reset do not dispatch reviewers.
 /cross-review setup
 /cross-review config
 /cross-review reset
-/cross-review [claude-model[:effort]] [codex-model[:effort]] -- <task>
+/cross-review [reviewer-a] [reviewer-b] -- <task>
 ```
 
 Use the delimiter when task text could look like a model selector. Existing
 positional calls remain supported when unambiguous. IDs containing colons must
 be supplied as a named seat with a separate effort in natural language.
 
-Explicit choices override saved values for one run only. A changed model resets
-its old effort to `default` unless effort is also supplied. Cross-review always
-uses adversarial exchange. For two Claude reviewers or collaborative mode,
+Explicit choices override saved values for one run only. A changed provider,
+runtime, or model resets that seat's old effort to `default` unless effort is
+also supplied. Cross-review always uses adversarial exchange and requires
+different providers. For two Claude-harness reviewers or collaborative mode,
 use pair-review.
 
 ## Preflight
@@ -56,11 +62,11 @@ use pair-review.
    [references/model-capabilities.md](references/model-capabilities.md).
    Verify both models are available through their selected runtime. Unknown or
    unsupported explicit choices require user resolution, never silent fallback.
-2. Check `node --version`, `codex --version`, `codex login status`,
-   `codex exec --help`, and `codex exec resume --help`. Ensure the CLI accepts
-   the model and config flags needed by this run. Do not read credential files.
-   Confirm the effective Codex provider is OpenAI; custom-provider or local-model
-   routing does not satisfy this skill's vendor boundary.
+2. Check the selected runtime only: Claude harness model metadata for `claude`,
+   `codex --version`, `codex login status`, `codex exec --help`, and
+   `codex exec resume --help` for `codex`; or `opencode --version`,
+   `opencode models`, and `opencode run --help` for `opencode`. Do not read
+   credential files. Confirm the two selected provider IDs differ.
 3. Resolve this skill's actual directory from the loaded SKILL.md location.
    Verify the linked references and bundled dispatcher exist. No sibling skill
    installation is required.
@@ -82,18 +88,19 @@ reference for the phase being executed:
    verify contested claims and retain unresolved disagreements. At most one
    additional round, only when a concrete check can settle a high-stakes claim.
 
-Dispatch Codex with [scripts/codex-dispatch.mjs](scripts/codex-dispatch.mjs).
+Dispatch a Codex seat with [scripts/codex-dispatch.mjs](scripts/codex-dispatch.mjs)
+and an OpenCode seat with [scripts/opencode-dispatch.mjs](scripts/opencode-dispatch.mjs).
 Pass the resolved `--model` on every dispatch, including resume. Pass `--effort`
-only when explicitly selected; omit it for `default`. Snapshot these arguments
-for the run. The dispatcher does not load user preferences itself.
+only when the runtime supports and the user explicitly selected it; omit it for
+`default`. Claude seats use the harness's explicit model/effort mechanism.
+Snapshot all arguments for the run. Dispatchers do not load user preferences.
 
 Result metadata records requested model/effort; it is not proof of server-side
 selection. Use runtime evidence for resolved values, otherwise record `null`
 and explain what could not be verified. Any dispatcher error or missing seat
 means the review is incomplete; do not synthesize a completed two-vendor verdict.
 
-The optional bundled OpenCode helper is retained for existing integrations.
-It is not selected by this workflow and is never a silent Codex fallback.
+OpenCode is selected only when the user chose it. It is never a silent fallback.
 
 ## Maintenance
 
