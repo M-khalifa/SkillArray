@@ -27,7 +27,7 @@ Add this repository as a Claude Code marketplace:
 Install the review bundle:
 
 ```text
-/plugin install skill-array-reviews@skill-array
+/plugin install reviews@skill-array
 ```
 
 Install Shared Brain separately when its MCP backend is configured:

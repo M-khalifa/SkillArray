@@ -6,7 +6,7 @@
   },
   "plugins": [
     {
-      "name": "skill-array-reviews",
+      "name": "reviews",
       "description": "Same-vendor and cross-vendor multi-model code review skills: execution-gated, confidence-floored, refutation-asymmetric adversarial review.",
       "source": "./plugins/reviews"
     },
