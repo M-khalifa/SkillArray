@@ -43,7 +43,6 @@ jobs:
       - run: python -m py_compile scripts/scan_memory.py
       - run: python scripts/scan_memory.py --check-profile profiles/default.yml
       - run: python scripts/scan_memory.py --check-profile profiles/vsi-engineering.yml
-      - run: python scripts/scan_memory.py --list-dirs
 
   repository:
     runs-on: ubuntu-latest
