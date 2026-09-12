@@ -139,7 +139,7 @@ test('assertWin32Safe: rejects a percent sign (cmd.exe expands %VAR% inside doub
 });
 
 test('assertWin32Safe: accepts an ordinary path with no special characters', () => {
-  // Not skipped off win32 — no-throw is meaningful on every platform.
+  // Not skipped off win32: no-throw is meaningful on every platform.
   assert.doesNotThrow(() => assertWin32Safe('C:\\Users\\me\\repo'));
 });
 
@@ -148,10 +148,8 @@ test('assertWin32Safe: accepts a path with a space (not one of the rejected char
 });
 
 test('parseArgs: a trailing --session with no value is rejected, not silently treated as a fresh dispatch', () => {
-  // Regression test for a bug found in a codex-opus-review self-review: argv[++i] with no bounds
-  // check let a bare trailing --session silently resolve to undefined (falsy), which took the
-  // fresh-dispatch branch in runCodex instead of erroring -- defeating the whole point of Phase 2's
-  // resume discipline. Revert the takeValue() fix in parseArgs and this test goes red.
+  // A bare trailing --session must error, not resolve to undefined and fall into
+  // the fresh-dispatch branch, which would silently defeat Phase 2's resume discipline.
   assert.throws(
     () => parseArgs(['--brief', 'b.txt', '--cd', '.', '--session']),
     (err) => err instanceof RelayError && /--session requires a value/.test(err.message)
@@ -159,9 +157,8 @@ test('parseArgs: a trailing --session with no value is rejected, not silently tr
 });
 
 test('parseArgs: --session followed immediately by another flag is rejected, not consumed as the value', () => {
-  // Same bug, second shape: without the fix, `--session --cd /tmp` would have set
-  // args.session = '--cd' and then args.cd = argv[++i] again on the NEXT loop iteration,
-  // silently corrupting both values instead of erroring on the missing --session operand.
+  // `--session --cd /tmp` must not read '--cd' as the session value and then
+  // consume the real --cd on the next iteration, corrupting both.
   assert.throws(
     () => parseArgs(['--brief', 'b.txt', '--session', '--cd', '.']),
     (err) => err instanceof RelayError && /--session requires a value/.test(err.message)

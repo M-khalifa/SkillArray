@@ -49,6 +49,38 @@ A missing file is the first-run setup case. If saving is denied, state that
 choices were not saved; an explicitly selected temporary run can still use
 `resolve` without persistence.
 
+## Provider validation: catalogued providers plus a bounded OpenCode hatch
+
+A reviewer's `provider` is accepted in two ways:
+
+1. It is one of the keys in `provider-catalog.mjs`'s `PROVIDERS` map
+   (`anthropic`, `openai`, `google`, `xai`, `mistral`, `moonshot`, `deepseek`,
+   `openrouter`, `opencode`), on one of that entry's listed runtimes. Add a
+   genuinely new vendor here as a one-line `PROVIDERS` addition once it is
+   confirmed real (see `opencode models`, or the relevant CLI's own listing).
+2. Otherwise, only under the `opencode` runtime specifically: any plain
+   lowercase provider token (`/^[a-z][a-z0-9-]*$/`) is still accepted. This
+   exists because `opencode models` can advertise a provider that has not yet
+   been added to `PROVIDERS` — confirmed on this machine: it lists a bundled
+   `opencode/*` provider (e.g. `opencode/big-pickle`) under provider key
+   `opencode`, which was not one of the curated vendors until added here.
+   `PROVIDERS` is a curated list of known-good choices to present during setup,
+   not the sole source of truth for what OpenCode can actually route to.
+
+A garbage-shaped provider (containing `/`, `:`, uppercase letters, or path
+separators) is rejected either way, and a genuine JavaScript object-prototype
+key (`constructor`, `toString`, `valueOf`, `hasOwnProperty`, …) never crashes
+the helper — `isSupportedPair` uses `Object.hasOwn`, never a bare `[]`/`?.`
+lookup into `PROVIDERS`, specifically to avoid that.
+
+**Residual limitation, by design, not a bug:** a *typo* of a real provider
+name (`gogle` for `google`) is indistinguishable from a genuine uncatalogued
+vendor under rule 2 above, because this helper is local-preferences-only and
+does not shell out to `opencode models` to check (see Storage, above). That
+check belongs in the orchestrator's conversational setup step: run
+`opencode models` there and only offer/accept the providers it actually
+lists, rather than trusting arbitrary free text.
+
 ## Helper commands
 
 All commands work in PowerShell, bash, or zsh after substituting the quoted path

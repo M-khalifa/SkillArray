@@ -34,6 +34,28 @@ test('parseArgs: a missing --session/--model/--variant operand is rejected, neve
   assert.deepEqual([ok.session, ok.model, ok.variant], ['ses_1', 'p/m', 'high']);
 });
 
+test('parseArgs: --effort is accepted as an alias for --variant', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  const ok = parseArgs([...common, '--effort', 'high']);
+  assert.equal(ok.variant, 'high');
+});
+
+test('parseArgs: --model and --variant reject shell metacharacters and short-flag injection', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  assert.throws(() => parseArgs([...common, '--model', 'x; rm -rf /']), /model ID, not a shell expression/);
+  assert.throws(() => parseArgs([...common, '--variant', '; whoami']), /level token/);
+  assert.throws(
+    () => parseArgs([...common, '--model', '-s']),
+    (err) => err instanceof RelayError && err.message === '--model requires a value'
+  );
+  assert.throws(
+    () => parseArgs([...common, '--variant', '-h']),
+    (err) => err instanceof RelayError && err.message === '--variant requires a value'
+  );
+  const ok = parseArgs([...common, '--model', 'anthropic/claude-opus-5', '--variant', 'high']);
+  assert.deepEqual([ok.model, ok.variant], ['anthropic/claude-opus-5', 'high']);
+});
+
 test('buildOpencodeArgs: fresh dispatch attaches brief and requests JSON', () => {
   assert.deepEqual(
     buildOpencodeArgs({
@@ -138,10 +160,9 @@ test('assertWin32Safe: accepts ordinary paths and spaces', () => {
 });
 
 test('OPENCODE_SPAWN_STDIO: stdin is "ignore", not the pipe default', () => {
-  // Bare shape check — cheap, but by itself a weak regression guard: someone
-  // could rename this constant and inline a different value at the call
-  // site without this test noticing. The real guard is the behavioral test
-  // below, which proves *why* this value matters, not just what it is.
+  // Cheap but weak on its own: someone could rename this constant and inline
+  // a different value at the call site without this test noticing. The real
+  // guard is the behavioral test below.
   assert.deepEqual(OPENCODE_SPAWN_STDIO, ['ignore', 'pipe', 'pipe']);
 });
 
@@ -150,12 +171,10 @@ test(
     'stdin-EOF-waiting process; this exact stdio option is what prevents that',
   { timeout: 15000 },
   async () => {
-    // Stands in for `opencode run`, which the real bug report was about:
-    // a tiny Node one-liner that reads stdin to EOF before printing anything
-    // and exiting. Any process with this shape reproduces the hang mechanism
-    // this dispatch script hit — the point isn't to simulate OpenCode's CLI,
-    // it's to prove OPENCODE_SPAWN_STDIO actually changes whether such a
-    // process ever receives EOF.
+    // Stands in for `opencode run`: a tiny Node one-liner that reads stdin to
+    // EOF before printing anything and exiting. This isn't simulating OpenCode's
+    // CLI, it's proving OPENCODE_SPAWN_STDIO changes whether such a process
+    // ever receives EOF.
     const stdinWaiterScript =
       'process.stdin.resume();' +
       'process.stdin.on("end", () => { process.stdout.write("done"); process.exit(0); });';
@@ -172,10 +191,9 @@ test(
           resolve(result);
         };
         child.on('close', () => finish({ closed: true, out }));
-        // A real hang means no 'close' event ever fires. Detect that with a
-        // short timeout instead of waiting out the full suite timeout — an
-        // unresolved promise here would fail the test for the right reason
-        // (timeout) but with a less legible failure message.
+        // A real hang means no 'close' event ever fires. Use a short timeout
+        // instead of the full suite timeout so this fails with a legible
+        // message instead of a generic one.
         setTimeout(() => {
           if (!settled) {
             child.kill();
@@ -185,7 +203,7 @@ test(
       });
     }
 
-    // The bug: default stdio (an open, never-ended stdin pipe) — the child
+    // The bug: default stdio (an open, never-ended stdin pipe) means the child
     // never sees EOF, so it never prints "done" or closes within the window.
     const withDefaultStdio = await run(['pipe', 'pipe', 'pipe']);
     assert.equal(
@@ -195,8 +213,8 @@ test(
         'if this now closes, the reproduction itself has stopped working and this test needs review'
     );
 
-    // The fix: OPENCODE_SPAWN_STDIO's stdin is 'ignore' — Node closes stdin
-    // immediately, so a stdin-EOF-waiting process proceeds right away.
+    // The fix: OPENCODE_SPAWN_STDIO's stdin is 'ignore', so Node closes stdin
+    // immediately and a stdin-EOF-waiting process proceeds right away.
     const withFixStdio = await run(OPENCODE_SPAWN_STDIO);
     assert.equal(withFixStdio.closed, true, 'expected OPENCODE_SPAWN_STDIO to let the process complete');
     assert.equal(withFixStdio.out, 'done');

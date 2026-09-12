@@ -3,8 +3,8 @@ name: cross-review
 description: >-
   Review code, designs, or documents with two reviewer providers, then
   cross-examine their findings. Supports Claude/Fable, OpenAI Codex, and
-  OpenCode-routed providers, with first-run model setup and saved preferences.
-  first-run model setup, saved preferences, and changing models anytime.
+  OpenCode-routed providers, with first-run model setup, saved preferences,
+  and changing models anytime.
   Use for cross-vendor review, Claude plus Codex review, or /cross-review.
 license: MIT
 compatibility: >-
@@ -12,7 +12,7 @@ compatibility: >-
   an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.2.0
+  version: 1.2.1
 ---
 
 # Cross Review

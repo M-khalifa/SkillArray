@@ -9,19 +9,19 @@
 // than assumed from Codex's behavior. Three real differences from Codex,
 // each confirmed by running the actual CLI before writing this code:
 //
-//   1. `opencode run` takes its message as a POSITIONAL ARGUMENT, not stdin —
+//   1. `opencode run` takes its message as a POSITIONAL ARGUMENT, not stdin;
 //      the CONTENT of a piped stdin is not read as the message. It does
 //      still wait for stdin to reach EOF before proceeding, though (see the
-//      OPENCODE_SPAWN_STDIO comment below — this is NOT "stdin is ignored").
+//      OPENCODE_SPAWN_STDIO comment below, this is NOT "stdin is ignored").
 //      A long brief passed positionally risks Windows's ~8191-char
 //      command-line limit, so this script attaches the caller's own --brief
 //      file with `-f` instead of inlining it (no copy is made; the file is
-//      read once only to confirm it is readable) — verified working:
+//      read once only to confirm it is readable). Verified working:
 //      OpenCode reads the attached file's content and follows its
 //      instructions, not the wrapper message text.
 //   2. Session resume is `-s <sessionID>`, not a `resume` subcommand, and it
-//      does NOT drop --dir the way Codex's `exec resume` drops --cd/--sandbox
-//      -- --dir is still meaningful and forwarded on resume. This has not
+//      does NOT drop --dir the way Codex's `exec resume` drops --cd/--sandbox,
+//      --dir is still meaningful and forwarded on resume. This has not
 //      been exhaustively verified across every flag; treat any assumption
 //      not stated here as unconfirmed.
 //   3. The JSON event vocabulary is entirely different from Codex's
@@ -32,9 +32,9 @@
 //
 // Non-goals (same spirit as codex-dispatch.mjs's non-goals list): multi-model
 // routing beyond a single `-m`/`--model` and `--variant` pass-through,
-// --timeout/watchdog, provider auth setup (run `opencode auth` yourself
-// first — this script assumes it already works, exactly as codex-dispatch.mjs
-// assumes `codex login` already succeeded).
+// --timeout/watchdog, provider auth setup (run `opencode auth` yourself first;
+// this script assumes it already works, same as codex-dispatch.mjs assumes
+// `codex login` already succeeded).
 
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
@@ -96,7 +96,8 @@ Optional:
                          (e.g. "anthropic/claude-opus-5"). Omit to use OpenCode's own default.
   --variant <level>      Passed through to "opencode run --variant <level>" — OpenCode's name
                          for reasoning effort (e.g. high, max, minimal). Omit to use the
-                         model's own default.
+                         model's own default. "--effort" is accepted as an alias so the
+                         orchestrator can pass one flag name to either dispatcher.
   --skip-git-repo-check  No-op here (OpenCode has no equivalent flag); accepted only so a
                          caller that always passes it for parity with codex-dispatch.mjs does
                          not need a vendor-specific branch.
@@ -137,7 +138,7 @@ function parseArgs(argv) {
     // followed by another flag) must error, not silently become a fresh run.
     const takeValue = () => {
       const value = argv[++i];
-      if (!value || value.startsWith('--')) {
+      if (!value || value.startsWith('-')) {
         throw new RelayError(`${tok} requires a value`);
       }
       return value;
@@ -160,6 +161,7 @@ function parseArgs(argv) {
         args.model = takeValue();
         break;
       case '--variant':
+      case '--effort':
         args.variant = takeValue();
         break;
       case '--skip-git-repo-check':
@@ -171,6 +173,12 @@ function parseArgs(argv) {
   }
   if (!args.brief) throw new RelayError('--brief <path> is required');
   if (!args.cd) throw new RelayError('--cd <path> is required');
+  if (args.model !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(args.model)) {
+    throw new RelayError('--model must be a model ID, not a shell expression');
+  }
+  if (args.variant !== null && !/^[a-z][a-z0-9_-]*$/.test(args.variant)) {
+    throw new RelayError('--variant must be a level token; omit it for default effort');
+  }
   return args;
 }
 
@@ -180,7 +188,7 @@ function log(msg) {
   process.stderr.write(`relay: ${msg}\n`);
 }
 
-// Same git-porcelain helpers as codex-dispatch.mjs — vendor-agnostic, reused verbatim.
+// Same git-porcelain helpers as codex-dispatch.mjs, vendor-agnostic, reused verbatim.
 function runCapture(cmd, args, cwd) {
   return new Promise((resolve) => {
     const child = spawnCli(cmd, args, { cwd });
@@ -272,9 +280,9 @@ async function checkCdExists(cdPath) {
 // a file (verified: OpenCode reads and follows an attached file's content).
 //
 // NOTE on stdin: OpenCode does not take the brief FROM stdin, but it does not
-// ignore stdin either — it waits for EOF on it. See the stdio comment in
+// ignore stdin either, it waits for EOF on it. See the stdio comment in
 // runOpencode below; passing an open, never-ended stdin pipe hangs the run
-// forever. "stdin is not read at all" (an earlier note here) is wrong.
+// forever.
 function buildOpencodeArgs({ briefPath, cd, session, model, variant }) {
   const args = ['run', 'Read the attached brief file and follow its instructions exactly.'];
   args.push('-f', briefPath);
@@ -286,21 +294,16 @@ function buildOpencodeArgs({ briefPath, cd, session, model, variant }) {
   return args;
 }
 
-// stdin MUST be 'ignore', not the default 'pipe'. Verified 2026-08-30: with a
-// default (open, never-ended) stdin pipe, `opencode run` blocks forever and
-// emits ZERO bytes on stdout — the whole dispatch hangs. It is waiting on
-// stdin EOF. Confirmed both directions: 'ignore' completes in ~29s exit 0,
-// and an explicit child.stdin.end() immediately after spawn also completes
-// (~28s), proving the trigger is the missing EOF rather than the pipe's
-// existence. The file-header note "opencode run does not read stdin" was
-// verified by piping content IN (write-then-close, which supplies EOF) —
-// open-and-idle was the untested case, and it hangs.
+// stdin MUST be 'ignore', not the default 'pipe'. With a default (open,
+// never-ended) stdin pipe, `opencode run` blocks forever and emits ZERO bytes
+// on stdout, it's waiting on stdin EOF. Confirmed both directions: 'ignore'
+// completes in ~29s exit 0, and an explicit child.stdin.end() immediately
+// after spawn also completes (~28s), so the trigger is the missing EOF, not
+// the pipe's existence.
 //
 // Extracted to its own constant (rather than inlined in the spawnCli call
-// below) specifically so a unit test can assert on it without spawning a
-// live process — this exact regression (an edit accidentally reverting to
-// the default stdio) is otherwise invisible to the pure-function test suite,
-// since runOpencode's actual spawn behavior can't be exercised without a
+// below) so a unit test can assert on it without spawning a live process;
+// runOpencode's actual spawn behavior can't otherwise be exercised without a
 // real `opencode` binary. See scripts/tests/opencode-dispatch.test.mjs.
 const OPENCODE_SPAWN_STDIO = ['ignore', 'pipe', 'pipe'];
 
@@ -363,8 +366,8 @@ function runOpencode({ briefPath, cd, session, model, variant }) {
   });
 }
 
-// Same fail-closed principle as codex-dispatch.mjs's checkSessionIdentity:
-// a resume must echo back the exact requested sessionID.
+// Same fail-closed principle as codex-dispatch.mjs's checkSessionIdentity: a
+// resume must echo back the exact requested sessionID.
 function checkSessionIdentity({ session, observedSessionId }) {
   if (!observedSessionId) {
     return session

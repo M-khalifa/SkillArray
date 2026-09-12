@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { configPath, readConfig, writeConfig, resolveConfig, parseOptions } from '../review-config.mjs';
+import { isSupportedPair } from '../provider-catalog.mjs';
 
 test('first setup requires two distinct pair models', () => {
   assert.throws(() => resolveConfig(null, 'pair-review', { a: 'opus' }), /Invalid reviewer B/);
@@ -134,6 +135,52 @@ test('CLI setup, resolve, reconfigure, show, reset preserve per-skill isolation'
   assert.equal(invoke('show').configured, false);
   assert.equal(await fs.readFile(other, 'utf8'), 'untouched');
   await assert.rejects(fs.stat(path.join(dir, skill + '.json')), { code: 'ENOENT' });
+});
+
+test('an uncatalogued but well-formed provider is accepted only under the opencode runtime', () => {
+  const c = resolveConfig(null, 'cross-review', {
+    'a-provider': 'groq', 'a-runtime': 'opencode', a: 'groq/llama',
+    'b-provider': 'openai', b: 'gpt-6-astra',
+  });
+  assert.equal(c.reviewers.A.provider, 'groq');
+  const noRuntime = resolveConfig(null, 'cross-review', {
+    'a-provider': 'groq', a: 'groq/llama', 'b-provider': 'openai', b: 'gpt-6-astra',
+  });
+  assert.equal(noRuntime.reviewers.A.runtime, 'opencode');
+  assert.throws(() => resolveConfig(null, 'cross-review', {
+    'a-provider': 'groq', 'a-runtime': 'claude', a: 'groq/llama',
+    'b-provider': 'openai', b: 'gpt-6-astra',
+  }), /Invalid reviewer A/);
+});
+
+test('a garbage-shaped or prototype-chain provider name is rejected even under the opencode runtime, and never crashes', () => {
+  for (const bad of ['x/y:z', '../../etc/passwd', 'Google', '', 'a b']) {
+    assert.throws(() => resolveConfig(null, 'cross-review', {
+      'a-provider': bad, 'a-runtime': 'opencode', a: 'm', 'b-provider': 'openai', b: 'gpt-6-astra',
+    }), /Invalid reviewer A/, `expected "${bad}" to be rejected`);
+  }
+  for (const proto of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    assert.doesNotThrow(() => isSupportedPair(proto, 'opencode'));
+    assert.throws(() => resolveConfig(null, 'cross-review', {
+      'a-provider': proto, 'a-runtime': 'claude', a: 'm', 'b-provider': 'openai', b: 'gpt-6-astra',
+    }), /Invalid reviewer A/, `expected "${proto}" under claude runtime to be rejected, not crash`);
+  }
+});
+
+test('isSupportedPair truth table: catalog providers, the opencode bounded hatch, and prototype-chain keys', () => {
+  assert.equal(isSupportedPair('anthropic', 'claude'), true);
+  assert.equal(isSupportedPair('openai', 'codex'), true);
+  assert.equal(isSupportedPair('google', 'opencode'), true);
+  assert.equal(isSupportedPair('opencode', 'opencode'), true);
+  assert.equal(isSupportedPair('anthropic', 'codex'), false);
+  assert.equal(isSupportedPair('groq', 'opencode'), true);
+  assert.equal(isSupportedPair('groq', 'claude'), false);
+  assert.equal(isSupportedPair('x/y:z', 'opencode'), false);
+  assert.equal(isSupportedPair('constructor', 'opencode'), true);
+  assert.equal(isSupportedPair('constructor', 'claude'), false);
+  assert.equal(isSupportedPair('toString', 'claude'), false);
+  assert.equal(isSupportedPair(123, 'claude'), false);
+  assert.equal(isSupportedPair('anthropic', null), false);
 });
 
 test('catalog command exposes current OpenAI tiers and Fable', () => {

@@ -2,9 +2,9 @@
 // Wraps `codex exec` for cross-review: sends a brief, captures the
 // --json event stream, writes a structured result.json next to the brief.
 
-// Originally checked on codex-cli 0.147.0: `exec resume` doesn't accept -s/--sandbox or -C/--cd,
-// it reuses the resumed session's own sandbox and cwd. Prompt goes over
-// stdin ("-"); finalMessage is the last item.completed agent_message seen.
+// `exec resume` doesn't accept -s/--sandbox or -C/--cd, it reuses the resumed
+// session's own sandbox and cwd. Prompt goes over stdin ("-"); finalMessage
+// is the last item.completed agent_message seen.
 
 // Non-goals: multi-provider routing, --clean-env/--keep-env, --resume-last,
 // --timeout/watchdog, --out-dir.
@@ -21,7 +21,7 @@ import { pathToFileURL } from 'node:url';
 const NEEDS_SHELL = process.platform === 'win32';
 
 // cmd.exe can break out of a quoted arg on an embedded `"`, `%VAR%` expansion,
-// or trailing `\` (arg injection) — reject those instead of trying to escape them.
+// or trailing `\` (arg injection), so reject those instead of trying to escape them.
 const WIN32_UNSAFE_CHARS = /["%]|\\$/;
 
 function assertWin32Safe(arg) {
@@ -137,7 +137,7 @@ function parseArgs(argv) {
     const tok = argv[i];
     const takeValue = () => {
       const value = argv[++i];
-      if (!value || value.startsWith('--')) {
+      if (!value || value.startsWith('-')) {
         throw new RelayError(`${tok} requires a value`);
       }
       return value;
@@ -222,10 +222,10 @@ async function gitStatusPorcelain(cwd) {
   return res.stdout;
 }
 
-// { code, paths } per record — paths has length 2 for rename/copy
+// { code, paths } per record, paths has length 2 for rename/copy
 // ([newPath, oldPath], two consecutive NUL-terminated -z fields), else 1.
-// Structured, not joined-then-split: a filename containing " -> " would
-// otherwise be misparsed as a rename.
+// Structured, not joined-then-split, so a filename containing " -> " isn't
+// misparsed as a rename.
 function parsePorcelainRecords(porcelainZ) {
   const records = [];
   const fields = porcelainZ.split('\0').filter((f) => f.length > 0);
@@ -248,7 +248,7 @@ function parsePorcelainPaths(record) {
   return new Set(record.paths);
 }
 
-// Keyed on code+paths, not just paths — a status-code-only change (" M" -> "MM")
+// Keyed on code+paths, not just paths: a status-code-only change (" M" -> "MM")
 // is still a real diff. NUL-joined since it's the one byte -z guarantees absent from a path.
 function recordKey(record) {
   return record.code + '\0' + record.paths.join('\0');
@@ -373,9 +373,9 @@ function runCodex(options) {
   });
 }
 
-// Fails closed rather than trusting whatever thread_id the child emits (or
-// doesn't): a resume must echo back the exact requested id, or a caller can
-// silently receive a fresh, context-free session as if it were resumed.
+// Fails closed rather than trusting whatever thread_id the child emits: a
+// resume must echo back the exact requested id, or a caller can silently get
+// a fresh, context-free session instead of the one it asked to resume.
 function checkSessionIdentity({ session, observedThreadId }) {
   if (!observedThreadId) {
     return session
@@ -563,9 +563,9 @@ async function main() {
   process.exit(0);
 }
 
-// Guards so the test file can import the pure functions below without triggering
-// a live run. pathToFileURL, not string concat: a hand-built file:// URL is
-// missing the third slash a Windows drive letter needs and silently never matches.
+// Lets the test file import the pure functions below without triggering a live
+// run. pathToFileURL, not string concat: a hand-built file:// URL is missing
+// the third slash a Windows drive letter needs and silently never matches.
 const isDirectRun =
   typeof process.argv[1] === 'string' &&
   import.meta.url === pathToFileURL(process.argv[1]).href;

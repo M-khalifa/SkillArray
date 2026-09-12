@@ -48,11 +48,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------------
-# Locations -- discovered, never hardcoded.
-#
-# An earlier version pinned one absolute Windows path, which meant the script
-# only ran on one machine and one project. Everything below resolves at runtime
-# so the same file works on Windows, Linux, and macOS, for any user.
+# Locations -- discovered, never hardcoded, so this runs on any machine and project.
 # ---------------------------------------------------------------------------
 
 def claude_home() -> Path:
@@ -174,12 +170,11 @@ SECRET_PATTERNS: list = [
 
 # Allowlisted non-secrets that the broad patterns above would otherwise trip on.
 #
-# Keep this list SHORT and each entry narrow. An earlier version carried a
-# "version-like triple" rule -- ^\d{1,3}(\.\d{1,3}){3}$ -- meant to spare strings
-# like "2.5.10.1". Every dotted quad matches that shape, so it exempted
-# 192.168.1.50 and every other real address: the entire ipv4 pattern was dead.
-# A permissive allowlist silently disables the rule above it, which is worse than
-# having no rule at all, because the table still claims coverage.
+# Keep this list SHORT and each entry narrow. A "version-like triple" rule
+# (^\d{1,3}(\.\d{1,3}){3}$, meant to spare strings like "2.5.10.1") matches every
+# dotted quad, so it would exempt 192.168.1.50 and every other real address too,
+# killing the whole ipv4 pattern. A permissive allowlist silently disables the
+# rule above it, which is worse than no rule, since the table still claims coverage.
 SECRET_ALLOWLIST: list = [
     re.compile(r"^(?:127\.0\.0\.1|0\.0\.0\.0|255\.255\.255\.255)$"),
     re.compile(r"^(?:localhost|example\.com|example\.org)$"),
@@ -189,11 +184,10 @@ SECRET_ALLOWLIST: list = [
 ]
 
 # A version string and an IP are the same shape, so shape alone cannot separate
-# them. An earlier attempt scanned the whole LINE for version vocabulary and
-# suppressed the hit if found. That failed badly in this domain, where addresses
-# and versions routinely share a sentence -- "ONTAP 9.13 cluster mgmt lif is
-# 10.5.5.5" leaked, as did four of five other realistic storage sentences. Any
-# heuristic keyed on neighbouring words has the same flaw.
+# them, and neither can scanning the whole line for version vocabulary: addresses
+# and versions routinely share a sentence ("ONTAP 9.13 cluster mgmt lif is
+# 10.5.5.5" leaks under that approach, as do most realistic storage sentences).
+# Any heuristic keyed on neighbouring words has the same flaw.
 #
 # Judge the TOKEN instead. A version is introduced by a marker attached to it
 # ("v1.4.0.2", "version 2.5.10.1") or has a component above 255, which no octet
@@ -309,11 +303,10 @@ def parse_frontmatter(fm: str) -> dict:
     try:
         import yaml  # type: ignore
     except ImportError:
-        # No PyYAML. Do NOT guess with a hand-rolled parser -- the old one
-        # hoisted nested keys and let duplicates win, which could mask a
-        # `type: user` that must hard-block. Fail closed instead: every file
-        # becomes a BLOCK row with a clear reason, so a missing dependency
-        # can never turn into a silent publish. Install pyyaml to proceed.
+        # No PyYAML. Do NOT guess with a hand-rolled parser: a naive one can
+        # hoist nested keys and let duplicates win, masking a `type: user` that
+        # must hard-block. Fail closed instead so a missing dependency can
+        # never turn into a silent publish.
         raise FrontmatterError(
             "PyYAML not installed -- cannot parse frontmatter safely. "
             "Every file will BLOCK until you `pip install pyyaml`. "
@@ -466,13 +459,11 @@ def thought_hash(final_text: str) -> str:
 def source_id(slug: str, project: str = "") -> str:
     """Opaque, stable source identity for the published marker.
 
-    The marker used to embed the raw filename stem. Filenames can name a
-    customer, a host, or a person, and the marker survives every scrub applied
-    to the body -- so publish a hash instead.
-
-    Hashing the bare slug collided across projects: the same filename exists in
-    many memory dirs, so two different lessons produced one marker and the
-    store's dedup could not tell them apart. Qualify with the project.
+    Never the raw filename stem: filenames can name a customer, a host, or a
+    person, and the marker survives every scrub applied to the body. Never the
+    bare slug either: the same filename exists in many memory dirs, so two
+    different lessons would produce one marker and defeat the store's dedup.
+    Hash the slug qualified by project instead.
     """
     key = "{}/{}".format(project, slug) if project else slug
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]

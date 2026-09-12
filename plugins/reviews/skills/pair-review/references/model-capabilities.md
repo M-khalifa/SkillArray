@@ -59,10 +59,24 @@ Run local CLI help before dispatch; no release-specific model default is assumed
 ## OpenCode seats
 
 OpenCode is an explicit bridge for configured providers such as Google, xAI,
-Mistral, Moonshot, DeepSeek, or OpenRouter. Run `opencode models` during setup
-and use only the provider/model IDs it advertises. Do not invent a provider
-catalog, assume a configured credential, or silently substitute OpenCode when
-the user selected another runtime.
+Mistral, Moonshot, DeepSeek, or OpenRouter, plus vendors OpenCode itself bundles
+(e.g. a provider literally named `opencode`, confirmed via `opencode models`).
+Run `opencode models` during setup and use only the provider/model IDs it
+advertises. Do not assume a configured credential, or silently substitute
+OpenCode when the user selected another runtime.
+
+**No CLI-level read-only sandbox exists for OpenCode, verified.** `opencode run
+--help` (v1.18.25) has no `--sandbox`/`--read-only` flag; the closest option is
+`--auto` (auto-approve permissions), which is the opposite of a restriction, not
+a safety mechanism, and is never passed by this skill. OpenCode's permission
+model is per-agent/config-based, not a dispatch-time flag this skill's
+dispatcher can force. Consequently `review-protocol.md`'s read-only guarantee
+holds for a Codex seat (enforced by `codex exec --sandbox read-only`) but NOT
+for an OpenCode seat — `opencode-dispatch.mjs`'s `touchedFiles` is detection
+after the fact, never prevention. Require a clean git baseline before an
+OpenCode-seated run so that detection is meaningful, and treat any non-empty
+`touchedFiles` from an OpenCode seat as a real incident requiring investigation,
+not a benign log line.
 
 ## Reporting
 

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { catalog, isSupportedPair } from './provider-catalog.mjs';
+import { catalog, isSupportedPair, PROVIDERS } from './provider-catalog.mjs';
 
 const SKILLS = ['pair-review', 'cross-review'];
 const MODES = ['collaborate', 'adversarial', 'none'];
@@ -21,7 +21,9 @@ export function configPath(skill, env = process.env, home = os.homedir()) {
 }
 
 function defaultRuntime(provider) {
-  return provider === 'anthropic' ? 'claude' : provider === 'openai' ? 'codex' : 'opencode';
+  if (Object.hasOwn(PROVIDERS, provider)) return PROVIDERS[provider].runtimes[0];
+  // opencode is the only runtime that accepts an uncatalogued provider.
+  return 'opencode';
 }
 
 function normalizeConfig(config, skill) {
@@ -147,7 +149,8 @@ async function main() {
   const { command, options } = parseOptions(process.argv.slice(2));
   if (command === '--help') {
     process.stdout.write('review-config.mjs show|catalog|setup|resolve|reset\n' +
-      'setup/resolve: --a-provider PROVIDER --a-runtime RUNTIME --a MODEL [--a-effort LEVEL] (same for B) [--mode MODE]\n');
+      'setup/resolve: --a-provider PROVIDER --a-runtime RUNTIME --a MODEL [--a-effort LEVEL] (same for B) [--mode MODE]\n' +
+      'setup saves; resolve overrides for one run without saving; reset removes only this skill config.\n');
     return;
   }
   if (command === 'catalog') { process.stdout.write(JSON.stringify(catalog(), null, 2) + '\n'); return; }

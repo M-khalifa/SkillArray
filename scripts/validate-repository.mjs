@@ -64,7 +64,7 @@ async function main() {
 
   const reviews = await readJson("plugins/reviews/.claude-plugin/plugin.json");
   assert(reviews.name === "skill-array-reviews", "unexpected reviews plugin name");
-  assert(reviews.version === "1.2.0", "reviews plugin version must be 1.2.0");
+  assert(reviews.version === "1.2.1", "reviews plugin version must be 1.2.1");
 
   const pairVersion = await readSkillVersion(
     "plugins/reviews/skills/pair-review/SKILL.md",
@@ -83,6 +83,22 @@ async function main() {
     );
     const cross = await readFile(
       await requireFile(path.join("plugins/reviews/skills/cross-review/references", file)),
+    );
+    assert(pair.equals(cross), `${file}: pair-review and cross-review copies differ`);
+  }
+
+  // SKILL.md's Maintenance section names these as shared; parity is enforced, not assumed.
+  for (const file of [
+    "scripts/review-config.mjs",
+    "scripts/provider-catalog.mjs",
+    "scripts/tests/review-config.test.mjs",
+    "scripts/validate-package.mjs",
+  ]) {
+    const pair = await readFile(
+      await requireFile(path.join("plugins/reviews/skills/pair-review", file)),
+    );
+    const cross = await readFile(
+      await requireFile(path.join("plugins/reviews/skills/cross-review", file)),
     );
     assert(pair.equals(cross), `${file}: pair-review and cross-review copies differ`);
   }

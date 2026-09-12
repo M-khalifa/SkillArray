@@ -21,10 +21,11 @@ State how many LOW-confidence claims were filtered; never filter EXECUTED + FAIL
 
 Only one additional round is allowed when a high-stakes unresolved claim has a
 concrete check that could settle it. Reuse the same reviewer identities, model
-and effort snapshot, exact Codex thread ID, target directory, and read-only
-sandbox. Put its brief and result in `<run-dir>/phase4/`. Follow Phase 2's
-argument forwarding and completion checks. Then report the final state,
-resolved or not; never loop.
+and effort snapshot, exact seat B session ID, target directory, and (for a
+Codex seat B) read-only sandbox — an OpenCode seat B has no equivalent flag to
+reuse; rely on `touchedFiles` detection instead, same as prior phases. Put its
+brief and result in `<run-dir>/phase4/`. Follow Phase 2's argument forwarding
+and completion checks. Then report the final state, resolved or not; never loop.
 
 ## Report
 
