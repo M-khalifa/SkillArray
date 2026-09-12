@@ -1,0 +1,19 @@
+{
+  "name": "skill-array",
+  "description": "Production-ready Claude Code skills for multi-model review, cross-vendor verification, and shared engineering knowledge.",
+  "owner": {
+    "name": "Mahmoud Khalifa"
+  },
+  "plugins": [
+    {
+      "name": "skill-array-reviews",
+      "description": "Same-vendor and cross-vendor multi-model code review skills: execution-gated, confidence-floored, refutation-asymmetric adversarial review.",
+      "source": "./plugins/reviews"
+    },
+    {
+      "name": "shared-brain",
+      "description": "A shared, cross-project engineering knowledge store: search, capture, and migrate durable lessons via an MCP backend. Separate opt-in plugin, not installed automatically with the review skills.",
+      "source": "./plugins/shared-brain"
+    }
+  ]
+}

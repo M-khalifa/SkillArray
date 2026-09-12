@@ -1,0 +1,40 @@
+# Worked example: the VSI/Cerebro project profile, extracted verbatim from
+# open-brain's Rule 6 (references/memory-sync.md in the open-brain skill).
+#
+# This file is an EXAMPLE of how to write a project profile — it is not
+# loaded by default. A user working in the VSI/Cerebro codebase would copy
+# this alongside their project config; a user working elsewhere writes
+# their own equivalent, following this shape.
+
+project: vsi-engineering
+
+allowlist:
+  - "VSI product code or its data behavior"
+  - "a supported storage or vendor API"
+  - "the VSI collector/parser framework and its conventions"
+  - "Cerebro mechanics only where they are required to build or test VSI
+    code — a gate that blocks a collector, a phase contract a ticket must
+    satisfy"
+
+blocklist:
+  - "model selection"
+  - "prompting technique"
+  - "agent delegation and orchestration"
+  - "commit and git workflow"
+  - "communication style"
+  - "agent-reliability observations (\"Sonnet over-infers on bug hunts\" reads
+    like an engineering finding and is a working-style instruction — it does
+    not publish)"
+
+tiebreaker: >-
+  Publish if the lesson names a specific check, contract, or vendor
+  behavior that constrains real code, even when it also observes agent
+  behavior. Block if the observation about the agent is the whole content,
+  with no named artifact a future ticket must satisfy. "Four gates were
+  added: check_novel_vendor_auth_field_proof, check_snapshot_separation"
+  names artifacts; "agents ignore rules under pressure" names nothing.
+
+notes: >-
+  This is the exact policy open-brain has used in production for VSI/
+  Cerebro. Kept here unchanged as the reference example other project
+  profiles should follow the shape of, not the content of.

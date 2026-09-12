@@ -1,0 +1,47 @@
+# Default publication policy for shared-brain.
+#
+# This is the policy that ships with the skill when no project-specific
+# profile is configured. It is deliberately narrow and domain-agnostic —
+# it does not know about VSI, Cerebro, or any specific product. If you're
+# working in a specific codebase, write a project profile (see
+# profiles/vsi-engineering.yml for a worked example) and point setup at it
+# instead of editing this file.
+
+allowlist:
+  # Publish only if the lesson is about one of these. Each entry should be
+  # a short, checkable category — not a vague catch-all. This is the direct
+  # generalization of open-brain's Rule 6; swap this list per project, keep
+  # the mechanical rest of the filter (rules 0-5, 7, the tiebreaker logic,
+  # the verification gate) unchanged.
+  - "the product's own code or its data/runtime behavior"
+  - "a third-party API or vendor system the product integrates with"
+  - "the project's own framework conventions (established by reading the
+    code, not assumed from a style guide)"
+  - "build/test/CI mechanics only where they are required to build or test
+    the product's own code — a gate that blocks a build, a contract a task
+    must satisfy"
+
+blocklist:
+  # Categorically blocked even when phrased as a general engineering fact,
+  # because these are instructions about how to run an AI assistant rather
+  # than facts about the product.
+  - "model selection"
+  - "prompting technique"
+  - "agent delegation and orchestration"
+  - "commit and git workflow"
+  - "communication style"
+  - "agent-reliability observations (e.g. \"model X over-infers on bug hunts\")"
+
+tiebreaker: >-
+  For a file that satisfies the allowlist AND the blocklist at once: publish
+  if the lesson names a specific check, contract, or external-system
+  behavior that constrains real code, even when it also observes agent
+  behavior. Block if the observation about the agent is the whole content,
+  with no named artifact a future task must satisfy. The test is whether a
+  reader gets something to do or verify.
+
+notes: >-
+  This profile intentionally has no product-specific nouns in it. If you
+  find yourself editing this file to add a specific product/team name,
+  you're writing a project profile — copy this file to
+  profiles/<project-name>.yml instead and edit the copy.

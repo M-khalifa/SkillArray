@@ -1,0 +1,8 @@
+{
+  "name": "skill-array-reviews",
+  "description": "Same-vendor and cross-vendor multi-model code review skills: execution-gated, confidence-floored, refutation-asymmetric adversarial review.",
+  "version": "1.1.0",
+  "author": {
+    "name": "Mahmoud Khalifa"
+  }
+}
