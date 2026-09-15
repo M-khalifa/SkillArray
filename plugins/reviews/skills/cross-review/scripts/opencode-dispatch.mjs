@@ -31,24 +31,25 @@
 //      `part.text` on a `type: "text"` event's `part.type === "text"`.
 //
 // Non-goals (same spirit as codex-dispatch.mjs's non-goals list): multi-model
-// routing beyond a single `-m`/`--model` and `--variant` pass-through,
-// --timeout/watchdog, provider auth setup (run `opencode auth` yourself first;
-// this script assumes it already works, same as codex-dispatch.mjs assumes
-// `codex login` already succeeded).
+// routing beyond a single `-m`/`--model` and `--variant` pass-through, provider
+// auth setup (run `opencode auth` yourself first; this script assumes it
+// already works, same as codex-dispatch.mjs assumes `codex login` already
+// succeeded).
 
 import { spawn } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { promises as fs, createReadStream } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const NEEDS_SHELL = process.platform === 'win32';
 
 const WIN32_UNSAFE_CHARS = /["%]|\\$/;
 
-function assertWin32Safe(arg) {
-  if (NEEDS_SHELL && WIN32_UNSAFE_CHARS.test(String(arg))) {
+function assertWin32Safe(arg, { platform = process.platform } = {}) {
+  if (platform === 'win32' && WIN32_UNSAFE_CHARS.test(String(arg))) {
     throw new RelayError(
       `argument "${arg}" contains a character unsafe to pass through cmd.exe on Windows ` +
         `(a double quote, a percent sign, or a trailing backslash) — rename the path/value ` +
@@ -62,20 +63,87 @@ function winQuote(arg) {
   return `"${String(arg).replace(/"/g, '\\"')}"`;
 }
 
-function spawnCli(cmd, args, opts) {
+// child.killed means the signal was sent, not that the process exited, so it
+// never reflects whether SIGTERM actually worked; escalation must wait for
+// the real 'exit' event instead. Killing the negative pid targets the whole
+// process group (spawnCli sets detached:true on POSIX for this reason), not
+// just the direct child, so a forked grandchild doesn't get orphaned.
+function posixKillTree(child, { kill = (pid, sig) => process.kill(pid, sig), escalateMs = 5000 } = {}) {
+  return new Promise((resolvePromise) => {
+    if (!child.pid) { resolvePromise(); return; }
+    let exited = false;
+    child.once('exit', () => { exited = true; resolvePromise(); });
+    const send = (sig) => {
+      try { kill(-child.pid, sig); } catch (err) { if (err.code !== 'ESRCH') throw err; }
+    };
+    send('SIGTERM');
+    setTimeout(() => {
+      if (exited) return;
+      send('SIGKILL');
+      // Bound the wait even if the group ignores SIGKILL (e.g. already reaped).
+      setTimeout(() => { if (!exited) resolvePromise(); }, 1000);
+    }, escalateMs);
+  });
+}
+
+// On win32, spawnCli runs the child under cmd.exe (shell:true), so child.pid is
+// cmd.exe's PID and child.kill() only terminates cmd.exe; opencode.exe behind
+// the shim would be orphaned and keep running. taskkill /T kills the whole tree.
+function killTree(child) {
   if (NEEDS_SHELL) {
-    for (const a of [cmd, ...args]) assertWin32Safe(a);
-    const cmdLine = [winQuote(cmd), ...args.map(winQuote)].join(' ');
-    return spawn(cmdLine, { ...opts, shell: true });
+    // Absolute path, not "taskkill": a caller may have narrowed PATH down to
+    // just the CLI it wants dispatched, and taskkill.exe would not resolve.
+    const taskkillPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+    return new Promise((resolvePromise) => {
+      const killer = spawn(taskkillPath, ['/pid', String(child.pid), '/T', '/F']);
+      let settled = false;
+      const finish = () => { if (!settled) { settled = true; resolvePromise(); } };
+      killer.on('error', (err) => { log(`taskkill failed: ${err.message}`); finish(); });
+      killer.on('close', finish);
+      setTimeout(finish, 5000);
+    });
   }
-  return spawn(cmd, args, { ...opts, shell: false });
+  return posixKillTree(child);
+}
+
+const SIGNAL_EXIT_CODE = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
+
+// detached:true (for posixKillTree's group-kill) moves the child out of this
+// process's controlling-terminal group, so Ctrl+C no longer reaches it
+// directly; without this, an interrupted dispatcher orphans the reviewer.
+function installSignalForwarding(child, { proc = process, killTreeFn = killTree, exit = (code) => process.exit(code) } = {}) {
+  const handlers = {};
+  for (const sig of Object.keys(SIGNAL_EXIT_CODE)) {
+    handlers[sig] = () => {
+      log(`received ${sig}, terminating reviewer process`);
+      killTreeFn(child).finally(() => exit(SIGNAL_EXIT_CODE[sig]));
+    };
+    proc.once(sig, handlers[sig]);
+  }
+  return () => {
+    for (const [sig, handler] of Object.entries(handlers)) proc.off(sig, handler);
+  };
+}
+
+// spawnFn/platform are overridable so tests can assert the exact options passed to spawn() on
+// a POSIX branch (detached:true, shell:false) without needing to actually run on POSIX.
+function spawnCli(cmd, args, opts, { spawnFn = spawn, platform = process.platform } = {}) {
+  const needsShell = platform === 'win32';
+  if (needsShell) {
+    for (const a of [cmd, ...args]) assertWin32Safe(a, { platform });
+    const cmdLine = [winQuote(cmd), ...args.map(winQuote)].join(' ');
+    return spawnFn(cmdLine, { ...opts, shell: true });
+  }
+  // detached:true puts the child in its own process group so posixKillTree
+  // can kill(-pid) the whole group, not just the direct child.
+  return spawnFn(cmd, args, { ...opts, shell: false, detached: true });
 }
 
 const USAGE = `opencode-dispatch.mjs — dispatch a brief to OpenCode CLI ("opencode run") and capture the result as JSON.
 
 Usage:
   node opencode-dispatch.mjs --brief <path> --cd <path> [--session <sessionID>]
-                 [--model <provider/model>] [--variant <level>]
+                 [--model <provider/model>] [--variant <level>] [--timeout <seconds>] [--isolate]
 
 Required:
   --brief <path>         Path to a text file containing the prompt/brief. Attached via
@@ -101,6 +169,34 @@ Optional:
   --skip-git-repo-check  No-op here (OpenCode has no equivalent flag); accepted only so a
                          caller that always passes it for parity with codex-dispatch.mjs does
                          not need a vendor-specific branch.
+  --timeout <seconds>    Kill opencode run (whole process tree on win32, process group on
+                         POSIX) if it hasn't closed within this many seconds, and write
+                         status "timed-out" instead of
+                         "completed" or "error". Omit for no limit (backward-compatible default).
+  --isolate              Run OpenCode against a disposable git worktree of --cd instead of
+                         --cd itself, since OpenCode has no --sandbox read-only equivalent
+                         (see model-capabilities.md). The worktree is created once under
+                         <directory containing --brief>/../worktree/ and REUSED when a later
+                         --brief shares that same GRANDPARENT directory, not merely the same
+                         parent -- e.g. <run-dir>/phase1/brief.txt and
+                         <run-dir>/phase2/delta-brief.txt are siblings one level below
+                         <run-dir>, and both resolve to <run-dir>/worktree. A --brief placed
+                         directly in the run directory (no phaseN/ level) puts the worktree
+                         in the run directory's PARENT instead, which is very likely wrong;
+                         follow review-protocol.md's run-directory layout. Reuse is gated on a
+                         fingerprint of --cd's current snapshot (repo toplevel, HEAD, dirty
+                         diff, untracked file hashes), not merely on sharing the grandparent
+                         directory: a fingerprint mismatch (a different target, or drift since
+                         the worktree was built) is refused, never silently served stale or
+                         rebuilt. This script never
+                         removes the worktree or its sibling <worktree>.snapshot-complete
+                         marker file; the caller (per phase-3-scorecard.md) runs
+                         "git -C <target-dir> worktree remove --force <path>" (and deletes
+                         the marker) once the run is fully done.
+                         Requires --cd to be a git repository ROOT (a subdirectory is refused,
+                         not supported) and worktree setup to succeed; if either fails, the
+                         dispatcher exits non-zero with status "error" rather than falling back
+                         to running against --cd directly.
   -h, --help             Print this message and exit 0.
 
 Output:
@@ -109,10 +205,24 @@ Output:
     sessionId     string|null   OpenCode session id, if one was observed.
     finalMessage  string        Last "text" event's part.text seen in the event stream.
     touchedFiles  string[]|null Same git-porcelain-diff mechanism as codex-dispatch.mjs.
-                                 null (not []) when --cd is not a git repo.
+                                 null (not []) when --cd is not a git repo. Under --isolate,
+                                 this is measured against the worktree, so a nonempty value
+                                 means OpenCode wrote into its own disposable copy, not --cd.
     touchedFilesNote string     Present only when touchedFiles is null; explains why.
-    status        "completed"|"error"
-    error         string        Present only when status is "error"; failure reason.
+    modelRequested string|null  --model as passed, unverified against the actual runtime.
+    effortRequested string|null --variant (or its --effort alias) as passed, unverified.
+    modelResolved  null         Always null; the JSON event stream carries no verified
+                                 effective model identity (see selectionNote).
+    effortResolved null         Always null, same reason as modelResolved.
+    selectionNote  string       States the modelResolved/effortResolved limitation above.
+    isolated      boolean       True when OpenCode actually ran against a worktree copy of
+                                 --cd rather than --cd itself.
+    worktreePath  string|null   The worktree's path when isolated is true; null otherwise.
+    isolationNote string|null   Set when isolated is true: whether the worktree was reused or
+                                 rebuilt, and any untracked nested-git-repo directories that were
+                                 skipped rather than copied in. Always null when isolated is false.
+    status        "completed"|"error"|"timed-out"
+    error         string        Present when status is "error" or "timed-out"; failure reason.
 
 Exit code: 0 on success, non-zero on failure (missing brief/--cd, opencode not found or
 not authenticated, opencode exited non-zero, etc).
@@ -131,6 +241,8 @@ function parseArgs(argv) {
     model: null,
     variant: null,
     skipGitRepoCheck: false,
+    timeout: null,
+    isolate: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -167,6 +279,12 @@ function parseArgs(argv) {
       case '--skip-git-repo-check':
         args.skipGitRepoCheck = true;
         break;
+      case '--timeout':
+        args.timeout = takeValue();
+        break;
+      case '--isolate':
+        args.isolate = true;
+        break;
       default:
         throw new RelayError(`unrecognized argument: ${tok}`);
     }
@@ -178,6 +296,12 @@ function parseArgs(argv) {
   }
   if (args.variant !== null && !/^[a-z][a-z0-9_-]*$/.test(args.variant)) {
     throw new RelayError('--variant must be a level token; omit it for default effort');
+  }
+  if (args.timeout !== null) {
+    if (!/^[1-9][0-9]*$/.test(args.timeout)) {
+      throw new RelayError('--timeout must be a positive whole number of seconds');
+    }
+    args.timeout = Number(args.timeout);
   }
   return args;
 }
@@ -204,6 +328,341 @@ function runCapture(cmd, args, cwd) {
 async function isGitRepo(cwd) {
   const res = await runCapture('git', ['rev-parse', '--git-dir'], cwd);
   return res.code === 0;
+}
+
+// Buffer-based capture for binary-safe git output (a tracked-file diff can
+// contain non-UTF8 bytes); runCapture above decodes as utf8 and would corrupt it.
+function runCaptureBuffer(cmd, args, cwd, inputBuffer) {
+  return new Promise((resolve) => {
+    const child = spawnCli(cmd, args, { cwd });
+    const chunks = [];
+    let stderr = '';
+    child.stdout.on('data', (d) => chunks.push(d));
+    child.stderr.on('data', (d) => (stderr += d.toString('utf8')));
+    child.on('error', (err) => resolve({ code: -1, stdout: Buffer.alloc(0), stderr: String(err) }));
+    child.on('close', (code) => resolve({ code, stdout: Buffer.concat(chunks), stderr }));
+    if (inputBuffer !== undefined) {
+      // Without this, a process dying before it reads a large buffer (e.g. git apply
+      // rejecting a malformed patch) crashes the whole script via an unhandled stdin error.
+      child.stdin.on('error', (err) => { log(`stdin write failed: ${err.message}`); });
+      child.stdin.write(inputBuffer);
+      child.stdin.end();
+    }
+  });
+}
+
+// Sibling of worktreeDir, not inside it: proves the snapshot copy finished, and never appears as an untracked file to the reviewer.
+function snapshotMarkerPath(worktreeDir) {
+  return `${worktreeDir}.snapshot-complete`;
+}
+
+function sha256(buf) {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+function normalizePath(p) {
+  const abs = path.resolve(p);
+  return process.platform === 'win32' ? abs.toLowerCase() : abs;
+}
+
+// Streamed so a large untracked file doesn't load whole into memory just to fingerprint it.
+function sha256OfFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+// Every field must match for reuse; untracked entries carry content hashes, and trailing-slash
+// entries are nested repos (ls-files reports the directory, not its contents) that get skipped.
+async function computeSnapshotFingerprint(targetDir) {
+  const toplevelRes = await runCapture('git', ['rev-parse', '--show-toplevel'], targetDir);
+  if (toplevelRes.code !== 0) {
+    throw new Error(`git rev-parse --show-toplevel failed: ${toplevelRes.stderr.trim()}`);
+  }
+  const toplevel = toplevelRes.stdout.toString('utf8').trim();
+
+  const headRes = await runCapture('git', ['rev-parse', 'HEAD'], targetDir);
+  if (headRes.code !== 0) {
+    throw new Error(`git rev-parse HEAD failed: ${headRes.stderr.trim()}`);
+  }
+  const head = headRes.stdout.toString('utf8').trim();
+
+  const diffRes = await runCaptureBuffer('git', ['diff', 'HEAD', '--binary'], targetDir);
+  if (diffRes.code !== 0) {
+    throw new Error(`git diff HEAD --binary failed: ${diffRes.stderr.trim()}`);
+  }
+
+  const untrackedRes = await runCapture(
+    'git', ['ls-files', '--others', '--exclude-standard', '-z'], targetDir
+  );
+  if (untrackedRes.code !== 0) {
+    throw new Error(`git ls-files --others failed: ${untrackedRes.stderr.trim()}`);
+  }
+  const rawUntracked = untrackedRes.stdout.split('\0').filter((p) => p.length > 0);
+  const skippedDirs = rawUntracked.filter((p) => p.endsWith('/'));
+  const untrackedPaths = rawUntracked.filter((p) => !p.endsWith('/'));
+
+  const untracked = [];
+  for (const rel of untrackedPaths.sort()) {
+    const sha = await sha256OfFile(path.join(targetDir, rel));
+    untracked.push({ path: rel, sha });
+  }
+
+  return {
+    toplevel: process.platform === 'win32' ? toplevel.toLowerCase() : toplevel,
+    head,
+    diffSha: sha256(diffRes.stdout),
+    diffBuffer: diffRes.stdout,
+    untracked,
+    skippedDirs: skippedDirs.sort(),
+  };
+}
+
+// A marker of unexpected shape (hand-edited, future schema) must read as a mismatch, not throw
+// past setupIsolatedWorktree's never-throws contract.
+function fingerprintsMatch(a, b) {
+  try {
+    if (a.toplevel !== b.toplevel || a.head !== b.head || a.diffSha !== b.diffSha) return false;
+    if (a.skippedDirs.length !== b.skippedDirs.length) return false;
+    if (a.skippedDirs.some((d, i) => d !== b.skippedDirs[i])) return false;
+    if (a.untracked.length !== b.untracked.length) return false;
+    for (let i = 0; i < a.untracked.length; i++) {
+      if (a.untracked[i].path !== b.untracked[i].path || a.untracked[i].sha !== b.untracked[i].sha) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Mismatch fails closed without cleanup: on a cross-repo mismatch, cleanup would
+// run `git worktree remove` against the wrong repo.
+async function setupIsolatedWorktree(targetDir, worktreeDir) {
+  const markerPath = snapshotMarkerPath(worktreeDir);
+
+  let currentFingerprint;
+  try {
+    currentFingerprint = await computeSnapshotFingerprint(targetDir);
+  } catch (err) {
+    return { ok: false, reason: `snapshot fingerprint failed: ${err.message}` };
+  }
+
+  // git ls-files/diff run cwd-relative, so a targetDir below the repo root produces untracked
+  // paths relative to targetDir while the worktree is built at the repo root -- silently wrong.
+  if (normalizePath(currentFingerprint.toplevel) !== normalizePath(targetDir)) {
+    return {
+      ok: false,
+      reason:
+        `--cd "${targetDir}" is not the repository root (root is "${currentFingerprint.toplevel}"); ` +
+        '--isolate requires --cd to be the repository root, subdirectories are not supported',
+    };
+  }
+
+  // git worktree add links a submodule's gitlink but leaves its working tree empty
+  // until a separate `submodule update` runs.
+  const submoduleRes = await runCapture('git', ['submodule', 'status'], targetDir);
+  if (submoduleRes.code === 0 && submoduleRes.stdout.trim().length > 0) {
+    return {
+      ok: false,
+      reason:
+        `"${targetDir}" has one or more git submodules; --isolate does not populate submodule ` +
+        'working trees inside the worktree copy, so an isolated seat would see empty submodule ' +
+        'directories instead of their real content -- not currently supported',
+    };
+  }
+
+  let markerText = null;
+  try {
+    markerText = await fs.readFile(markerPath, 'utf8');
+    await fs.access(path.join(worktreeDir, '.git'));
+  } catch {
+    markerText = null;
+  }
+
+  // A marker file is present (even if unparseable) but the worktree's .git is gone: the marker
+  // is stale bookkeeping for a worktree that no longer exists, safe to clean up and rebuild.
+  // A marker present AND the worktree still exists but the marker can't be parsed is different:
+  // fail closed rather than silently rebuilding over content that might belong to another target.
+  if (markerText !== null) {
+    let existingMarker;
+    try {
+      existingMarker = JSON.parse(markerText);
+    } catch {
+      return {
+        ok: false,
+        reason:
+          'the worktree at this path has an unreadable snapshot marker; refusing to guess ' +
+          'whether it is safe to reuse or rebuild — remove it manually and restart the ' +
+          'affected review passes per review-protocol.md',
+      };
+    }
+    if (!fingerprintsMatch(existingMarker, currentFingerprint)) {
+      return {
+        ok: false,
+        reason:
+          'snapshot fingerprint mismatch: the worktree at this path was built from a different ' +
+          'target or the target has drifted since (toplevel/head/diff/untracked-files changed); ' +
+          'refusing to reuse or silently rebuild it — remove the stale worktree and restart the ' +
+          'affected review passes per review-protocol.md',
+      };
+    }
+    // Source fingerprint matching is not enough: OpenCode has no CLI-enforced read-only sandbox,
+    // so the worktree ITSELF may have been directly mutated after it was built, independent of
+    // any change to the source repo the worktree was built from. Recompute and compare the
+    // worktree's own fingerprint too; a marker missing this field (old shape) fails closed via
+    // fingerprintsMatch's try/catch, same as any other malformed marker.
+    let currentWorktreeFingerprint;
+    try {
+      currentWorktreeFingerprint = await computeSnapshotFingerprint(worktreeDir);
+    } catch (err) {
+      return { ok: false, reason: `worktree snapshot fingerprint failed: ${err.message}` };
+    }
+    if (!fingerprintsMatch(existingMarker.worktree, currentWorktreeFingerprint)) {
+      return {
+        ok: false,
+        reason:
+          'worktree snapshot mismatch: the isolated worktree itself was modified after it was ' +
+          'built (its source-repo fingerprint still matches, but its own tracked/untracked ' +
+          'content does not) — refusing to reuse or silently rebuild it; remove the stale ' +
+          'worktree and restart the affected review passes per review-protocol.md',
+      };
+    }
+    return { ok: true, reused: true, skippedDirs: currentFingerprint.skippedDirs };
+  }
+
+  // No marker: only an orphaned worktree of targetDir itself (a deleted marker) is safe to
+  // rebuild over. Anything else here -- unrelated content, another repo's worktree -- must refuse.
+  let worktreeDirEntries = null;
+  try {
+    worktreeDirEntries = await fs.readdir(worktreeDir);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      return {
+        ok: false,
+        reason: `the path "${worktreeDir}" exists but is not a directory (${err.code}); refusing to delete it — remove it manually if it is safe to reuse`,
+      };
+    }
+    worktreeDirEntries = null; // doesn't exist: nothing to protect, proceed to build
+  }
+  if (worktreeDirEntries !== null && worktreeDirEntries.length > 0) {
+    let gitdirTarget;
+    try {
+      gitdirTarget = await fs.readFile(path.join(worktreeDir, '.git'), 'utf8');
+    } catch {
+      return {
+        ok: false,
+        reason:
+          `the path "${worktreeDir}" already contains content this dispatcher did not create ` +
+          '(no marker, no worktree .git file) — refusing to delete it; remove it manually if it ' +
+          'is safe to reuse',
+      };
+    }
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(gitdirTarget);
+    if (!m) {
+      return {
+        ok: false,
+        reason:
+          `the path "${worktreeDir}" has a ".git" file that is not a recognizable worktree ` +
+          'gitdir pointer; refusing to delete it — remove it manually if it is safe to reuse',
+      };
+    }
+    const commonDirRes = await runCapture(
+      'git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], targetDir
+    );
+    const gitdirResolved = normalizePath(m[1]);
+    const targetCommonDir = commonDirRes.code === 0 ? normalizePath(commonDirRes.stdout.trim()) : null;
+    const belongsToTarget =
+      targetCommonDir !== null &&
+      (gitdirResolved === targetCommonDir || gitdirResolved.startsWith(targetCommonDir + path.sep));
+    if (!belongsToTarget) {
+      return {
+        ok: false,
+        reason:
+          `the path "${worktreeDir}" is a git worktree of a DIFFERENT repository than the ` +
+          'current target; refusing to delete it — this would destroy that repository\'s ' +
+          'working copy and orphan its own .git/worktrees/ registration',
+      };
+    }
+    // Belongs to targetDir itself: an orphaned worktree with a deleted marker, the legitimate
+    // crash-recovery case. Falls through to cleanup() + rebuild below.
+  }
+
+  const cleanup = async () => {
+    await runCapture('git', ['worktree', 'remove', '--force', worktreeDir], targetDir).catch(() => {});
+    await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(markerPath, { force: true }).catch(() => {});
+  };
+  const fail = async (reason) => {
+    await cleanup();
+    return { ok: false, reason };
+  };
+
+  try {
+    await cleanup();
+    await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
+    const addRes = await runCapture(
+      'git', ['worktree', 'add', '--detach', worktreeDir, currentFingerprint.head], targetDir
+    );
+    if (addRes.code !== 0) {
+      return fail(`git worktree add failed: ${addRes.stderr.trim()}`);
+    }
+
+    // Tracked modifications: the SAME diff buffer just fingerprinted, applied inside the worktree,
+    // so the marker records exactly what was applied, not a value recomputed moments later.
+    if (currentFingerprint.diffBuffer.length > 0) {
+      const applyRes = await runCaptureBuffer(
+        'git', ['apply', '--binary'], worktreeDir, currentFingerprint.diffBuffer
+      );
+      if (applyRes.code !== 0) {
+        return fail(`git apply --binary failed in worktree: ${applyRes.stderr.trim()}`);
+      }
+    }
+
+    // Untracked files: git diff never sees these, so copy each one by hand. Directories that are
+    // themselves git repos (currentFingerprint.skippedDirs) cannot be copied via copyFile and are
+    // deliberately left out of the worktree; the caller sees them in the returned skippedDirs.
+    for (const { path: rel } of currentFingerprint.untracked) {
+      const src = path.join(targetDir, rel);
+      const dest = path.join(worktreeDir, rel);
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.copyFile(src, dest);
+    }
+
+    // Fingerprint the WORKTREE itself, not just its source, after it is fully built (tracked
+    // diff applied, untracked files copied) so a direct mutation inside the worktree afterward
+    // (OpenCode has no CLI-enforced read-only sandbox) is detectable on the next reuse attempt,
+    // not just a change to the original source repository the worktree was built from.
+    let worktreeFingerprint;
+    try {
+      worktreeFingerprint = await computeSnapshotFingerprint(worktreeDir);
+    } catch (err) {
+      return fail(`worktree snapshot fingerprint failed: ${err.message}`);
+    }
+
+    await fs.writeFile(markerPath, JSON.stringify({
+      toplevel: currentFingerprint.toplevel,
+      head: currentFingerprint.head,
+      diffSha: currentFingerprint.diffSha,
+      untracked: currentFingerprint.untracked,
+      skippedDirs: currentFingerprint.skippedDirs,
+      worktree: {
+        toplevel: worktreeFingerprint.toplevel,
+        head: worktreeFingerprint.head,
+        diffSha: worktreeFingerprint.diffSha,
+        untracked: worktreeFingerprint.untracked,
+        skippedDirs: worktreeFingerprint.skippedDirs,
+      },
+    }));
+    return { ok: true, reused: false, skippedDirs: currentFingerprint.skippedDirs };
+  } catch (err) {
+    return fail(`worktree setup failed: ${err.message}`);
+  }
 }
 
 async function gitStatusPorcelain(cwd) {
@@ -307,7 +766,7 @@ function buildOpencodeArgs({ briefPath, cd, session, model, variant }) {
 // real `opencode` binary. See scripts/tests/opencode-dispatch.test.mjs.
 const OPENCODE_SPAWN_STDIO = ['ignore', 'pipe', 'pipe'];
 
-function runOpencode({ briefPath, cd, session, model, variant }) {
+function runOpencode({ briefPath, cd, session, model, variant, timeout }) {
   return new Promise((resolve, reject) => {
     const args = buildOpencodeArgs({ briefPath, cd, session, model, variant });
 
@@ -319,16 +778,40 @@ function runOpencode({ briefPath, cd, session, model, variant }) {
       return;
     }
 
+    const uninstallSignalForwarding = installSignalForwarding(child);
+
     child.on('error', (err) => {
+      uninstallSignalForwarding();
       reject(new RelayError(`failed to spawn "opencode": ${err.message}`));
     });
 
     let sessionId = null;
     let finalMessage = null;
     let stderrBuf = '';
+    let timedOut = false;
+    let settled = false;
     const badLines = [];
 
     const rl = readline.createInterface({ input: child.stdout });
+
+    let timer = null;
+    if (timeout) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        killTree(child);
+        // killTree can silently fail to reach the real process (a missing
+        // taskkill, a process that ignores the signal). Resolve on a grace
+        // period regardless, so --timeout always bounds wall-clock time
+        // rather than only bounding it when the kill happens to work.
+        setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          rl.close();
+          resolve({ code: null, sessionId, finalMessage, stderr: stderrBuf, badLines, timedOut });
+        }, 5000);
+      }, timeout * 1000);
+    }
+
     rl.on('line', (line) => {
       const trimmed = line.trim();
       if (!trimmed) return;
@@ -360,8 +843,12 @@ function runOpencode({ briefPath, cd, session, model, variant }) {
     });
 
     child.on('close', (code) => {
+      uninstallSignalForwarding();
+      if (timer) clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       rl.close();
-      resolve({ code, sessionId, finalMessage, stderr: stderrBuf, badLines });
+      resolve({ code, sessionId, finalMessage, stderr: stderrBuf, badLines, timedOut });
     });
   });
 }
@@ -392,6 +879,16 @@ async function atomicWriteJson(filePath, data) {
   await fs.rename(tmpPath, filePath);
 }
 
+// Every result.json write from either dispatcher carries these keys (plus its
+// own session-id key: sessionId here, threadId in codex-dispatch.mjs), so
+// review-protocol.md's manifest fields always exist regardless of which
+// runtime dispatched a seat. touchedFilesNote and error are conditional.
+const RESULT_REQUIRED_KEYS = [
+  'finalMessage', 'touchedFiles',
+  'modelRequested', 'effortRequested', 'modelResolved', 'effortResolved', 'selectionNote',
+  'isolated', 'worktreePath', 'isolationNote', 'status',
+];
+
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.length === 0) printUsageAndExit(0);
@@ -411,12 +908,24 @@ async function main() {
   const briefDir = path.dirname(path.resolve(args.brief));
   const resultPath = path.join(briefDir, 'result.json');
 
+  // Declared before writeErrorResult so its closure reads the LIVE values: an
+  // isolation failure after a successful worktree setup must still report
+  // isolated/worktreePath truthfully, not a value hardcoded before isolation ran.
+  let isolated = false;
+  let worktreePath = null;
+  let isolationNote = null;
+
   const writeErrorResult = async (message) => {
     try {
       await atomicWriteJson(resultPath, {
         sessionId: null,
         finalMessage: '',
         touchedFiles: null,
+        touchedFilesNote: 'dispatch failed before touched-files tracking completed',
+        modelRequested: args.model, effortRequested: args.variant,
+        modelResolved: null, effortResolved: null,
+        selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
+        isolated, worktreePath, isolationNote,
         status: 'error',
         error: message,
       });
@@ -437,6 +946,36 @@ async function main() {
     log(msg);
     await writeErrorResult(msg);
     process.exit(1);
+  }
+
+  if (args.isolate) {
+    const targetGitTracked = await isGitRepo(cdAbs);
+    if (!targetGitTracked) {
+      const msg = `--isolate requested but --cd "${cdAbs}" is not a git repository; refusing to run unisolated`;
+      log(msg);
+      await writeErrorResult(msg);
+      process.exit(1);
+    }
+    const wt = path.join(briefDir, '..', 'worktree');
+    const setup = await setupIsolatedWorktree(cdAbs, wt);
+    if (!setup.ok) {
+      const msg = `--isolate requested but worktree setup failed (${setup.reason}); refusing to run unisolated`;
+      log(msg);
+      await writeErrorResult(msg);
+      process.exit(1);
+    }
+    isolated = true;
+    worktreePath = wt;
+    if (setup.skippedDirs && setup.skippedDirs.length > 0) {
+      isolationNote =
+        `reused=${setup.reused}; untracked director${setup.skippedDirs.length === 1 ? 'y' : 'ies'} ` +
+        `not copied into the worktree (nested git repos cannot be snapshotted this way): ` +
+        `${setup.skippedDirs.join(', ')}`;
+      log(isolationNote);
+    } else {
+      isolationNote = `reused=${setup.reused}`;
+    }
+    cdAbs = wt;
   }
 
   let gitTracked = false;
@@ -464,6 +1003,7 @@ async function main() {
       session: args.session,
       model: args.model,
       variant: args.variant,
+      timeout: args.timeout,
     });
   } catch (err) {
     const msg = err instanceof RelayError ? err.message : String(err);
@@ -491,9 +1031,27 @@ async function main() {
     }
   }
 
-  const baseFields = { sessionId: opencodeResult.sessionId, touchedFiles };
+  const baseFields = {
+    sessionId: opencodeResult.sessionId, touchedFiles,
+    modelRequested: args.model, effortRequested: args.variant,
+    modelResolved: null, effortResolved: null,
+    selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
+    isolated, worktreePath, isolationNote,
+  };
   if (touchedFiles === null && touchedFilesNote) {
     baseFields.touchedFilesNote = touchedFilesNote;
+  }
+
+  if (opencodeResult.timedOut) {
+    const msg = `opencode run killed after exceeding --timeout ${args.timeout}s`;
+    log(msg);
+    await atomicWriteJson(resultPath, {
+      ...baseFields,
+      finalMessage: opencodeResult.finalMessage || '',
+      status: 'timed-out',
+      error: msg,
+    });
+    process.exit(1);
   }
 
   if (opencodeResult.code !== 0) {
@@ -568,4 +1126,10 @@ export {
   parseArgs,
   RelayError,
   OPENCODE_SPAWN_STDIO,
+  setupIsolatedWorktree,
+  posixKillTree,
+  installSignalForwarding,
+  RESULT_REQUIRED_KEYS,
+  runCaptureBuffer,
+  spawnCli,
 };

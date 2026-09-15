@@ -65,8 +65,10 @@ labeled; a failed seat produces an incomplete review. Unresolved disagreement
 is retained. Actual model and effort are reported as unverified when runtime
 metadata is unavailable.
 
-See [SKILL.md](SKILL.md) for the workflow and
-[review protocol](references/review-protocol.md) for evidence and reporting rules.
+See [SKILL.md](SKILL.md) for the workflow,
+[review protocol](references/review-protocol.md) for evidence and reporting rules,
+and [review profiles](references/review-profiles.md) for the Code/Architecture/
+Document lenses applied on top of that protocol.
 
 ## Contributing and license
 

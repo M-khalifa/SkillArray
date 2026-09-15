@@ -26,7 +26,7 @@ test('cross-review accepts selectable providers and requires adversarial mode', 
   assert.equal(c.reviewers.B.runtime, 'codex');
   assert.throws(() => resolveConfig(c, 'cross-review', { mode: 'none' }), /mode/);
   assert.throws(() => resolveConfig(c, 'cross-review', {
-    'b-provider': 'anthropic', 'b-runtime': 'claude', b: 'fable',
+    'b-provider': 'anthropic', 'b-runtime': 'opencode', b: 'anthropic/fable',
   }), /different providers/);
   const google = resolveConfig(c, 'cross-review', {
     'b-provider': 'google', 'b-runtime': 'opencode', b: 'google/example-model',
@@ -137,20 +137,67 @@ test('CLI setup, resolve, reconfigure, show, reset preserve per-skill isolation'
   await assert.rejects(fs.stat(path.join(dir, skill + '.json')), { code: 'ENOENT' });
 });
 
-test('an uncatalogued but well-formed provider is accepted only under the opencode runtime', () => {
+test('writeConfig rejects an undispatchable cross-review seat layout and writes nothing to disk', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review-config-reject-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'cross-review.json');
+  const bad = {
+    version: 2, skill: 'cross-review', mode: 'adversarial',
+    reviewers: {
+      A: { provider: 'openai', runtime: 'codex', model: 'gpt-6-astra', effort: 'default' },
+      B: { provider: 'openai', runtime: 'codex', model: 'gpt-5.6-sol', effort: 'default' },
+    },
+  };
+  await assert.rejects(() => writeConfig(file, bad), /seat A to run on the Claude harness/);
+  await assert.rejects(fs.stat(file), { code: 'ENOENT' });
+});
+
+test('an OpenCode seat whose model ID does not start with its declared provider is rejected, never silently dispatched to a different vendor', () => {
+  // B5 repro: provider "google" alongside a model ID that actually routes to Anthropic
+  // would defeat cross-vendor validation (A.provider !== B.provider looks satisfied).
+  assert.throws(() => resolveConfig(null, 'cross-review', {
+    a: 'opus', 'b-provider': 'google', 'b-runtime': 'opencode', b: 'anthropic/claude-opus-5',
+  }), /does not start with "google\//);
+  // Same provider label but the model ID disagrees with it -- also rejected.
+  assert.throws(() => resolveConfig(null, 'cross-review', {
+    a: 'opus', 'b-provider': 'anthropic', 'b-runtime': 'opencode', b: 'openai/gpt-6-astra',
+  }), /does not start with "anthropic\//);
+  // A bare model with no "/" at all under opencode is rejected, not treated as unprefixed-ok.
+  assert.throws(() => resolveConfig(null, 'cross-review', {
+    a: 'opus', 'b-provider': 'google', 'b-runtime': 'opencode', b: 'gemini-3-pro',
+  }), /does not start with "google\//);
+  // Provider/model agreeing (case-insensitively) is accepted.
+  const ok = resolveConfig(null, 'cross-review', {
+    a: 'opus', 'b-provider': 'google', 'b-runtime': 'opencode', b: 'Google/gemini-3-pro',
+  });
+  assert.equal(ok.reviewers.B.model, 'Google/gemini-3-pro');
+});
+
+test('an uncatalogued but well-formed provider is accepted only under the opencode runtime, and only for seat B', () => {
   const c = resolveConfig(null, 'cross-review', {
+    a: 'opus', 'b-provider': 'groq', 'b-runtime': 'opencode', b: 'groq/llama',
+  });
+  assert.equal(c.reviewers.B.provider, 'groq');
+  const noRuntime = resolveConfig(null, 'cross-review', { a: 'opus', 'b-provider': 'groq', b: 'groq/llama' });
+  assert.equal(noRuntime.reviewers.B.runtime, 'opencode');
+  assert.throws(() => resolveConfig(null, 'cross-review', {
+    a: 'opus', 'b-provider': 'groq', 'b-runtime': 'claude', b: 'groq/llama',
+  }), /Invalid reviewer B/);
+  // Seat A has no dispatcher script; only the Claude harness can run it.
+  assert.throws(() => resolveConfig(null, 'cross-review', {
     'a-provider': 'groq', 'a-runtime': 'opencode', a: 'groq/llama',
     'b-provider': 'openai', b: 'gpt-6-astra',
-  });
-  assert.equal(c.reviewers.A.provider, 'groq');
-  const noRuntime = resolveConfig(null, 'cross-review', {
-    'a-provider': 'groq', a: 'groq/llama', 'b-provider': 'openai', b: 'gpt-6-astra',
-  });
-  assert.equal(noRuntime.reviewers.A.runtime, 'opencode');
+  }), /seat A to run on the Claude harness/);
+});
+
+test('cross review rejects seat B on the claude runtime and seat A on anything but the claude harness', () => {
   assert.throws(() => resolveConfig(null, 'cross-review', {
-    'a-provider': 'groq', 'a-runtime': 'claude', a: 'groq/llama',
-    'b-provider': 'openai', b: 'gpt-6-astra',
-  }), /Invalid reviewer A/);
+    a: 'opus', 'b-provider': 'anthropic', 'b-runtime': 'claude', b: 'sonnet',
+  }), /seat B to run through codex-dispatch/);
+  assert.throws(() => resolveConfig(null, 'cross-review', {
+    'a-provider': 'openai', 'a-runtime': 'codex', a: 'gpt-6-astra',
+    'b-provider': 'openai', b: 'gpt-5.6-sol',
+  }), /seat A to run on the Claude harness/);
 });
 
 test('a garbage-shaped or prototype-chain provider name is rejected even under the opencode runtime, and never crashes', () => {

@@ -3,6 +3,7 @@
 // (name the file -- the directory form `node --test scripts/tests/` reports a spurious failure)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import {
   parsePorcelainRecords,
   parsePorcelainPaths,
@@ -12,6 +13,10 @@ import {
   parseArgs,
   buildCodexArgs,
   RelayError,
+  posixKillTree,
+  installSignalForwarding,
+  RESULT_REQUIRED_KEYS,
+  spawnCli,
 } from '../codex-dispatch.mjs';
 
 // assertWin32Safe only throws on win32; skip the throwing tests elsewhere.
@@ -126,25 +131,37 @@ test('checkSessionIdentity: a resume where the observed id does NOT match the re
   assert.match(err, /observed thread_id "different-id"/);
 });
 
-test('assertWin32Safe: rejects a trailing backslash (escapes the closing quote, merges the next argv entry)', { skip: !IS_WIN32 }, () => {
-  assert.throws(() => assertWin32Safe('C:\\repo\\'), /unsafe to pass through cmd\.exe/);
+test('assertWin32Safe: rejects a trailing backslash (escapes the closing quote, merges the next argv entry) (platform injected, runs on every OS)', () => {
+  assert.throws(() => assertWin32Safe('C:\\repo\\', { platform: 'win32' }), /unsafe to pass through cmd\.exe/);
 });
 
-test('assertWin32Safe: rejects an embedded double quote (can re-expose shell metacharacters)', { skip: !IS_WIN32 }, () => {
-  assert.throws(() => assertWin32Safe('x" & echo INJECTED & rem "'), /unsafe to pass through cmd\.exe/);
+test('assertWin32Safe: rejects an embedded double quote (can re-expose shell metacharacters) (platform injected, runs on every OS)', () => {
+  assert.throws(() => assertWin32Safe('x" & echo INJECTED & rem "', { platform: 'win32' }), /unsafe to pass through cmd\.exe/);
 });
 
-test('assertWin32Safe: rejects a percent sign (cmd.exe expands %VAR% inside double quotes)', { skip: !IS_WIN32 }, () => {
-  assert.throws(() => assertWin32Safe('before %USERNAME% after'), /unsafe to pass through cmd\.exe/);
+test('assertWin32Safe: rejects a percent sign (cmd.exe expands %VAR% inside double quotes) (platform injected, runs on every OS)', () => {
+  assert.throws(() => assertWin32Safe('before %USERNAME% after', { platform: 'win32' }), /unsafe to pass through cmd\.exe/);
+});
+
+test('assertWin32Safe: the same unsafe characters are not rejected on a non-win32 platform (the guard is win32-specific)', () => {
+  assert.doesNotThrow(() => assertWin32Safe('before %USERNAME% after', { platform: 'linux' }));
 });
 
 test('assertWin32Safe: accepts an ordinary path with no special characters', () => {
   // Not skipped off win32: no-throw is meaningful on every platform.
-  assert.doesNotThrow(() => assertWin32Safe('C:\\Users\\me\\repo'));
+  assert.doesNotThrow(() => assertWin32Safe('C:\\Users\\me\\repo', { platform: 'win32' }));
 });
 
 test('assertWin32Safe: accepts a path with a space (not one of the rejected characters)', () => {
-  assert.doesNotThrow(() => assertWin32Safe('C:\\dir with space\\repo'));
+  assert.doesNotThrow(() => assertWin32Safe('C:\\dir with space\\repo', { platform: 'win32' }));
+});
+
+test('assertWin32Safe: on a real, uninjected call, follows the actual process platform', () => {
+  if (IS_WIN32) {
+    assert.throws(() => assertWin32Safe('x" & echo injected'), /unsafe to pass through cmd\.exe/);
+  } else {
+    assert.doesNotThrow(() => assertWin32Safe('x" & echo injected'));
+  }
 });
 
 test('parseArgs: a trailing --session with no value is rejected, not silently treated as a fresh dispatch', () => {
@@ -179,6 +196,18 @@ test('parseArgs: a well-formed --session with a real value still parses correctl
   assert.equal(args.session, 'thread-123');
 });
 
+test('parseArgs: --isolate is rejected with a message pointing at opencode-dispatch.mjs and --sandbox read-only, not a bare "unrecognized argument"', () => {
+  assert.throws(
+    () => parseArgs(['--brief', 'b.txt', '--cd', '.', '--isolate']),
+    /opencode-dispatch\.mjs only.*--sandbox read-only/s
+  );
+});
+
+test('parseArgs: sandbox defaults to read-only when --sandbox is omitted', () => {
+  const args = parseArgs(['--brief', 'b.txt', '--cd', '.']);
+  assert.equal(args.sandbox, 'read-only');
+});
+
 test('model and effort options parse and reject missing or unsafe values', () => {
   const common = ['--brief', 'b.txt', '--cd', '.'];
   const config = parseArgs([...common, '--model', 'gpt-test', '--effort', 'high']);
@@ -207,4 +236,117 @@ test('fresh and resumed argument vectors forward selections without resume sandb
   const defaults = buildCodexArgs({ cd: '.', sandbox: 'read-only' });
   assert.equal(defaults.includes('--model'), false);
   assert.equal(defaults.includes('-c'), false);
+});
+
+test('spawnCli: the POSIX branch passes detached:true and shell:false to spawn(), the load-bearing options for posixKillTree\'s process-group kill', () => {
+  let captured = null;
+  const fakeSpawn = (cmd, args, opts) => {
+    captured = { cmd, args, opts };
+    return new EventEmitter();
+  };
+  spawnCli('codex', ['exec'], { cwd: '/tmp' }, { spawnFn: fakeSpawn, platform: 'linux' });
+  assert.equal(captured.cmd, 'codex');
+  assert.deepEqual(captured.args, ['exec']);
+  assert.equal(captured.opts.detached, true);
+  assert.equal(captured.opts.shell, false);
+  assert.equal(captured.opts.cwd, '/tmp');
+});
+
+test('spawnCli: the win32 branch runs under a shell and does not set detached', () => {
+  let captured = null;
+  const fakeSpawn = (cmdLine, opts) => {
+    captured = { cmdLine, opts };
+    return new EventEmitter();
+  };
+  spawnCli('codex', ['exec'], { cwd: '/tmp' }, { spawnFn: fakeSpawn, platform: 'win32' });
+  assert.match(captured.cmdLine, /"codex" "exec"/);
+  assert.equal(captured.opts.shell, true);
+  assert.equal(captured.opts.detached, undefined);
+});
+
+test('spawnCli: A3=B12 -- an injected win32 platform actually reaches assertWin32Safe, so this guard is testable on any OS', () => {
+  const fakeSpawn = () => new EventEmitter();
+  assert.throws(
+    () => spawnCli('codex', ['x" & echo injected'], { cwd: '/tmp' }, { spawnFn: fakeSpawn, platform: 'win32' }),
+    /unsafe to pass/
+  );
+  assert.doesNotThrow(
+    () => spawnCli('codex', ['x" & echo injected'], { cwd: '/tmp' }, { spawnFn: fakeSpawn, platform: 'linux' })
+  );
+});
+
+function fakeChild(pid = 4242) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  return child;
+}
+
+test('posixKillTree: a child that never exits gets SIGTERM then SIGKILL, both targeting the process group', async () => {
+  const calls = [];
+  const child = fakeChild();
+  const kill = (pid, sig) => calls.push([pid, sig]);
+  await posixKillTree(child, { kill, escalateMs: 1 });
+  assert.deepEqual(calls, [[-4242, 'SIGTERM'], [-4242, 'SIGKILL']]);
+});
+
+test('posixKillTree: a child that exits after SIGTERM never gets SIGKILL', async () => {
+  const calls = [];
+  const child = fakeChild();
+  const kill = (pid, sig) => {
+    calls.push([pid, sig]);
+    if (sig === 'SIGTERM') setImmediate(() => child.emit('exit', null));
+  };
+  await posixKillTree(child, { kill, escalateMs: 50 });
+  assert.deepEqual(calls, [[-4242, 'SIGTERM']]);
+});
+
+test('posixKillTree: SIGKILL still fires even when the fake kill sets child.killed like the real one does (the exact regression)', async () => {
+  const calls = [];
+  const child = fakeChild();
+  const kill = (pid, sig) => {
+    calls.push([pid, sig]);
+    child.killed = true;
+  };
+  await posixKillTree(child, { kill, escalateMs: 1 });
+  assert.deepEqual(calls, [[-4242, 'SIGTERM'], [-4242, 'SIGKILL']]);
+});
+
+test('posixKillTree: a pid that is already gone (ESRCH) is not an error', async () => {
+  const child = fakeChild();
+  const kill = () => { const err = new Error('no such process'); err.code = 'ESRCH'; throw err; };
+  await assert.doesNotReject(() => posixKillTree(child, { kill, escalateMs: 1 }));
+});
+
+test('installSignalForwarding: SIGINT and SIGTERM trigger killTree on the child and exit with the matching code', async () => {
+  for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+    const proc = new EventEmitter();
+    const child = fakeChild();
+    const killed = [];
+    const exited = [];
+    const killTreeFn = (c) => { killed.push(c); return Promise.resolve(); };
+    const exit = (c) => exited.push(c);
+    installSignalForwarding(child, { proc, killTreeFn, exit });
+    proc.emit(sig);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(killed, [child]);
+    assert.deepEqual(exited, [code]);
+  }
+});
+
+test('installSignalForwarding: uninstall removes the listeners, a later signal does nothing', async () => {
+  const proc = new EventEmitter();
+  const child = fakeChild();
+  const killed = [];
+  const uninstall = installSignalForwarding(child, {
+    proc, killTreeFn: (c) => { killed.push(c); return Promise.resolve(); }, exit: () => {},
+  });
+  uninstall();
+  proc.emit('SIGINT');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(killed, []);
+});
+
+test('RESULT_REQUIRED_KEYS: codex and opencode dispatchers share the same result.json schema (minus their own session-id key)', async () => {
+  const { RESULT_REQUIRED_KEYS: opencodeKeys } = await import('../opencode-dispatch.mjs');
+  assert.deepEqual([...RESULT_REQUIRED_KEYS].sort(), [...opencodeKeys].sort());
 });

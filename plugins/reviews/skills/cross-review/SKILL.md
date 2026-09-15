@@ -12,15 +12,17 @@ compatibility: >-
   an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.2.1
+  version: 1.3.0
 ---
 
 # Cross Review
 
 Reviewer A and B use two different providers. The orchestrator is neither
-reviewer. A seat can use the Claude harness, Codex CLI, or OpenCode's configured
-provider bridge. State the resolved provider, runtime, model, and effort before
-dispatch. Do not change authentication or provider configuration during setup.
+reviewer. Seat A always runs on this harness (Claude); seat B runs through
+Codex CLI or OpenCode's configured provider bridge, never the Claude harness —
+no other layout has a defined dispatch path, and `review-config.mjs` enforces
+this. State the resolved provider, runtime, model, and effort before dispatch.
+Do not change authentication or provider configuration during setup.
 
 ## Start here: model setup
 
@@ -49,6 +51,11 @@ and reset do not dispatch reviewers.
 Use the delimiter when task text could look like a model selector. Existing
 positional calls remain supported when unambiguous. IDs containing colons must
 be supplied as a named seat with a separate effort in natural language.
+
+To request the opt-in Falsification pass (see references/review-protocol.md),
+include the phrase **"deep verify disputed high-severity findings"** in the
+task text — this is the canonical phrase the orchestrator recognizes as an
+explicit request; falsification never runs without it.
 
 Explicit choices override saved values for one run only. A changed provider,
 runtime, or model resets that seat's old effort to `default` unless effort is
@@ -85,8 +92,9 @@ reference for the phase being executed:
 2. [Cross-examination](references/phase-2-cross-examination.md):
    exchange completed findings once, preserving both original passes.
 3. [Scorecard](references/phase-3-scorecard.md):
-   verify contested claims and retain unresolved disagreements. At most one
-   additional round, only when a concrete check can settle a high-stakes claim.
+   verify contested claims and retain unresolved disagreements. An opt-in
+   Falsification pass independently checks a specific HIGH/CRITICAL disputed
+   claim before synthesis, when the task explicitly requests it.
 
 Dispatch a Codex seat with [scripts/codex-dispatch.mjs](scripts/codex-dispatch.mjs)
 and an OpenCode seat with [scripts/opencode-dispatch.mjs](scripts/opencode-dispatch.mjs).
@@ -105,7 +113,8 @@ OpenCode is selected only when the user chose it. It is never a silent fallback.
 ## Maintenance
 
 This directory is independently installable. Its configuration helper, helper
-tests, configuration reference, model-capability reference, and review protocol
-are also bundled with pair-review. Keep those copies identical when maintaining
-both packages; neither package imports files from the other. The phase references
-and dispatchers are maintained here and do not require updates to another skill.
+tests, configuration reference, model-capability reference, review protocol, and
+review profiles are also bundled with pair-review. Keep those copies identical
+when maintaining both packages; neither package imports files from the other.
+The phase references and dispatchers are maintained here and do not require
+updates to another skill.

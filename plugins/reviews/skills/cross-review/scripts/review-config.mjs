@@ -46,6 +46,19 @@ function validateSeat(seat, role) {
       !EFFORT.test(seat.effort)) {
     throw new Error(`Invalid reviewer ${role}; supply explicit provider, runtime, model, and effort or default`);
   }
+  // An OpenCode model ID is provider/model; without this check, seat.provider is a free-standing
+  // label that dispatch never uses to route, so it can silently disagree with what the model ID
+  // actually invokes (e.g. provider "google" alongside model "anthropic/claude-opus-5").
+  if (seat.runtime === 'opencode') {
+    const slash = seat.model.indexOf('/');
+    const modelProvider = slash === -1 ? null : seat.model.slice(0, slash);
+    if (modelProvider === null || modelProvider.toLowerCase() !== seat.provider.toLowerCase()) {
+      throw new Error(
+        `Invalid reviewer ${role}; OpenCode model IDs are provider/model, "${seat.model}" does ` +
+          `not start with "${seat.provider}/"`
+      );
+    }
+  }
 }
 
 export function validateConfig(config, skill) {
@@ -60,8 +73,17 @@ export function validateConfig(config, skill) {
       throw new Error('Pair review requires two Claude-harness reviewers');
     }
     if (A.model === B.model) throw new Error('Pair review requires two distinct models');
-  } else if (A.provider === B.provider) {
-    throw new Error('Cross review requires two different providers');
+  } else {
+    // Phase 1/2 dispatch only seat A through this harness (Claude) and seat B
+    // through a CLI (codex-dispatch.mjs or opencode-dispatch.mjs); no other
+    // layout has a defined dispatch path.
+    if (A.provider !== 'anthropic' || A.runtime !== 'claude') {
+      throw new Error('Cross review requires seat A to run on the Claude harness (provider anthropic, runtime claude)');
+    }
+    if (!['codex', 'opencode'].includes(B.runtime)) {
+      throw new Error('Cross review requires seat B to run through codex-dispatch.mjs or opencode-dispatch.mjs (runtime codex or opencode)');
+    }
+    if (A.provider === B.provider) throw new Error('Cross review requires two different providers');
   }
   return normalized;
 }

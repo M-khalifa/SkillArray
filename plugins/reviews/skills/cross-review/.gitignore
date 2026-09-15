@@ -2,4 +2,5 @@ node_modules/
 *.tmp
 result.json
 *-findings.md
+!scripts/tests/fixtures/blind-relabel/*-findings.md
 manifest.json

@@ -1,13 +1,13 @@
 {
   "name": "skill-array",
-  "description": "Production-ready Claude Code skills for multi-model review, cross-vendor verification, and shared engineering knowledge.",
+  "description": "Evidence-grounded Claude Code skills for multi-model review, cross-vendor verification, and shared engineering knowledge.",
   "owner": {
     "name": "Mahmoud Khalifa"
   },
   "plugins": [
     {
       "name": "reviews",
-      "description": "Same-vendor and cross-vendor multi-model code review skills: execution-gated, confidence-floored, refutation-asymmetric adversarial review.",
+      "description": "Same-vendor and cross-vendor multi-model review skills for code, architecture, and technical documents: execution-gated, evidence-graded, refutation-asymmetric adversarial review.",
       "source": "./plugins/reviews"
     },
     {
