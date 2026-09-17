@@ -3,6 +3,9 @@
 A multi-model code and document review protocol for Claude Code, plus a
 shared engineering-knowledge skill.
 
+**Two models review the same target, then argue over each other's findings
+before anything is reported settled.**
+
 ## Why this exists
 
 A single model reviewing its own work tends to agree with itself, miss
@@ -18,16 +21,13 @@ tell whether an overlapping finding was discovered independently or just
 copied from shared context. SkillArray's reviewers have to argue their
 case with evidence, and only genuinely corroborating claims get merged.
 
-```text
-Independent first passes
-        |
-Blind cross-examination  (peer sees findings only as anonymous "P" claims)
-        |
-Evidence-based refutation  (a rebuttal needs a counter-fact, not disagreement)
-        |
-Fresh-context adjudication  (a new subagent, coin-flipped "X"/"Y" identities)
-        |
-Disagreement preserved  (unresolved claims are reported, not discarded)
+```mermaid
+flowchart TD
+  A["Reviewer A<br/>independent first pass"] --> X["Blind cross-examination<br/>peer sees findings only as anonymous 'P' claims"]
+  B["Reviewer B<br/>independent first pass"] --> X
+  X --> R["Evidence-based refutation<br/>a rebuttal needs a counter-fact, not disagreement"]
+  R --> J["Fresh-context adjudication<br/>new subagent, coin-flipped 'X'/'Y' identities"]
+  J --> O["Report<br/>corroborated findings marked as such,<br/>unresolved disagreement preserved, not discarded"]
 ```
 
 ## `pair-review` vs `cross-review`
