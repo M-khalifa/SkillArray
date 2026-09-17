@@ -12,7 +12,7 @@ compatibility: >-
   an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.3.0
+  version: 1.4.0
 ---
 
 # Cross Review

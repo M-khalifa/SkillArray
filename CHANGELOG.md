@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.4.0 - Unreleased
+## 1.4.0 - 2026-09-17
 
 - Fixed a real bug: on Linux/macOS, a timed-out Tier-2 preflight command
   wasn't actually killed — it kept running in the background while
