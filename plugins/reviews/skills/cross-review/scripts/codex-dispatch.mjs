@@ -8,78 +8,39 @@
 
 // Non-goals: multi-provider routing, --clean-env/--keep-env, --resume-last, --out-dir.
 
-import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import { buildChildEnv as buildChildEnvShared } from './env-filter.mjs';
+import {
+  assertWin32Safe,
+  winQuote,
+  posixKillTree,
+  killTree as killTreeShared,
+  spawnCli,
+} from './spawn-utils.mjs';
 
-// codex resolves to a .cmd shim on Windows; spawn needs shell:true to exec
-// it (shell:false fails ENOENT/EINVAL against a .cmd path).
-const NEEDS_SHELL = process.platform === 'win32';
+// Provisional -- see the --timeout default-assignment comment in parseArgs.
+const DEFAULT_TIMEOUT_S = 1800;
 
-// cmd.exe can break out of a quoted arg on an embedded `"`, `%VAR%` expansion,
-// or trailing `\` (arg injection), so reject those instead of trying to escape them.
-const WIN32_UNSAFE_CHARS = /["%]|\\$/;
+// codex's own credential-locator variable (not a secret itself -- see
+// env-filter.mjs's module comment for the threat model this addresses).
+// Auth is file-based (~/.codex/auth.json, config.toml), read via HOME on
+// POSIX and USERPROFILE on Windows, or this override.
+const CODEX_ENV_ALLOWLIST = ['CODEX_HOME'];
 
-function assertWin32Safe(arg, { platform = process.platform } = {}) {
-  if (platform === 'win32' && WIN32_UNSAFE_CHARS.test(String(arg))) {
-    throw new RelayError(
-      `argument "${arg}" contains a character unsafe to pass through cmd.exe on Windows ` +
-        `(a double quote, a percent sign, or a trailing backslash) — rename the path/value ` +
-        `to avoid these characters`
-    );
-  }
-  return arg;
+// Thin wrapper over the shared filter: fixes in codex's own credential-locator
+// allowlist so every call site here doesn't need to repeat it.
+function buildChildEnv(opts) {
+  return buildChildEnvShared({ ...opts, providerAllowlist: CODEX_ENV_ALLOWLIST });
 }
 
-function winQuote(arg) {
-  return `"${String(arg).replace(/"/g, '\\"')}"`;
-}
-
-// child.killed means the signal was sent, not that the process exited, so it
-// never reflects whether SIGTERM actually worked; escalation must wait for
-// the real 'exit' event instead. Killing the negative pid targets the whole
-// process group (spawnCli sets detached:true on POSIX for this reason), not
-// just the direct child, so a forked grandchild doesn't get orphaned.
-function posixKillTree(child, { kill = (pid, sig) => process.kill(pid, sig), escalateMs = 5000 } = {}) {
-  return new Promise((resolvePromise) => {
-    if (!child.pid) { resolvePromise(); return; }
-    let exited = false;
-    child.once('exit', () => { exited = true; resolvePromise(); });
-    const send = (sig) => {
-      try { kill(-child.pid, sig); } catch (err) { if (err.code !== 'ESRCH') throw err; }
-    };
-    send('SIGTERM');
-    setTimeout(() => {
-      if (exited) return;
-      send('SIGKILL');
-      // Bound the wait even if the group ignores SIGKILL (e.g. already reaped).
-      setTimeout(() => { if (!exited) resolvePromise(); }, 1000);
-    }, escalateMs);
-  });
-}
-
-// On win32, spawnCli runs the child under cmd.exe (shell:true), so child.pid is
-// cmd.exe's PID and child.kill() only terminates cmd.exe; codex.exe behind the
-// .cmd shim would be orphaned and keep running. taskkill /T kills the whole
-// process tree.
+// killTree wired to this file's own log() so a taskkill failure is reported
+// with this dispatcher's own message prefix, matching pre-extraction behavior.
 function killTree(child) {
-  if (NEEDS_SHELL) {
-    // Absolute path, not "taskkill": a caller may have narrowed PATH down to
-    // just the CLI it wants dispatched, and taskkill.exe would not resolve.
-    const taskkillPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
-    return new Promise((resolvePromise) => {
-      const killer = spawn(taskkillPath, ['/pid', String(child.pid), '/T', '/F']);
-      let settled = false;
-      const finish = () => { if (!settled) { settled = true; resolvePromise(); } };
-      killer.on('error', (err) => { log(`taskkill failed: ${err.message}`); finish(); });
-      killer.on('close', finish);
-      setTimeout(finish, 5000);
-    });
-  }
-  return posixKillTree(child);
+  return killTreeShared(child, { log });
 }
 
 const SIGNAL_EXIT_CODE = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
@@ -101,26 +62,12 @@ function installSignalForwarding(child, { proc = process, killTreeFn = killTree,
   };
 }
 
-// spawnFn/platform are overridable so tests can assert the exact options passed to spawn() on
-// a POSIX branch (detached:true, shell:false) without needing to actually run on POSIX.
-function spawnCli(cmd, args, opts, { spawnFn = spawn, platform = process.platform } = {}) {
-  const needsShell = platform === 'win32';
-  if (needsShell) {
-    for (const a of [cmd, ...args]) assertWin32Safe(a, { platform });
-    const cmdLine = [winQuote(cmd), ...args.map(winQuote)].join(' ');
-    return spawnFn(cmdLine, { ...opts, shell: true });
-  }
-  // detached:true puts the child in its own process group so posixKillTree
-  // can kill(-pid) the whole group, not just the direct child.
-  return spawnFn(cmd, args, { ...opts, shell: false, detached: true });
-}
-
 const USAGE = `codex-dispatch.mjs — dispatch a brief to Codex CLI ("codex exec") and capture the result as JSON.
 
 Usage:
   node codex-dispatch.mjs --brief <path> --cd <path> [--session <threadId>]
                  [--sandbox <mode>] [--skip-git-repo-check] [--model <id>] [--effort <level>]
-                 [--timeout <seconds>]
+                 [--timeout <seconds>] [--env-mode filtered|inherit] [--env-passthrough NAME,NAME]
 
 Required:
   --brief <path>         Path to a text file containing the prompt/brief to send to Codex.
@@ -153,7 +100,21 @@ Optional:
   --timeout <seconds>    Kill codex exec (whole process tree on win32, process group on POSIX)
                          if it hasn't closed within this
                          many seconds, and write status "timed-out" instead of "completed" or
-                         "error". Omit for no limit (backward-compatible default).
+                         "error". 0 means unlimited (never times out). Default when omitted:
+                         1800 (30 minutes) -- a provisional value, not derived from measured
+                         run durations; result.json's durationMs field exists precisely so
+                         this default can be re-derived from real data once runs accumulate.
+  --env-mode <mode>      "filtered" (default) or "inherit". "filtered" passes the spawned
+                         codex process only a base OS allowlist, codex's own credential-locator
+                         variables (CODEX_HOME; auth itself is file-based under HOME/USERPROFILE,
+                         also allowlisted), and anything named in --env-passthrough -- excluding
+                         everything else in this process's environment (AWS_*, GITHUB_TOKEN,
+                         database passwords, etc.) that the REVIEWED repository's own code could
+                         otherwise read if codex executes a command against it. "inherit" passes
+                         the full parent environment unfiltered, matching pre-1.4.0 behavior.
+  --env-passthrough <names>  Comma-separated extra environment variable names to allow through
+                         under --env-mode filtered (e.g. a provider auth var this allowlist
+                         doesn't already cover). Ignored under --env-mode inherit.
   -h, --help             Print this message and exit 0.
 
 Output:
@@ -185,6 +146,18 @@ Output:
     isolationNote  null         Always null, same reason as isolated.
     status        "completed"|"error"|"timed-out"
     error         string        Present when status is "error" or "timed-out"; failure reason.
+    usage         object        {input_tokens, cached_input_tokens, cache_write_input_tokens,
+                                 output_tokens, reasoning_tokens, estimated_cost_usd, source, raw}
+                                 when codex's own turn.completed event was observed
+                                 (source: "provider"), or {source: "unavailable"} otherwise
+                                 (e.g. killed by --timeout before completion). Fields are
+                                 recorded exactly as codex reports them -- cached_input_tokens
+                                 is NOT assumed to be a subset of, or additive with,
+                                 input_tokens; no derived/combined total is computed here.
+                                 "raw" is codex's own turn.completed.usage object verbatim.
+                                 estimated_cost_usd is always null: no price table is embedded
+                                 in this dispatcher, cost is computed downstream from an
+                                 explicit, versioned price file.
 
   Session identity: on --session, the resumed run must emit a thread.started event whose
   thread_id equals the requested session. If it does not, the run fails closed with status
@@ -216,6 +189,8 @@ function parseArgs(argv) {
     sandbox: 'read-only',
     skipGitRepoCheck: false,
     timeout: null,
+    envMode: 'filtered',
+    envPassthrough: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -252,6 +227,12 @@ function parseArgs(argv) {
       case '--timeout':
         args.timeout = takeValue();
         break;
+      case '--env-mode':
+        args.envMode = takeValue();
+        break;
+      case '--env-passthrough':
+        args.envPassthrough = takeValue().split(',').map((s) => s.trim()).filter(Boolean);
+        break;
       case '--skip-git-repo-check':
         args.skipGitRepoCheck = true;
         break;
@@ -279,10 +260,25 @@ function parseArgs(argv) {
     throw new RelayError('--effort must be a level token; omit it for default effort');
   }
   if (args.timeout !== null) {
-    if (!/^[1-9][0-9]*$/.test(args.timeout)) {
-      throw new RelayError('--timeout must be a positive whole number of seconds');
+    if (!/^[0-9]+$/.test(args.timeout)) {
+      throw new RelayError('--timeout must be a whole number of seconds, 0 for unlimited');
     }
     args.timeout = Number(args.timeout);
+  } else {
+    // Provisional default: no manifest timing data exists yet from any real run
+    // (this is exactly what Phase I's startedAt/finishedAt/durationMs fields are
+    // for). 1800s (30 minutes) is a placeholder chosen for a code review against
+    // a real repository at default effort, not derived from measured data.
+    // Re-derive this once result.json durationMs data exists from real runs.
+    args.timeout = DEFAULT_TIMEOUT_S;
+  }
+  if (args.envMode !== 'filtered' && args.envMode !== 'inherit') {
+    throw new RelayError('--env-mode must be "filtered" or "inherit"');
+  }
+  for (const name of args.envPassthrough) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new RelayError(`--env-passthrough: "${name}" is not a valid environment variable name`);
+    }
   }
   return args;
 }
@@ -293,7 +289,7 @@ function log(msg) {
   process.stderr.write(`relay: ${msg}\n`);
 }
 
-// For the small git probes below; the codex exec run itself streams via spawn directly.
+// For the small git probes below; the codex exec run itself streams via spawnCli too (see runCodex).
 function runCapture(cmd, args, cwd) {
   return new Promise((resolve) => {
     const child = spawnCli(cmd, args, { cwd });
@@ -408,13 +404,14 @@ function buildCodexArgs({ cd, session, sandbox, skipGitRepoCheck, forceSkipGitCh
 }
 
 function runCodex(options) {
-  const { briefText, cd, timeout } = options;
+  const { briefText, cd, timeout, envMode, envPassthrough } = options;
   return new Promise((resolve, reject) => {
     const args = buildCodexArgs(options);
+    const env = buildChildEnv({ envMode, envPassthrough });
 
     let child;
     try {
-      child = spawnCli('codex', args, { cwd: cd });
+      child = spawnCli('codex', args, { cwd: cd, env });
     } catch (err) {
       reject(new RelayError(`failed to spawn "codex": ${err.message}`));
       return;
@@ -429,6 +426,7 @@ function runCodex(options) {
 
     let threadId = null;
     let finalMessage = null;
+    let usage = null;
     let stderrBuf = '';
     let timedOut = false;
     let settled = false;
@@ -449,7 +447,7 @@ function runCodex(options) {
           if (settled) return;
           settled = true;
           rl.close();
-          resolve({ code: null, threadId, finalMessage, stderr: stderrBuf, badLines, timedOut });
+          resolve({ code: null, threadId, finalMessage, usage, stderr: stderrBuf, badLines, timedOut });
         }, 5000);
       }, timeout * 1000);
     }
@@ -472,6 +470,8 @@ function runCodex(options) {
         typeof evt.item.text === 'string'
       ) {
         finalMessage = evt.item.text;
+      } else if (evt.type === 'turn.completed' && evt.usage && typeof evt.usage === 'object') {
+        usage = evt.usage;
       }
     });
 
@@ -493,9 +493,35 @@ function runCodex(options) {
       if (settled) return;
       settled = true;
       rl.close();
-      resolve({ code, threadId, finalMessage, stderr: stderrBuf, badLines, timedOut });
+      resolve({ code, threadId, finalMessage, usage, stderr: stderrBuf, badLines, timedOut });
     });
   });
+}
+
+// Maps the raw turn.completed.usage event (or its absence) to result.json's
+// "usage" field, with explicit provenance. Never assumes a relationship
+// between cached_input_tokens and input_tokens (e.g. that one is a subset of
+// the other) -- codex's own event does not disclose that, so the fields are
+// recorded exactly as reported, with no derived/combined total computed here.
+// "raw" keeps codex's own event verbatim: opencode-dispatch.mjs's equivalent
+// function normalizes a differently-named field set (cache.read/cache.write
+// vs. codex's cached_input_tokens/cache_write_input_tokens), so the raw copy
+// is what lets a reader recover the exact original shape from either CLI
+// without needing to trust the normalization was lossless.
+function buildUsageField(rawUsage) {
+  if (!rawUsage) {
+    return { source: 'unavailable' };
+  }
+  return {
+    input_tokens: rawUsage.input_tokens ?? null,
+    cached_input_tokens: rawUsage.cached_input_tokens ?? null,
+    cache_write_input_tokens: rawUsage.cache_write_input_tokens ?? null,
+    output_tokens: rawUsage.output_tokens ?? null,
+    reasoning_tokens: rawUsage.reasoning_output_tokens ?? null,
+    estimated_cost_usd: null,
+    source: 'provider',
+    raw: rawUsage,
+  };
 }
 
 // Fails closed rather than trusting whatever thread_id the child emits: a
@@ -529,13 +555,26 @@ async function atomicWriteJson(filePath, data) {
 // own session-id key: threadId here, sessionId in opencode-dispatch.mjs), so
 // review-protocol.md's manifest fields always exist regardless of which
 // runtime dispatched a seat. touchedFilesNote and error are conditional.
+//
+// startedAt/finishedAt/durationMs/timeoutS are stamped here, by this script,
+// not authored by the orchestrator or any model -- deterministic code owns
+// timing data. "usage" is populated from codex's own turn.completed event
+// when one was observed (source: "provider"); {source: "unavailable"}
+// otherwise (e.g. the process was killed by --timeout before completing, or
+// codex's event stream omitted the event for some other reason). See
+// buildUsageField() above and docs/design/structured-artifacts.md.
 const RESULT_REQUIRED_KEYS = [
   'finalMessage', 'touchedFiles',
   'modelRequested', 'effortRequested', 'modelResolved', 'effortResolved', 'selectionNote',
   'isolated', 'worktreePath', 'isolationNote', 'status',
+  'startedAt', 'finishedAt', 'durationMs', 'timeoutS',
+  'usage',
+  'envMode',
 ];
 
 async function main() {
+  const startedAt = new Date().toISOString();
+  const startedAtMs = Date.now();
   const argv = process.argv.slice(2);
   if (argv.length === 0) printUsageAndExit(0);
 
@@ -553,6 +592,15 @@ async function main() {
 
   const briefDir = path.dirname(path.resolve(args.brief));
   const resultPath = path.join(briefDir, 'result.json');
+  const timingFields = (usage = null) => {
+    const finishedAt = new Date().toISOString();
+    return {
+      startedAt, finishedAt, durationMs: Date.now() - startedAtMs,
+      timeoutS: args.timeout,
+      usage: buildUsageField(usage),
+      envMode: args.envMode,
+    };
+  };
 
   const writeErrorResult = async (message) => {
     try {
@@ -567,6 +615,7 @@ async function main() {
         isolated: false, worktreePath: null, isolationNote: null,
         status: 'error',
         error: message,
+        ...timingFields(),
       });
     } catch (writeErr) {
       log(`additionally failed to write result.json: ${writeErr.message}`);
@@ -615,6 +664,8 @@ async function main() {
       skipGitRepoCheck: args.skipGitRepoCheck,
       forceSkipGitCheck: !gitTracked, // --cd already known not to be a git repo
       timeout: args.timeout,
+      envMode: args.envMode,
+      envPassthrough: args.envPassthrough,
     });
   } catch (err) {
     const msg = err instanceof RelayError ? err.message : String(err);
@@ -650,6 +701,7 @@ async function main() {
     // Codex's read-only guarantee is its own --sandbox flag, not a worktree;
     // these stay constant so both dispatchers' result.json feed the same manifest fields.
     isolated: false, worktreePath: null, isolationNote: null,
+    ...timingFields(codexResult.usage),
   };
   if (touchedFiles === null && touchedFilesNote) {
     baseFields.touchedFilesNote = touchedFilesNote;
@@ -745,4 +797,7 @@ export {
   installSignalForwarding,
   RESULT_REQUIRED_KEYS,
   spawnCli,
+  buildChildEnv,
+  buildUsageField,
+  killTree,
 };

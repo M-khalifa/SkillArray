@@ -20,8 +20,10 @@ const USAGE = `blind-relabel.mjs — relabel, scan, and coin-flip for review-pro
 Usage:
   node blind-relabel.mjs relabel --in <path> --out <path> --from <A|B> --to <P|X|Y>
   node blind-relabel.mjs scan --in <path> [--target-dir <path>] [--tokens t1,t2,...]
+    [--phase1-dir <path> --forbid-seats <A|B|A,B>]
   node blind-relabel.mjs flip --out <path>
   node blind-relabel.mjs translate --in <path> --out <path> --mapping <path> [--phase1-dir <path>] [--verification-dir <path>]
+  node blind-relabel.mjs validate --phase1-dir <path>
   node blind-relabel.mjs -h | --help
 
 relabel:
@@ -101,6 +103,22 @@ scan:
   unterminated fenced code block (missing a same-character, same-or-longer
   closing fence, per CommonMark) exits nonzero rather
   than silently skipping every line after it as if it were code.
+  (With --phase1-dir and --forbid-seats) Additionally checks the RAW text,
+  fenced content INCLUDED (unlike the vendor/seat check above, which exempts
+  fences), for each forbidden seat's own real claim IDs -- the exact
+  enumerable set from that seat's actual Phase 1 headings, via
+  extractClaimHeadings, never a generic \\b[A-Z]\\d+\\b pattern that would
+  false-positive on a legitimate target-code identifier, hex digest, or cell
+  reference. A hit (e.g. "my A4" surviving inside an Evidence fence after an
+  A-to-P/A-to-X relabel) is a hard stop, same exit and same "return for
+  redaction" outcome as a self-identification hit -- this closes
+  relabelText's own documented "never put a claim ID inside an Evidence
+  fence" limitation mechanically. --forbid-seats takes the seat letter(s)
+  whose real IDs must not survive in THIS file: the source seat only for a
+  Phase 2 peer-view (e.g. --forbid-seats A when scanning the A-to-P relabeled
+  file seat B will read), both seats for a Phase 3 double-relabeled X/Y file
+  (--forbid-seats A,B). --phase1-dir and --forbid-seats must be supplied
+  together or not at all.
 
 flip:
   Writes --out (a JSON file) with a coin-flipped { "A": "X", "B": "Y" } or
@@ -192,10 +210,77 @@ translate:
   verifications[].evidence from the file, discarding whatever the auditor's
   JSON supplied). This is the ONLY supported way to produce
   findings.json; never hand-transcribe the auditor's X/Y output into real IDs.
-  Known limitation: unlike verifications[], a canonical finding's own
-  evidence/severity/basis/evidence_strength are still auditor-transcribed and
-  trusted -- translate does not yet cross-check them against origins' actual
-  Phase 1 content (see review-protocol.md).
+  (With --phase1-dir) A canonical finding's severity/basis/evidence_strength/
+  evidence are recomputed mechanically from its own origins' real Phase 1
+  claim blocks and OVERWRITE whatever the auditor's JSON supplied for these --
+  same authority precedent as verifications[] over the verifier file above.
+  severity takes the single strongest value among the finding's origins,
+  independently (CRITICAL>HIGH>MEDIUM>LOW) -- severity is a property of
+  impact, not evidence quality, so a finding is never underreported just
+  because its most-severe origin had middling evidence. basis and
+  evidence_strength are DIFFERENT: they are copied together, as a PAIR, from
+  the single "strongest-evidenced origin" (review-protocol.md's own phrase),
+  never independently maximized per field -- doing so can synthesize a
+  (basis, evidence_strength) combination no origin ever actually asserted
+  (e.g. one origin EXECUTED+SUPPORTED, another STATIC_TRACE+REPRODUCED,
+  independent-per-field-max wrongly reports EXECUTED+REPRODUCED, overclaiming
+  the finding's real evidentiary strength beyond what either origin
+  established). The strongest-evidenced origin is chosen by basis first
+  (EXECUTED>STATIC_TRACE>SOURCE_CITATION>INFERENCE), evidence_strength as the
+  tiebreak (REPRODUCED>DETERMINISTIC>SUPPORTED>PLAUSIBLE>SPECULATIVE), then
+  origins[] array order as a final deterministic tiebreak. The chosen
+  origin's real ID is recorded as a new "basis_from" field, so which origin
+  the pair came from is explicit in the artifact, not just inferable from
+  the rule. evidence becomes one verbatim entry per origin, in origins[]
+  order, extracted from each origin's own Evidence fence (same
+  structural-blank-trim rule as a verification file's Evidence: body).
+  Without --phase1-dir, the auditor's own severity/basis/evidence_strength/
+  evidence are trusted as before (no basis_from field is added in that case)
+  -- this recomputation is opt-in via the same flag as the origin-coverage
+  checks above, not a separate flag.
+
+validate:
+  Checks every claim block ("## A<n>"/"## B<n>" through the next heading or
+  EOF) in BOTH seats' real Phase 1 files under --phase1-dir for a recognized
+  "Severity:", "Basis:", "Evidence strength:", and a non-empty "Evidence:"
+  body -- the same completeness check translate's --phase1-dir derivation
+  requires of every ORIGIN claim, run here on every claim up front, before
+  any finding cites it. Also rejects: a claim-like heading that does not
+  match the exact "## A<n>"/"## B<n>" form (e.g. a bare "## 1" -- a model
+  that ignores the claim-ID schema must never be silently read as zero
+  findings, since both parse to zero real claim blocks); a real claim ID
+  heading appearing more than once in the same file (the second block would
+  otherwise silently overwrite the first for mechanical derivation, so the
+  first occurrence is kept and the duplicate is reported, never merged); a
+  claim heading using the OTHER seat's letter (e.g. "## B1" inside
+  A-findings.md); and a seat with zero recognized claim headings AND zero
+  claim-like malformed-heading attempts that does not also contain the exact
+  literal marker "## No findings" under its own seat header -- an empty or
+  unparseable file is never treated as a legitimate zero-findings verdict on
+  its own; ordinary prose like "(no findings)" does NOT satisfy this, only
+  the exact marker heading does. Also checks every raw "## Rebuttals..."
+  line (once a Phase 2 rebuttal exists) against the exact required form
+  "## Rebuttals (from <A|B>) of <A|B> claims" -- matching relabel's own
+  rebuttalHeading regex exactly, since a looser match here would pass a
+  heading relabel itself does not recognize -- and rejects a seat naming
+  itself as its own rebutter ("(from A) of A"). Deliberately does NOT
+  enforce which file a rebuttal heading is appended to: placement is
+  standardized in prose (review-protocol.md and phase-2-cross-examination.md:
+  onto the PEER's file), but relabel itself is placement-agnostic (it
+  relabels a seat's letter wherever the heading appears), so validate only
+  rejects the universally-invalid case above rather than enforcing
+  placement itself. Lists every problem across every claim (not
+  just the first), then exits nonzero. A nonzero exit means: return the
+  affected seat's file to that seat's OWN context for reformatting --
+  restate the required field lines (or the "## No findings" marker), change
+  nothing else -- same procedure as a scan redaction round, never a hand
+  edit. Run this at the Phase 1 gate (before Phase 2 delta briefs are built),
+  again after Phase 2's rebuttals are appended (before Phase 3's double
+  relabel, since that is the only point the rebuttal-heading check above can
+  fire), and again after any reformatting round. A CommonMark thematic break
+  (bare ---/***/___, 3+ chars) between claims is recognized as a claim
+  boundary the same way a heading is, so a real reviewer's own paragraph
+  separator does not corrupt evidence capture.
 `;
 
 function printUsageAndExit(code) {
@@ -214,7 +299,7 @@ function takeValue(argv, i, flag) {
 function parseArgs(argv) {
   if (argv.length === 0) throw new RelayError('missing subcommand');
   const [sub, ...rest] = argv;
-  if (!['relabel', 'scan', 'flip', 'translate'].includes(sub)) {
+  if (!['relabel', 'scan', 'flip', 'translate', 'validate'].includes(sub)) {
     throw new RelayError(`unknown subcommand "${sub}"`);
   }
   const args = { sub };
@@ -229,6 +314,7 @@ function parseArgs(argv) {
     else if (a === '--mapping') { args.mapping = takeValue(rest, i, '--mapping'); i++; }
     else if (a === '--phase1-dir') { args.phase1Dir = takeValue(rest, i, '--phase1-dir'); i++; }
     else if (a === '--verification-dir') { args.verificationDir = takeValue(rest, i, '--verification-dir'); i++; }
+    else if (a === '--forbid-seats') { args.forbidSeats = takeValue(rest, i, '--forbid-seats'); i++; }
     else throw new RelayError(`unknown argument "${a}"`);
   }
   if (sub === 'relabel') {
@@ -242,27 +328,46 @@ function parseArgs(argv) {
       throw new RelayError('--from and --to must differ; an identity relabel is never a real request and reports false success');
     }
     if (args.tokens !== undefined) throw new RelayError('--tokens is only accepted by scan');
-    if (args.mapping !== undefined || args.phase1Dir !== undefined || args.verificationDir !== undefined) {
-      throw new RelayError('--mapping, --phase1-dir, and --verification-dir are only accepted by translate');
+    if (args.mapping !== undefined || args.phase1Dir !== undefined || args.verificationDir !== undefined || args.forbidSeats !== undefined) {
+      throw new RelayError('--mapping and --verification-dir are only accepted by translate; --phase1-dir and --forbid-seats are only accepted by scan (with --phase1-dir) or translate (--phase1-dir only)');
     }
   } else if (sub === 'scan') {
     if (!args.in) throw new RelayError('scan requires --in');
-    if (args.mapping !== undefined || args.phase1Dir !== undefined || args.verificationDir !== undefined) {
-      throw new RelayError('--mapping, --phase1-dir, and --verification-dir are only accepted by translate');
+    if (args.mapping !== undefined || args.verificationDir !== undefined) {
+      throw new RelayError('--mapping and --verification-dir are only accepted by translate');
+    }
+    if ((args.phase1Dir === undefined) !== (args.forbidSeats === undefined)) {
+      throw new RelayError('scan requires --phase1-dir and --forbid-seats together, or neither');
+    }
+    if (args.forbidSeats !== undefined) {
+      const seats = args.forbidSeats.split(',');
+      if (seats.length === 0 || !seats.every((s) => /^[A-Z]$/.test(s))) {
+        throw new RelayError('--forbid-seats must be a comma-separated list of single uppercase letters (e.g. "A" or "A,B")');
+      }
     }
   } else if (sub === 'flip') {
     if (!args.out) throw new RelayError('flip requires --out');
     if (args.tokens !== undefined) throw new RelayError('--tokens is only accepted by scan');
-    if (args.mapping !== undefined || args.phase1Dir !== undefined || args.verificationDir !== undefined) {
-      throw new RelayError('--mapping, --phase1-dir, and --verification-dir are only accepted by translate');
+    if (args.mapping !== undefined || args.phase1Dir !== undefined || args.verificationDir !== undefined || args.forbidSeats !== undefined) {
+      throw new RelayError('--mapping and --verification-dir are only accepted by translate; --phase1-dir and --forbid-seats are only accepted by scan');
     }
   } else if (sub === 'translate') {
     for (const req of ['in', 'out', 'mapping']) {
       if (!args[req]) throw new RelayError(`translate requires --${req}`);
     }
     if (args.tokens !== undefined) throw new RelayError('--tokens is only accepted by scan');
+    if (args.forbidSeats !== undefined) throw new RelayError('--forbid-seats is only accepted by scan');
     if (args.from !== undefined || args.to !== undefined) {
       throw new RelayError('--from and --to are only accepted by relabel');
+    }
+  } else if (sub === 'validate') {
+    if (!args.phase1Dir) throw new RelayError('validate requires --phase1-dir');
+    if (
+      args.in !== undefined || args.out !== undefined || args.from !== undefined ||
+      args.to !== undefined || args.targetDir !== undefined || args.tokens !== undefined ||
+      args.mapping !== undefined || args.verificationDir !== undefined || args.forbidSeats !== undefined
+    ) {
+      throw new RelayError('validate accepts only --phase1-dir');
     }
   }
   return args;
@@ -482,6 +587,37 @@ async function targetDerivedTokens(targetDir, extraTokens = []) {
   return { tokens: found, seatVocabulary };
 }
 
+// Unlike the vendor/seat scan below (which blanks fenced lines -- a fence is real Evidence
+// content, exempt from THAT check by design), a real claim-ID leak is exactly as dangerous inside
+// a fence as outside it: "my A4" inside an Evidence block tells the auditor which anonymous label
+// maps to which real seat just as directly as it would in prose. relabelText/scan's fence-skip
+// exists to protect genuine captured evidence content from being REWRITTEN or treated as
+// identity-token prose, not to make a real claim-ID mention invisible -- see relabelText's own
+// documented "never put a claim ID inside an Evidence fence" limitation this check closes. Scans
+// the RAW, unmodified lines (fence content included) for each forbidden seat's own claim IDs,
+// built from the actual enumerable set in that seat's real Phase 1 file via extractClaimHeadings
+// -- never a generic \b[A-Z]\d+\b, which would false-positive on a legitimate target-code
+// identifier, a hex digest, or a cell reference that happens to look like a claim ID.
+async function scanForKnownClaimIdLeaks(text, phase1Dir, forbidSeats) {
+  const { lines, unterminated } = parseFenceLines(text);
+  if (unterminated) {
+    throw new RelayError('unterminated fenced code block: cannot safely scan past it, fix the file and re-run');
+  }
+  const forbiddenIds = new Set();
+  for (const seat of forbidSeats) {
+    for (const id of extractClaimHeadings(await readPhase1Seat(seat, phase1Dir))) forbiddenIds.add(id);
+  }
+  const hits = [];
+  lines.forEach(({ text: line }, i) => {
+    for (const id of forbiddenIds) {
+      if (new RegExp(`\\b${id}\\b`).test(line)) {
+        hits.push({ line: i + 1, text: line.trim(), id });
+      }
+    }
+  });
+  return hits;
+}
+
 async function scanText(text, targetDir, extraTokens = []) {
   const derived = await targetDerivedTokens(targetDir, extraTokens);
   const { lines: fenceLines, unterminated } = parseFenceLines(text);
@@ -615,6 +751,136 @@ function extractClaimHeadings(text) {
   return found;
 }
 
+const CLAIM_SEVERITY_LINE_RE = /^Severity:\s*(.+?)\s*$/;
+const CLAIM_BASIS_LINE_RE = /^Basis:\s*(.+?)\s*$/;
+const CLAIM_EVIDENCE_STRENGTH_LINE_RE = /^Evidence strength:\s*(.+?)\s*$/;
+const CLAIM_EVIDENCE_LINE_RE = /^Evidence:\s*(.*)$/;
+// A CommonMark thematic break (bare ---/***/___, 3+ chars, optional spaces between them) used as
+// a claim separator, same as real Phase 1 output observed in practice: it terminates the current
+// block/evidence body the same way a "## " heading does, but starts no new block (there is no
+// claim ID on a thematic break) -- so a "---" between "## A1" and "## A2" must not leak into A1's
+// evidence, and must not be misread as itself beginning a claim.
+const THEMATIC_BREAK_RE = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
+
+// Matches a "## "-heading whose text is CLAIM-ID-SHAPED (one or two letters immediately followed
+// by digits, e.g. "A1", "B12", "a1", "A01") but did NOT match CLAIM_HEADING_RE's stricter
+// exactly-[AB]-then-digits pattern -- catches the exact live-run shape ("## 1 -- bad heading",
+// a bare number with NO seat letter at all) plus adjacent malformed variants (wrong seat letter,
+// lowercase, leading zero) a model could plausibly emit while still clearly attempting the claim
+// schema. Deliberately narrower than "any heading": an ordinary prose heading like
+// "## Checks performed" must never be flagged as a malformed claim attempt.
+const CLAIM_LIKE_HEADING_RE = /^##\s+([A-Za-z]{0,2}\d+)\b/;
+
+// The fixed, literal marker a seat with GENUINELY zero findings must emit under its own seat
+// header, distinct from merely having no recognized "## A<n>" headings (which is indistinguishable
+// from "the model ignored the schema" without a marker -- exactly the false-clean validate gap a
+// live run exposed: a bare-number-heading file and a real empty-findings file both parsed to zero
+// claim blocks). Matched on the RAW line (heading-shaped structural test, same principle as
+// CLAIM_HEADING_RE), case-sensitive and exact, so it can't be satisfied by incidental prose.
+const NO_FINDINGS_MARKER_RE = /^##\s+No findings\s*$/;
+
+// Same fence-skip-then-raw-line discipline as extractClaimHeadings, extended to pull each
+// claim's own Severity/Basis/Evidence strength/Evidence body -- the fields translate needs to
+// derive a canonical finding's basis/evidence_strength/evidence mechanically instead of trusting
+// the auditor's transcription of them (review-protocol.md's own stated known limitation). A block
+// runs from one "## A<n>"/"## B<n>" heading to the next heading of any kind (or EOF); only the
+// FIRST occurrence of each field line before the first "Evidence:" line is used, matching the
+// fixture's own shape (Severity/Basis/Evidence strength always precede Evidence). The evidence
+// body reuses parseVerificationFile's exact structural-blank-trim rule (leading blank line from
+// "Evidence:" alone, trailing blank line(s) from the block's own end) so a claim's Evidence fence
+// is captured the same verbatim way a falsification verifier's Evidence: block already is.
+// Also collects malformedHeadings (claim-like but not a real "## A<n>"/"## B<n>" heading -- the
+// exact live-run "## 1" shape) and duplicateIds (a real claim ID heading appearing more than
+// once -- silently overwriting the first block would let one claim erase another for mechanical
+// derivation) and noFindingsMarker (whether the fixed marker line was seen anywhere, unfenced),
+// so a caller can distinguish "zero claims because genuinely none" from "zero claims because the
+// model ignored the schema" -- the exact ambiguity a live run's false-clean validate result
+// exposed.
+function extractClaimBlocks(text) {
+  const { lines, unterminated } = parseFenceLines(text);
+  if (unterminated) {
+    throw new RelayError('unterminated fenced code block: cannot safely parse claim blocks past it, fix the file and re-run');
+  }
+  const blocks = new Map();
+  const malformedHeadings = [];
+  const duplicateIds = [];
+  let noFindingsMarker = false;
+  let current = null;
+  let evidenceLines = null;
+  const finishEvidence = () => {
+    if (current === null || evidenceLines === null) return;
+    const isStructuralBlank = (l) => l === '' || l === '\r';
+    const trimmed = [...evidenceLines];
+    while (trimmed.length > 0 && isStructuralBlank(trimmed[0])) trimmed.shift();
+    while (trimmed.length > 0 && isStructuralBlank(trimmed[trimmed.length - 1])) trimmed.pop();
+    current.evidence = trimmed.join('\n').replace(/\r$/, '');
+    evidenceLines = null;
+  };
+  lines.forEach(({ text: line, inFence }, idx) => {
+    const headingMatch = !inFence ? CLAIM_HEADING_RE.exec(line) : null;
+    const isHeading = !inFence && /^##\s+/.test(line);
+    if (isHeading) {
+      finishEvidence();
+      if (!headingMatch && NO_FINDINGS_MARKER_RE.test(line)) {
+        noFindingsMarker = true;
+        current = null;
+        return;
+      }
+      if (!headingMatch) {
+        const claimLike = CLAIM_LIKE_HEADING_RE.exec(line);
+        if (claimLike) malformedHeadings.push({ line: idx + 1, text: line.trim(), attempted: claimLike[1] });
+        current = null;
+        return;
+      }
+      if (blocks.has(headingMatch[1])) {
+        duplicateIds.push({ id: headingMatch[1], line: idx + 1, text: line.trim() });
+        current = null; // the duplicate's own body is not merged into or replacing the original
+        return;
+      }
+      current = { id: headingMatch[1], severity: null, basis: null, evidenceStrength: null, evidence: null };
+      blocks.set(current.id, current);
+      return;
+    }
+    // A thematic break terminates evidence accumulation (trailing prose after a fence, before the
+    // next claim) the same way it terminates a claim with no evidence at all -- but only OUTSIDE a
+    // fence: a "---" inside a fence is real content (e.g. a captured CLI table separator), never a
+    // structural break, same principle as the fence-delimiter check below.
+    if (!inFence && THEMATIC_BREAK_RE.test(line)) {
+      finishEvidence();
+      current = null;
+      return;
+    }
+    if (current === null) return;
+    if (evidenceLines !== null) {
+      if (inFence) {
+        // A fence delimiter line (opener, matched by FENCE_OPEN_RE regardless of an info string
+        // like "```text"; or closer, the line whose OWN inFence is true but the NEXT line's is
+        // not, or end of file) is a structural marker, not evidence content -- only lines strictly
+        // BETWEEN the delimiters are the fenced body. A bare ``` mid-fence inside a ~~~-opened
+        // block stays content (parseFenceLines already keeps inFence true across it).
+        const prevInFence = idx > 0 ? lines[idx - 1].inFence : false;
+        const nextInFence = idx + 1 < lines.length ? lines[idx + 1].inFence : false;
+        const isOpener = !prevInFence && FENCE_OPEN_RE.test(line);
+        const isCloser = !isOpener && !nextInFence;
+        if (isOpener || isCloser) return;
+      }
+      evidenceLines.push(line);
+      return;
+    }
+    if (inFence) return;
+    const sevMatch = CLAIM_SEVERITY_LINE_RE.exec(line);
+    if (sevMatch && current.severity === null) { current.severity = sevMatch[1]; return; }
+    const basisMatch = CLAIM_BASIS_LINE_RE.exec(line);
+    if (basisMatch && current.basis === null) { current.basis = basisMatch[1]; return; }
+    const esMatch = CLAIM_EVIDENCE_STRENGTH_LINE_RE.exec(line);
+    if (esMatch && current.evidenceStrength === null) { current.evidenceStrength = esMatch[1]; return; }
+    const evMatch = CLAIM_EVIDENCE_LINE_RE.exec(line);
+    if (evMatch && current.evidence === null) { evidenceLines = [evMatch[1]]; return; }
+  });
+  finishEvidence();
+  return { blocks, malformedHeadings, duplicateIds, noFindingsMarker };
+}
+
 async function readPhase1Seat(seat, phase1Dir) {
   const filePath = path.join(phase1Dir, `${seat}-findings.md`);
   try {
@@ -622,6 +888,110 @@ async function readPhase1Seat(seat, phase1Dir) {
   } catch (err) {
     throw new RelayError(`--phase1-dir: could not read ${filePath}: ${err.message}`);
   }
+}
+
+// Independent max across origins, strongest wins, so a canonical finding never underreports
+// what its own origins already established -- review-protocol.md's "highest severity among
+// origins" / "the strongest-evidenced origin's values, cited" rule, applied mechanically instead
+// of trusted from the auditor's transcription. Order is most-authoritative first.
+const SEVERITY_RANK = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+const BASIS_RANK = ['EXECUTED', 'STATIC_TRACE', 'SOURCE_CITATION', 'INFERENCE'];
+const EVIDENCE_STRENGTH_RANK = ['REPRODUCED', 'DETERMINISTIC', 'SUPPORTED', 'PLAUSIBLE', 'SPECULATIVE'];
+
+function strongest(rank, values) {
+  let best = null;
+  let bestIdx = Infinity;
+  for (const v of values) {
+    const idx = rank.indexOf(v);
+    if (idx === -1) continue; // an unrecognized value is never treated as strongest; caller's own enum check catches it
+    if (idx < bestIdx) { bestIdx = idx; best = v; }
+  }
+  return best;
+}
+
+// Picks the single "strongest-evidenced origin" review-protocol.md's Canonical findings section
+// names ("basis / evidence_strength: the strongest-evidenced origin's values, cited") -- NOT two
+// independent per-field maxima. Independently maximizing basis and evidence_strength across
+// different origins can synthesize a (basis, evidence_strength) PAIR no origin ever actually
+// asserted (e.g. one origin EXECUTED+SUPPORTED, another STATIC_TRACE+REPRODUCED, independent-max
+// wrongly reports EXECUTED+REPRODUCED -- a combination that never existed and overclaims the
+// finding's real evidentiary strength). Tiebreak order: basis first (the protocol always lists
+// "basis / evidence_strength" in that order, and basis -- how the claim was discovered -- is the
+// more fundamental axis), evidence_strength second, then origins[] array order as a final,
+// deterministic tiebreak so two origins tied on both axes still resolve the same way every run.
+function strongestOriginIndex(blocks) {
+  let bestI = 0;
+  for (let i = 1; i < blocks.length; i++) {
+    const basisCmp = BASIS_RANK.indexOf(blocks[i].basis) - BASIS_RANK.indexOf(blocks[bestI].basis);
+    if (basisCmp < 0) { bestI = i; continue; }
+    if (basisCmp > 0) continue;
+    const esCmp =
+      EVIDENCE_STRENGTH_RANK.indexOf(blocks[i].evidenceStrength) -
+      EVIDENCE_STRENGTH_RANK.indexOf(blocks[bestI].evidenceStrength);
+    if (esCmp < 0) bestI = i;
+  }
+  return bestI;
+}
+
+async function getClaimBlock(id, phase1Dir, blocksBySeat) {
+  const seat = id[0];
+  if (!blocksBySeat.has(seat)) {
+    blocksBySeat.set(seat, extractClaimBlocks(await readPhase1Seat(seat, phase1Dir)).blocks);
+  }
+  const block = blocksBySeat.get(seat).get(id);
+  if (!block) {
+    throw new RelayError(`--phase1-dir: origin "${id}" has no matching claim block in ${seat}-findings.md`);
+  }
+  return block;
+}
+
+// Overwrites a finding's severity/basis/evidence_strength/evidence with values derived
+// mechanically from its own real Phase 1 origins, discarding whatever the auditor's JSON
+// supplied for these -- same precedent as checkVerificationsAgainstDir's verifier-file
+// authority. Only runs when --phase1-dir is supplied; without it, the auditor's own values are
+// still trusted, matching the pre-existing behavior and USAGE's known-limitation text for that case.
+// blocksBySeat is caller-scoped (one per translateFindings call, reused across findings in that
+// call), never module-level -- a pure function shouldn't carry state across unrelated calls.
+// A missing or unrecognized field in an origin's own claim block (a typo'd "Evidence Strength:",
+// a value outside the enum, no "Evidence:" line at all) must REFUSE, never silently fall back to
+// trusting the auditor's transcription for that field -- the whole point of this derivation is
+// that the auditor's copy is never trusted once --phase1-dir is supplied. A silent fallback here
+// would reintroduce exactly the un-cross-checked trust the "Known limitation" this closes.
+// Single source of truth for "is this claim block usable" -- shared by deriveFromOrigins (which
+// throws on the first problem, mid-translate) and the validate subcommand (which collects every
+// problem across every claim in a file, so a reformatting round can fix them all at once instead
+// of one RelayError per re-run). Returns a list of human-readable problem strings, empty if none.
+function claimBlockProblems(block) {
+  const problems = [];
+  if (block.severity === null || !SEVERITY_VALUES.has(block.severity)) {
+    problems.push('no recognized "Severity:" line');
+  }
+  if (block.basis === null || !BASIS_VALUES.has(block.basis)) {
+    problems.push('no recognized "Basis:" line');
+  }
+  if (block.evidenceStrength === null || !EVIDENCE_STRENGTH_VALUES.has(block.evidenceStrength)) {
+    problems.push('no recognized "Evidence strength:" line');
+  }
+  if (typeof block.evidence !== 'string' || block.evidence.length === 0) {
+    problems.push('no non-empty "Evidence:" body');
+  }
+  return problems;
+}
+
+async function deriveFromOrigins(finding, phase1Dir, blocksBySeat) {
+  const blocks = await Promise.all(finding.origins.map((id) => getClaimBlock(id, phase1Dir, blocksBySeat)));
+  for (const [id, block] of finding.origins.map((id, i) => [id, blocks[i]])) {
+    const problems = claimBlockProblems(block);
+    if (problems.length > 0) {
+      throw new RelayError(`--phase1-dir: origin "${id}" has ${problems.join(', ')} in its Phase 1 claim block`);
+    }
+  }
+  finding.severity = strongest(SEVERITY_RANK, blocks.map((b) => b.severity));
+  const strongestIdx = strongestOriginIndex(blocks);
+  finding.basis = blocks[strongestIdx].basis;
+  finding.evidence_strength = blocks[strongestIdx].evidenceStrength;
+  finding.basis_from = finding.origins[strongestIdx];
+  finding.evidence = blocks.map((b) => b.evidence);
 }
 
 async function checkOriginsAgainstPhase1(origins, phase1Dir) {
@@ -831,6 +1201,7 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir)
   const translated = translateValue(parsed, auditToSeat);
   const seenFindingIds = new Set();
   const seenOrigins = new Set();
+  const blocksBySeat = new Map();
   for (const finding of translated.findings) {
     if (!FINDING_ID_RE.test(finding.id)) {
       throw new RelayError(`finding id "${finding.id}" is not of the form "F<n>"`);
@@ -857,7 +1228,10 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir)
       }
       seenOrigins.add(origin);
     }
-    if (phase1Dir) await checkOriginsAgainstPhase1(finding.origins, phase1Dir);
+    if (phase1Dir) {
+      await checkOriginsAgainstPhase1(finding.origins, phase1Dir);
+      await deriveFromOrigins(finding, phase1Dir, blocksBySeat);
+    }
     if (
       !Array.isArray(finding.evidence) ||
       finding.evidence.length === 0 ||
@@ -1129,19 +1503,26 @@ async function runRelabel(args) {
 async function runScan(args) {
   const text = await fs.readFile(args.in, 'utf8');
   const { selfIdHits, identityHits, otherHits } = await scanText(text, args.targetDir, parseTokensArg(args.tokens));
+  const claimIdHits = args.forbidSeats
+    ? await scanForKnownClaimIdLeaks(text, args.phase1Dir, args.forbidSeats.split(','))
+    : [];
   for (const h of otherHits) {
     log(`report line ${h.line}${h.targetDerived ? ' (target-derived)' : ''}: ${h.text}`);
   }
   for (const h of identityHits) {
     log(`IDENTITY line ${h.line}: ${h.text}`);
   }
+  for (const h of claimIdHits) {
+    log(`CLAIM-ID LEAK line ${h.line} (real "${h.id}" survives relabel): ${h.text}`);
+  }
   for (const h of selfIdHits) {
     log(`SELF-IDENTIFICATION line ${h.line}: ${h.text}`);
   }
-  if (selfIdHits.length > 0 || identityHits.length > 0) {
+  if (selfIdHits.length > 0 || identityHits.length > 0 || claimIdHits.length > 0) {
     log(
       `${selfIdHits.length} self-identification match(es), ${identityHits.length} other ` +
-        'non-target-derived identity match(es); return this file for redaction, do not forward'
+        `non-target-derived identity match(es), ${claimIdHits.length} real claim-ID leak(es); ` +
+        'return this file for redaction, do not forward'
     );
     process.exit(1);
   }
@@ -1172,6 +1553,107 @@ async function runTranslate(args) {
   process.stdout.write(`translated ${translated.findings.length} finding(s), wrote ${args.out}\n`);
 }
 
+// Checks every claim block in both seats' real Phase 1 files against claimBlockProblems, listing
+// EVERY failure across every claim (not first-fail) so a reformatting round can fix them all at
+// once instead of one RelayError per re-run -- the same "collect, don't stop at first" reasoning
+// runScan already applies for identity hits. Meant to gate Phase 1 (before Phase 2 exchange) and
+// again after any reformatting round, per the phase-1/phase-2 docs.
+// Stricter than relabel's own rebuttalHeading regex ([A-Z]): restricted to [AB] since a Phase 1
+// file only ever carries real A/B letters, so anything this accepts also matches relabel's
+// regex -- a validate-clean file never has a heading relabel would fail to recognize.
+// Deliberately placement-agnostic: phase-2-cross-examination.md and review-protocol.md
+// standardize placement in prose (onto the PEER's file), but relabel itself relabels a seat's
+// letter wherever the heading appears. The only universally-invalid case this check rejects
+// is a seat naming itself as its own rebutter.
+const REBUTTAL_HEADING_EXACT_RE = /^## Rebuttals \(from ([AB])\) of ([AB]) claims$/;
+const REBUTTAL_HEADING_LIKE_RE = /^##\s+Rebuttals\b/;
+
+async function runValidate(args) {
+  const problems = [];
+  for (const seat of ['A', 'B']) {
+    const text = await readPhase1Seat(seat, args.phase1Dir);
+    const { blocks, malformedHeadings, duplicateIds, noFindingsMarker } = extractClaimBlocks(text);
+    // relabel's second (peer-letter) pass legitimately exits nonzero with "no <letter> claim IDs,
+    // seat header, or rebuttal heading found" when a seat had zero rebuttals to append -- that
+    // exit code is documented as expected, not a failure, so a malformed rebuttal heading must be
+    // caught here instead: it produces the identical "no match" signal to relabel and would
+    // otherwise be silently routed around the same way.
+    // Fence-aware and tested against the RAW line, exactly like relabel's own rebuttalHeading
+    // check (never trimmed, never applied inside a fence) -- a looser test here (trim, or ignore
+    // fences) could accept a heading relabel itself would not recognize (e.g. trailing
+    // whitespace), or flag one quoted verbatim inside an Evidence fence as if it were real.
+    const { lines: fenceLines } = parseFenceLines(text);
+    fenceLines.forEach(({ text: line, inFence }, i) => {
+      if (inFence) return;
+      const likeMatch = REBUTTAL_HEADING_LIKE_RE.test(line.trim());
+      if (!likeMatch) return;
+      const exactMatch = REBUTTAL_HEADING_EXACT_RE.exec(line);
+      if (exactMatch && exactMatch[1] !== exactMatch[2]) return;
+      if (exactMatch) {
+        problems.push(
+          `${seat}-findings.md:${i + 1}: heading "${line.trim()}" names a seat rebutting its own ` +
+            'claims ("from X) of X") -- a rebuttal always addresses the PEER\'s claims, never ' +
+            'the same seat\'s own'
+        );
+        return;
+      }
+      problems.push(
+        `${seat}-findings.md:${i + 1}: heading "${line.trim()}" looks like a rebuttal-section ` +
+          'heading but does not match the required "## Rebuttals (from <letter>) of <letter> ' +
+          'claims" form -- relabel\'s "no rebuttal heading found" exit is expected for a seat ' +
+          'with zero rebuttals, so a malformed heading here would be silently indistinguishable ' +
+          'from that case instead of being caught as a formatting defect'
+      );
+    });
+    for (const [id, block] of blocks) {
+      // Wrong-seat heading: a real "## B<n>" heading inside A-findings.md (CLAIM_HEADING_RE
+      // matches [AB]\d+ regardless of which file it's in, since the regex has no seat context --
+      // this is the one malformation class only the caller, which DOES know which file it's
+      // reading, can catch).
+      if (id[0] !== seat) {
+        problems.push(`${seat}-findings.md: claim "${id}" uses seat "${id[0]}"'s letter, not this file's own seat "${seat}"`);
+        continue;
+      }
+      for (const p of claimBlockProblems(block)) {
+        problems.push(`${seat}-findings.md: claim "${id}" has ${p}`);
+      }
+    }
+    for (const m of malformedHeadings) {
+      problems.push(
+        `${seat}-findings.md:${m.line}: heading "${m.text}" looks like an attempted claim ID ` +
+          `("${m.attempted}") but does not match the required "## ${seat}<n>" form -- a model ` +
+          'ignoring the claim-ID schema (e.g. a bare "## 1") must not be mistaken for a genuine ' +
+          'zero-findings pass'
+      );
+    }
+    for (const d of duplicateIds) {
+      problems.push(
+        `${seat}-findings.md:${d.line}: claim "${d.id}" heading appears more than once -- a ` +
+          'duplicate real claim ID would silently collapse two different claims into one for ' +
+          'mechanical derivation'
+      );
+    }
+    // A seat with zero real claim blocks AND zero malformed-heading attempts must still carry the
+    // fixed "## No findings" marker -- otherwise "the model wrote nothing claim-shaped" and "the
+    // model genuinely found nothing" are mechanically indistinguishable, the exact ambiguity a
+    // live run's false-clean validate result exposed.
+    if (blocks.size === 0 && malformedHeadings.length === 0 && !noFindingsMarker) {
+      problems.push(
+        `${seat}-findings.md: has zero recognized claim headings and no "## No findings" marker ` +
+          '-- an empty or unparseable result is never treated as a legitimate zero-findings ' +
+          'verdict; the seat must state it explicitly'
+      );
+    }
+  }
+  if (problems.length > 0) {
+    for (const p of problems) log(p);
+    log(`${problems.length} claim block problem(s); return the affected seat's file to its own ` +
+      'context for reformatting (same procedure as a scan redaction round, never a hand edit)');
+    process.exit(1);
+  }
+  process.stdout.write('validate clean: every claim block in both seats has a recognized Severity/Basis/Evidence strength/Evidence, and every rebuttal-section heading matches the required form\n');
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === '-h' || argv[0] === '--help') printUsageAndExit(0);
@@ -1191,6 +1673,7 @@ async function main() {
     else if (args.sub === 'scan') await runScan(args);
     else if (args.sub === 'flip') await runFlip(args);
     else if (args.sub === 'translate') await runTranslate(args);
+    else if (args.sub === 'validate') await runValidate(args);
   } catch (err) {
     if (err instanceof RelayError) {
       log(err.message);
@@ -1214,6 +1697,9 @@ export {
   splitProseAndCode,
   relabelText,
   scanText,
+  scanForKnownClaimIdLeaks,
+  extractClaimBlocks,
+  claimBlockProblems,
   flipMapping,
   invertSeatMapping,
   translateFindings,

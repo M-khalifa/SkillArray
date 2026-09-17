@@ -17,6 +17,11 @@ test commands, execution permissions, findings schema from
 Tests requiring writes must use approved disposable locations; if that is not
 possible, mark those checks blocked and report a non-EXECUTED basis instead.
 
+Run pre-flight evidence per [review-protocol.md](review-protocol.md)'s
+Scope and independence section
+([scripts/preflight.mjs](../scripts/preflight.mjs)) before dispatching either
+seat, and include its output in the task packet.
+
 Pick a lens from [review-profiles.md](review-profiles.md) (Code, Architecture,
 or Document — inferred from the target, not asked of the user unless genuinely
 ambiguous) and give both seats the same choice in the task packet.
@@ -91,7 +96,16 @@ secondary detection check, not the primary guarantee for OpenCode anymore.
 Wait for both processes/agents to finish. Require a zero dispatcher exit and
 `status: completed` (a `timed-out` status, when `--timeout` was passed, ends
 this attempt the same as any other failed pass — diagnose before retrying, do
-not silently drop the timeout on retry). Validate seat B's `finalMessage`,
+not silently drop the timeout on retry), AND `scripts/blind-relabel.mjs
+validate --phase1-dir <run-dir>/phase1` exits zero. A nonzero `validate` exit
+means at least one claim block is missing a recognized `Severity:`, `Basis:`,
+`Evidence strength:`, or non-empty `Evidence:` — return the affected seat's
+file to its OWN context for reformatting (restate the required field lines
+verbatim, change nothing else), the same procedure as a `scan` redaction
+round, never a hand edit. A reviewer following the brief template loosely
+(e.g. dropping the `Evidence:` label and going straight to prose) is common
+enough in practice to gate here rather than discover it only when Phase 3's
+`translate --phase1-dir` refuses much later. Validate seat B's `finalMessage`,
 including an explicit no-findings statement if applicable. Preserve the
 resumable session ID from Phase 1's result (`threadId` for Codex, `sessionId`
 for OpenCode) in the run manifest; later dispatches must use this exact ID.

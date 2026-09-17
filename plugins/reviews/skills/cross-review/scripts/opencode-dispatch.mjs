@@ -36,74 +36,28 @@
 // already works, same as codex-dispatch.mjs assumes `codex login` already
 // succeeded).
 
-import { spawn } from 'node:child_process';
 import { promises as fs, createReadStream } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
+import { buildChildEnv } from './env-filter.mjs';
+import {
+  assertWin32Safe,
+  winQuote,
+  posixKillTree,
+  killTree as killTreeShared,
+  spawnCli,
+} from './spawn-utils.mjs';
 
-const NEEDS_SHELL = process.platform === 'win32';
+// Provisional -- see the matching comment in codex-dispatch.mjs's parseArgs.
+const DEFAULT_TIMEOUT_S = 1800;
 
-const WIN32_UNSAFE_CHARS = /["%]|\\$/;
-
-function assertWin32Safe(arg, { platform = process.platform } = {}) {
-  if (platform === 'win32' && WIN32_UNSAFE_CHARS.test(String(arg))) {
-    throw new RelayError(
-      `argument "${arg}" contains a character unsafe to pass through cmd.exe on Windows ` +
-        `(a double quote, a percent sign, or a trailing backslash) — rename the path/value ` +
-        `to avoid these characters`
-    );
-  }
-  return arg;
-}
-
-function winQuote(arg) {
-  return `"${String(arg).replace(/"/g, '\\"')}"`;
-}
-
-// child.killed means the signal was sent, not that the process exited, so it
-// never reflects whether SIGTERM actually worked; escalation must wait for
-// the real 'exit' event instead. Killing the negative pid targets the whole
-// process group (spawnCli sets detached:true on POSIX for this reason), not
-// just the direct child, so a forked grandchild doesn't get orphaned.
-function posixKillTree(child, { kill = (pid, sig) => process.kill(pid, sig), escalateMs = 5000 } = {}) {
-  return new Promise((resolvePromise) => {
-    if (!child.pid) { resolvePromise(); return; }
-    let exited = false;
-    child.once('exit', () => { exited = true; resolvePromise(); });
-    const send = (sig) => {
-      try { kill(-child.pid, sig); } catch (err) { if (err.code !== 'ESRCH') throw err; }
-    };
-    send('SIGTERM');
-    setTimeout(() => {
-      if (exited) return;
-      send('SIGKILL');
-      // Bound the wait even if the group ignores SIGKILL (e.g. already reaped).
-      setTimeout(() => { if (!exited) resolvePromise(); }, 1000);
-    }, escalateMs);
-  });
-}
-
-// On win32, spawnCli runs the child under cmd.exe (shell:true), so child.pid is
-// cmd.exe's PID and child.kill() only terminates cmd.exe; opencode.exe behind
-// the shim would be orphaned and keep running. taskkill /T kills the whole tree.
+// killTree wired to this file's own log() so a taskkill failure is reported
+// with this dispatcher's own message prefix, matching pre-extraction behavior.
 function killTree(child) {
-  if (NEEDS_SHELL) {
-    // Absolute path, not "taskkill": a caller may have narrowed PATH down to
-    // just the CLI it wants dispatched, and taskkill.exe would not resolve.
-    const taskkillPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
-    return new Promise((resolvePromise) => {
-      const killer = spawn(taskkillPath, ['/pid', String(child.pid), '/T', '/F']);
-      let settled = false;
-      const finish = () => { if (!settled) { settled = true; resolvePromise(); } };
-      killer.on('error', (err) => { log(`taskkill failed: ${err.message}`); finish(); });
-      killer.on('close', finish);
-      setTimeout(finish, 5000);
-    });
-  }
-  return posixKillTree(child);
+  return killTreeShared(child, { log });
 }
 
 const SIGNAL_EXIT_CODE = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
@@ -125,25 +79,12 @@ function installSignalForwarding(child, { proc = process, killTreeFn = killTree,
   };
 }
 
-// spawnFn/platform are overridable so tests can assert the exact options passed to spawn() on
-// a POSIX branch (detached:true, shell:false) without needing to actually run on POSIX.
-function spawnCli(cmd, args, opts, { spawnFn = spawn, platform = process.platform } = {}) {
-  const needsShell = platform === 'win32';
-  if (needsShell) {
-    for (const a of [cmd, ...args]) assertWin32Safe(a, { platform });
-    const cmdLine = [winQuote(cmd), ...args.map(winQuote)].join(' ');
-    return spawnFn(cmdLine, { ...opts, shell: true });
-  }
-  // detached:true puts the child in its own process group so posixKillTree
-  // can kill(-pid) the whole group, not just the direct child.
-  return spawnFn(cmd, args, { ...opts, shell: false, detached: true });
-}
-
 const USAGE = `opencode-dispatch.mjs — dispatch a brief to OpenCode CLI ("opencode run") and capture the result as JSON.
 
 Usage:
   node opencode-dispatch.mjs --brief <path> --cd <path> [--session <sessionID>]
                  [--model <provider/model>] [--variant <level>] [--timeout <seconds>] [--isolate]
+                 [--env-mode filtered|inherit] [--env-passthrough NAME,NAME]
 
 Required:
   --brief <path>         Path to a text file containing the prompt/brief. Attached via
@@ -172,7 +113,21 @@ Optional:
   --timeout <seconds>    Kill opencode run (whole process tree on win32, process group on
                          POSIX) if it hasn't closed within this many seconds, and write
                          status "timed-out" instead of
-                         "completed" or "error". Omit for no limit (backward-compatible default).
+                         "completed" or "error". 0 means unlimited (never times out). Default
+                         when omitted: 1800 (30 minutes) -- a provisional value, not derived
+                         from measured run durations; result.json's durationMs field exists
+                         precisely so this default can be re-derived from real data.
+  --env-mode <mode>      "filtered" (default) or "inherit". "filtered" passes the spawned
+                         opencode process only a base OS allowlist and anything named in
+                         --env-passthrough, excluding everything else in this process's
+                         environment (AWS_*, GITHUB_TOKEN, database passwords, etc.) that the
+                         REVIEWED repository's own code could otherwise read if opencode
+                         executes a command against it. OpenCode's own credentials live in a
+                         local database located via HOME/XDG_DATA_HOME, both already
+                         allowlisted. "inherit" passes the full parent environment unfiltered,
+                         matching pre-1.4.0 behavior.
+  --env-passthrough <names>  Comma-separated extra environment variable names to allow through
+                         under --env-mode filtered. Ignored under --env-mode inherit.
   --isolate              Run OpenCode against a disposable git worktree of --cd instead of
                          --cd itself, since OpenCode has no --sandbox read-only equivalent
                          (see model-capabilities.md). The worktree is created once under
@@ -223,6 +178,16 @@ Output:
                                  skipped rather than copied in. Always null when isolated is false.
     status        "completed"|"error"|"timed-out"
     error         string        Present when status is "error" or "timed-out"; failure reason.
+    usage         object        {input_tokens, cached_input_tokens, cache_write_input_tokens,
+                                 output_tokens, reasoning_tokens, estimated_cost_usd, source, raw}
+                                 when OpenCode's own step_finish event was observed (source:
+                                 "provider"), or {source: "unavailable"} otherwise. "raw" is the
+                                 verbatim step_finish.part object (OpenCode's own field names
+                                 differ from codex's/Claude's -- see the code comment on
+                                 buildUsageField). estimated_cost_usd is always null even though
+                                 OpenCode's own event carries a "cost" field: a live call using
+                                 21,703 tokens reported cost:0, an unreliable signal for this
+                                 provider -- see "raw" for OpenCode's own reported value instead.
 
 Exit code: 0 on success, non-zero on failure (missing brief/--cd, opencode not found or
 not authenticated, opencode exited non-zero, etc).
@@ -243,6 +208,8 @@ function parseArgs(argv) {
     skipGitRepoCheck: false,
     timeout: null,
     isolate: false,
+    envMode: 'filtered',
+    envPassthrough: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -282,6 +249,12 @@ function parseArgs(argv) {
       case '--timeout':
         args.timeout = takeValue();
         break;
+      case '--env-mode':
+        args.envMode = takeValue();
+        break;
+      case '--env-passthrough':
+        args.envPassthrough = takeValue().split(',').map((s) => s.trim()).filter(Boolean);
+        break;
       case '--isolate':
         args.isolate = true;
         break;
@@ -298,10 +271,21 @@ function parseArgs(argv) {
     throw new RelayError('--variant must be a level token; omit it for default effort');
   }
   if (args.timeout !== null) {
-    if (!/^[1-9][0-9]*$/.test(args.timeout)) {
-      throw new RelayError('--timeout must be a positive whole number of seconds');
+    if (!/^[0-9]+$/.test(args.timeout)) {
+      throw new RelayError('--timeout must be a whole number of seconds, 0 for unlimited');
     }
     args.timeout = Number(args.timeout);
+  } else {
+    // Provisional default: see the matching comment in codex-dispatch.mjs.
+    args.timeout = DEFAULT_TIMEOUT_S;
+  }
+  if (args.envMode !== 'filtered' && args.envMode !== 'inherit') {
+    throw new RelayError('--env-mode must be "filtered" or "inherit"');
+  }
+  for (const name of args.envPassthrough) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new RelayError(`--env-passthrough: "${name}" is not a valid environment variable name`);
+    }
   }
   return args;
 }
@@ -766,13 +750,17 @@ function buildOpencodeArgs({ briefPath, cd, session, model, variant }) {
 // real `opencode` binary. See scripts/tests/opencode-dispatch.test.mjs.
 const OPENCODE_SPAWN_STDIO = ['ignore', 'pipe', 'pipe'];
 
-function runOpencode({ briefPath, cd, session, model, variant, timeout }) {
+function runOpencode({ briefPath, cd, session, model, variant, timeout, envMode, envPassthrough }) {
   return new Promise((resolve, reject) => {
     const args = buildOpencodeArgs({ briefPath, cd, session, model, variant });
+    // No providerAllowlist: OpenCode's own credentials resolve via
+    // env-filter.mjs's already-allowlisted vars (XDG_DATA_HOME/HOME), unlike
+    // codex's CODEX_HOME.
+    const env = buildChildEnv({ envMode, envPassthrough });
 
     let child;
     try {
-      child = spawnCli('opencode', args, { cwd: cd, stdio: OPENCODE_SPAWN_STDIO });
+      child = spawnCli('opencode', args, { cwd: cd, stdio: OPENCODE_SPAWN_STDIO, env });
     } catch (err) {
       reject(new RelayError(`failed to spawn "opencode": ${err.message}`));
       return;
@@ -787,6 +775,7 @@ function runOpencode({ briefPath, cd, session, model, variant, timeout }) {
 
     let sessionId = null;
     let finalMessage = null;
+    let tokens = null;
     let stderrBuf = '';
     let timedOut = false;
     let settled = false;
@@ -807,7 +796,7 @@ function runOpencode({ briefPath, cd, session, model, variant, timeout }) {
           if (settled) return;
           settled = true;
           rl.close();
-          resolve({ code: null, sessionId, finalMessage, stderr: stderrBuf, badLines, timedOut });
+          resolve({ code: null, sessionId, finalMessage, tokens, stderr: stderrBuf, badLines, timedOut });
         }, 5000);
       }, timeout * 1000);
     }
@@ -835,6 +824,22 @@ function runOpencode({ briefPath, cd, session, model, variant, timeout }) {
         // final response, matching how codex-dispatch.mjs takes the last
         // agent_message rather than the first.
         finalMessage = evt.part.text;
+      } else if (
+        evt.type === 'step_finish' &&
+        evt.part &&
+        evt.part.type === 'step-finish' &&
+        evt.part.tokens
+      ) {
+        // Verified live (single-turn call): step_finish.part.tokens carries
+        // {total, input, output, reasoning, cache:{write,read}} plus a
+        // top-level cost. NOT verified whether tokens is cumulative across
+        // multiple step_finish events in a multi-turn run or per-step only
+        // -- the live call used to confirm this shape only had one turn.
+        // Taking the LAST step_finish seen, same "last wins" rule as
+        // finalMessage above; if a future multi-turn verification shows this
+        // is per-step rather than cumulative, this must change to SUM across
+        // events instead of overwrite.
+        tokens = evt.part;
       }
     });
 
@@ -848,9 +853,40 @@ function runOpencode({ briefPath, cd, session, model, variant, timeout }) {
       if (settled) return;
       settled = true;
       rl.close();
-      resolve({ code, sessionId, finalMessage, stderr: stderrBuf, badLines, timedOut });
+      resolve({ code, sessionId, finalMessage, tokens, stderr: stderrBuf, badLines, timedOut });
     });
   });
+}
+
+// Maps a step_finish.part event (or its absence) to result.json's "usage"
+// field, with explicit provenance. Includes a "raw" copy of the observed
+// part verbatim: OpenCode's cache vocabulary (cache.read/cache.write) differs
+// from codex's (cached_input_tokens/cache_write_input_tokens) and from
+// Claude's own JSON output (cache_read_input_tokens/cache_creation_input_tokens)
+// -- three different CLIs, three different field names for conceptually the
+// same thing. Rather than pick one normalized name and lose the others'
+// exact original shape, this keeps the provider's own field names in "raw"
+// alongside a normalized view, so no future rename question needs revisiting
+// here. estimated_cost_usd stays null even when a "cost" field is present:
+// a live call using 21,703 tokens reported cost:0, which is not a credible
+// "this used no money" signal (likely subscription billing, or the field
+// simply isn't populated for this provider/plan) -- treat OpenCode's own
+// cost field as unreliable rather than propagate a bare 0 as ground truth.
+function buildUsageField(rawPart) {
+  if (!rawPart || !rawPart.tokens) {
+    return { source: 'unavailable' };
+  }
+  const t = rawPart.tokens;
+  return {
+    input_tokens: t.input ?? null,
+    cached_input_tokens: t.cache ? (t.cache.read ?? null) : null,
+    cache_write_input_tokens: t.cache ? (t.cache.write ?? null) : null,
+    output_tokens: t.output ?? null,
+    reasoning_tokens: t.reasoning ?? null,
+    estimated_cost_usd: null,
+    source: 'provider',
+    raw: rawPart,
+  };
 }
 
 // Same fail-closed principle as codex-dispatch.mjs's checkSessionIdentity: a
@@ -883,13 +919,25 @@ async function atomicWriteJson(filePath, data) {
 // own session-id key: sessionId here, threadId in codex-dispatch.mjs), so
 // review-protocol.md's manifest fields always exist regardless of which
 // runtime dispatched a seat. touchedFilesNote and error are conditional.
+//
+// startedAt/finishedAt/durationMs/timeoutS are stamped here, by this script,
+// not authored by the orchestrator or any model -- deterministic code owns
+// timing data. "usage" is populated from OpenCode's own step_finish.part.tokens
+// event when one was observed (source: "provider", verified live), or
+// {source: "unavailable"} otherwise. See buildUsageField() above and
+// docs/design/structured-artifacts.md.
 const RESULT_REQUIRED_KEYS = [
   'finalMessage', 'touchedFiles',
   'modelRequested', 'effortRequested', 'modelResolved', 'effortResolved', 'selectionNote',
   'isolated', 'worktreePath', 'isolationNote', 'status',
+  'startedAt', 'finishedAt', 'durationMs', 'timeoutS',
+  'usage',
+  'envMode',
 ];
 
 async function main() {
+  const startedAt = new Date().toISOString();
+  const startedAtMs = Date.now();
   const argv = process.argv.slice(2);
   if (argv.length === 0) printUsageAndExit(0);
 
@@ -907,6 +955,15 @@ async function main() {
 
   const briefDir = path.dirname(path.resolve(args.brief));
   const resultPath = path.join(briefDir, 'result.json');
+  const timingFields = (tokensObserved = null) => {
+    const finishedAt = new Date().toISOString();
+    return {
+      startedAt, finishedAt, durationMs: Date.now() - startedAtMs,
+      timeoutS: args.timeout,
+      usage: buildUsageField(tokensObserved),
+      envMode: args.envMode,
+    };
+  };
 
   // Declared before writeErrorResult so its closure reads the LIVE values: an
   // isolation failure after a successful worktree setup must still report
@@ -928,6 +985,7 @@ async function main() {
         isolated, worktreePath, isolationNote,
         status: 'error',
         error: message,
+        ...timingFields(),
       });
     } catch (writeErr) {
       log(`additionally failed to write result.json: ${writeErr.message}`);
@@ -1004,6 +1062,8 @@ async function main() {
       model: args.model,
       variant: args.variant,
       timeout: args.timeout,
+      envMode: args.envMode,
+      envPassthrough: args.envPassthrough,
     });
   } catch (err) {
     const msg = err instanceof RelayError ? err.message : String(err);
@@ -1037,6 +1097,7 @@ async function main() {
     modelResolved: null, effortResolved: null,
     selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
     isolated, worktreePath, isolationNote,
+    ...timingFields(opencodeResult.tokens),
   };
   if (touchedFiles === null && touchedFilesNote) {
     baseFields.touchedFilesNote = touchedFilesNote;
@@ -1132,4 +1193,6 @@ export {
   RESULT_REQUIRED_KEYS,
   runCaptureBuffer,
   spawnCli,
+  buildChildEnv,
+  buildUsageField,
 };

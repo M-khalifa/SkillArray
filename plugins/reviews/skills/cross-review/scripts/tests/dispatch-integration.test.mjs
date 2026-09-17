@@ -67,6 +67,46 @@ text:JSON.stringify({argv:process.argv.slice(2), input})}}));
   }
 });
 
+test('dispatcher parses a real turn.completed.usage event into result.json\'s usage field with source "provider"', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch usage '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const fake = path.join(bin, 'fake.mjs');
+  await fs.writeFile(fake, `let input = '';
+for await (const chunk of process.stdin) input += chunk;
+console.log(JSON.stringify({type:'thread.started', thread_id:'usage-fixture-thread'}));
+console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'KIWI'}}));
+console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:26076,cached_input_tokens:8960,cache_write_input_tokens:0,output_tokens:6,reasoning_output_tokens:0}}));
+`);
+  const shim = path.join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex');
+  const wrapper = process.platform === 'win32'
+    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
+    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
+  await fs.writeFile(shim, wrapper, { mode: 0o755 });
+  const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
+  const brief = path.join(dir, 'brief.txt');
+  await fs.writeFile(brief, 'fixture prompt');
+  const args = [script, '--brief', brief, '--cd', dir, '--sandbox', 'read-only'];
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
+  env.PATH = bin;
+  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
+  assert.equal(output.status, 'completed');
+  assert.deepEqual(output.usage, {
+    input_tokens: 26076,
+    cached_input_tokens: 8960,
+    cache_write_input_tokens: 0,
+    output_tokens: 6,
+    reasoning_tokens: 0,
+    estimated_cost_usd: null,
+    source: 'provider',
+    raw: { input_tokens: 26076, cached_input_tokens: 8960, cache_write_input_tokens: 0, output_tokens: 6, reasoning_output_tokens: 0 },
+  });
+  assertResultSchema(output);
+});
+
 test('dispatcher kills a hung codex process on --timeout and writes status timed-out', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch timeout '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -136,6 +176,69 @@ setInterval(() => {}, 1000);
   const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
   assert.equal(output.status, 'timed-out');
   assert.match(output.error, /timeout 2s/);
+  assertResultSchema(output);
+});
+
+test('opencode-dispatch reports usage {source: "unavailable"} when no step_finish event is observed', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode usage '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const fake = path.join(bin, 'fake.mjs');
+  await fs.writeFile(fake, `console.log(JSON.stringify({sessionID:'usage-fixture-session', type:'text', part:{type:'text', text:'PLUM'}}));
+`);
+  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
+  const wrapper = process.platform === 'win32'
+    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
+    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
+  await fs.writeFile(shim, wrapper, { mode: 0o755 });
+  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
+  const brief = path.join(dir, 'brief.txt');
+  await fs.writeFile(brief, 'fixture prompt');
+  const args = [script, '--brief', brief, '--cd', dir];
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
+  env.PATH = bin;
+  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
+  assert.equal(output.status, 'completed');
+  assert.deepEqual(output.usage, { source: 'unavailable' });
+  assertResultSchema(output);
+});
+
+test('opencode-dispatch parses a real step_finish.part.tokens event into result.json\'s usage field with source "provider"', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode usage real '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const fake = path.join(bin, 'fake.mjs');
+  // Exact shape captured from a live "opencode run --format json" call.
+  await fs.writeFile(fake, `console.log(JSON.stringify({type:'text', sessionID:'usage-fixture-session', part:{type:'text', text:'PLUM'}}));
+console.log(JSON.stringify({type:'step_finish', sessionID:'usage-fixture-session', part:{type:'step-finish', reason:'stop', tokens:{total:21703,input:19907,output:4,reasoning:0,cache:{write:0,read:1792}}, cost:0}}));
+`);
+  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
+  const wrapper = process.platform === 'win32'
+    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
+    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
+  await fs.writeFile(shim, wrapper, { mode: 0o755 });
+  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
+  const brief = path.join(dir, 'brief.txt');
+  await fs.writeFile(brief, 'fixture prompt');
+  const args = [script, '--brief', brief, '--cd', dir];
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
+  env.PATH = bin;
+  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
+  assert.equal(output.status, 'completed');
+  assert.equal(output.usage.source, 'provider');
+  assert.equal(output.usage.input_tokens, 19907);
+  assert.equal(output.usage.cached_input_tokens, 1792);
+  assert.equal(output.usage.cache_write_input_tokens, 0);
+  assert.equal(output.usage.output_tokens, 4);
+  assert.equal(output.usage.reasoning_tokens, 0);
+  assert.equal(output.usage.estimated_cost_usd, null, 'OpenCode\'s own cost field is not trusted (observed unreliable live) -- estimated_cost_usd stays null even though "raw" carries OpenCode\'s reported cost');
+  assert.equal(output.usage.raw.cost, 0, 'the verbatim OpenCode cost value is preserved in raw for anyone who wants to inspect it despite the reliability caveat');
   assertResultSchema(output);
 });
 
@@ -259,8 +362,11 @@ test(
     const args = [script, '--brief', brief, '--cd', target, '--isolate'];
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
     env.PATH = realGitDir();
-    const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
-    assert.equal(result.status, 1, result.stderr);
+    // Unlike every sibling test here, this one runs a REAL `git worktree add` before its forced
+    // failure; under concurrent load that alone can take well over 15s, and a timed-out spawnSync
+    // reports status:null (a signal kill), not a real assertion failure.
+    const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 60000 });
+    assert.equal(result.status, 1, `signal=${result.signal} ${result.stderr}`);
     assert.match(result.stderr, /unsafe to pass through cmd\.exe/);
 
     const output = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
@@ -289,4 +395,28 @@ test('dispatcher writes a full result.json schema on a codex error path (nonexis
   assert.equal(output.effortRequested, 'high');
   assert.equal(output.isolated, false);
   assert.equal(output.worktreePath, null);
+});
+
+test('dispatcher stamps deterministic timing fields on result.json, never leaves them for the model to author', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch timing '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
+  const brief = path.join(dir, 'brief.txt');
+  await fs.writeFile(brief, 'fixture prompt');
+  const missingCd = path.join(dir, 'does-not-exist');
+  const beforeMs = Date.now();
+  const args = [script, '--brief', brief, '--cd', missingCd, '--sandbox', 'read-only'];
+  const result = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 15000 });
+  const afterMs = Date.now();
+  assert.equal(result.status, 1, result.stderr);
+  const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
+
+  assert.ok(!Number.isNaN(Date.parse(output.startedAt)), `startedAt must be a valid timestamp, got ${output.startedAt}`);
+  assert.ok(!Number.isNaN(Date.parse(output.finishedAt)), `finishedAt must be a valid timestamp, got ${output.finishedAt}`);
+  assert.ok(Date.parse(output.startedAt) >= beforeMs, 'startedAt must be at or after process launch');
+  assert.ok(Date.parse(output.finishedAt) <= afterMs, 'finishedAt must be at or before process exit observed by the test');
+  assert.ok(Date.parse(output.finishedAt) >= Date.parse(output.startedAt), 'finishedAt must not precede startedAt');
+  assert.ok(typeof output.durationMs === 'number' && output.durationMs >= 0, `durationMs must be a non-negative number, got ${output.durationMs}`);
+  assert.equal(output.timeoutS, 1800, 'no --timeout was passed, so timeoutS must reflect the provisional default actually applied, not null');
+  assert.deepEqual(output.usage, { source: 'unavailable' }, 'no codex process ever ran, so no turn.completed event was observed -- usage must report unavailable, never a fabricated value');
 });

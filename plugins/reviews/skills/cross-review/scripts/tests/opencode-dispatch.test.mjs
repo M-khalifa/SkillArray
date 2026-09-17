@@ -23,6 +23,8 @@ import {
   installSignalForwarding,
   runCaptureBuffer,
   spawnCli,
+  buildChildEnv,
+  buildUsageField,
 } from '../opencode-dispatch.mjs';
 
 function git(args, cwd) {
@@ -51,6 +53,26 @@ test('parseArgs: --effort is accepted as an alias for --variant', () => {
   const common = ['--brief', 'b.txt', '--cd', '.'];
   const ok = parseArgs([...common, '--effort', 'high']);
   assert.equal(ok.variant, 'high');
+});
+
+test('parseArgs: --timeout defaults to a provisional non-null value when omitted, never unlimited by omission', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  const config = parseArgs(common);
+  assert.equal(typeof config.timeout, 'number');
+  assert.ok(config.timeout > 0, 'the default must be a positive bound, not 0/unlimited');
+});
+
+test('parseArgs: --timeout 0 means explicitly unlimited, distinct from omitting the flag', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  const config = parseArgs([...common, '--timeout', '0']);
+  assert.equal(config.timeout, 0);
+});
+
+test('parseArgs: --timeout accepts a whole number and rejects non-numeric or fractional values', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  assert.equal(parseArgs([...common, '--timeout', '45']).timeout, 45);
+  assert.throws(() => parseArgs([...common, '--timeout', 'abc']), /whole number of seconds/);
+  assert.throws(() => parseArgs([...common, '--timeout', '5.5']), /whole number of seconds/);
 });
 
 test('parseArgs: --model and --variant reject shell metacharacters and short-flag injection', () => {
@@ -866,4 +888,102 @@ test('installSignalForwarding: uninstall removes the listeners, a later signal d
   proc.emit('SIGINT');
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(killed, []);
+});
+
+test('buildChildEnv: envMode "inherit" returns undefined, matching Node spawn()\'s own full-inheritance default', () => {
+  const env = buildChildEnv({ envMode: 'inherit', sourceEnv: { PATH: '/x', AWS_SECRET_ACCESS_KEY: 'super-secret' } });
+  assert.equal(env, undefined);
+});
+
+test('buildChildEnv: envMode "filtered" strips a secret-shaped variable that is not on the allowlist', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'linux',
+    sourceEnv: { PATH: '/usr/bin', HOME: '/home/x', AWS_SECRET_ACCESS_KEY: 'super-secret', GITHUB_TOKEN: 'ghp_x' },
+  });
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.HOME, '/home/x');
+  assert.ok(!('AWS_SECRET_ACCESS_KEY' in env));
+  assert.ok(!('GITHUB_TOKEN' in env));
+});
+
+test('buildChildEnv: envMode "filtered" on POSIX keeps LC_*/XDG_* prefixed variables (OpenCode locates its credential database via XDG_DATA_HOME)', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'linux',
+    sourceEnv: { PATH: '/usr/bin', XDG_DATA_HOME: '/home/x/.local/share', RANDOM_VAR: 'not-allowed' },
+  });
+  assert.equal(env.XDG_DATA_HOME, '/home/x/.local/share');
+  assert.ok(!('RANDOM_VAR' in env));
+});
+
+test('buildChildEnv: envMode "filtered" on win32 uses the win32 allowlist, not the POSIX one', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'win32',
+    sourceEnv: { SystemRoot: 'C:\\Windows', USERPROFILE: 'C:\\Users\\x', XDG_DATA_HOME: '/should-not-apply' },
+  });
+  assert.equal(env.SystemRoot, 'C:\\Windows');
+  assert.ok(!('XDG_DATA_HOME' in env), 'POSIX-only prefix matching must not apply on win32');
+});
+
+test('buildChildEnv: envMode "filtered" on win32 matches allowlisted names case-insensitively (cmd.exe/PowerShell expose "Path", not "PATH")', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'win32',
+    sourceEnv: { Path: 'C:\\Windows\\system32', SystemRoot: 'C:\\Windows' },
+  });
+  assert.equal(env.Path, 'C:\\Windows\\system32', 'a differently-cased allowlisted name must still pass through on win32');
+});
+
+test('buildChildEnv: envPassthrough adds an explicitly named variable the base allowlist does not cover', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'linux',
+    envPassthrough: ['MY_PROVIDER_API_KEY'],
+    sourceEnv: { PATH: '/usr/bin', MY_PROVIDER_API_KEY: 'sk-real-key', OTHER_SECRET: 'not-passed' },
+  });
+  assert.equal(env.MY_PROVIDER_API_KEY, 'sk-real-key');
+  assert.ok(!('OTHER_SECRET' in env));
+});
+
+test('parseArgs: --env-mode defaults to "filtered", the safe-by-default choice', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  assert.equal(parseArgs(common).envMode, 'filtered');
+});
+
+test('parseArgs: --env-mode accepts "inherit" and rejects anything else', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  assert.equal(parseArgs([...common, '--env-mode', 'inherit']).envMode, 'inherit');
+  assert.throws(() => parseArgs([...common, '--env-mode', 'yolo']), /must be "filtered" or "inherit"/);
+});
+
+test('parseArgs: --env-passthrough splits a comma-separated list and rejects an invalid variable name', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  const config = parseArgs([...common, '--env-passthrough', 'FOO_KEY, BAR_TOKEN']);
+  assert.deepEqual(config.envPassthrough, ['FOO_KEY', 'BAR_TOKEN']);
+  assert.throws(() => parseArgs([...common, '--env-passthrough', '123BAD']), /not a valid environment variable name/);
+});
+
+test('buildUsageField: maps a real step_finish.part event to the nested usage shape with source "provider"', () => {
+  // Exact shape captured from a live "opencode run --format json" call.
+  const rawPart = {
+    type: 'step-finish', reason: 'stop',
+    tokens: { total: 21703, input: 19907, output: 4, reasoning: 0, cache: { write: 0, read: 1792 } },
+    cost: 0,
+  };
+  const field = buildUsageField(rawPart);
+  assert.equal(field.input_tokens, 19907);
+  assert.equal(field.cached_input_tokens, 1792);
+  assert.equal(field.cache_write_input_tokens, 0);
+  assert.equal(field.output_tokens, 4);
+  assert.equal(field.reasoning_tokens, 0);
+  assert.equal(field.estimated_cost_usd, null, 'OpenCode\'s own cost field is not trusted -- observed as an unreliable 0 on a real 21,703-token call');
+  assert.equal(field.source, 'provider');
+  assert.deepEqual(field.raw, rawPart, 'the verbatim step_finish.part is preserved so no normalization choice here is ever the only record of what OpenCode actually reported');
+});
+
+test('buildUsageField: no step_finish event observed (part is undefined or has no tokens) yields {source: "unavailable"}, never a fabricated value', () => {
+  assert.deepEqual(buildUsageField(null), { source: 'unavailable' });
+  assert.deepEqual(buildUsageField({ type: 'step-finish', reason: 'stop' }), { source: 'unavailable' });
 });

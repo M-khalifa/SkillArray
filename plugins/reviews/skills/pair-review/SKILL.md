@@ -68,8 +68,11 @@ request; falsification never runs without it.
    Snapshot the selected settings for this run; do not reread preferences
    between review rounds.
 2. Read the target and [references/review-protocol.md](references/review-protocol.md).
-   Give both seats the same task packet: scope, current source snapshot,
-   actual test commands, constraints, and expected output. Pick a lens from
+   Run [scripts/preflight.mjs](scripts/preflight.mjs) against the target
+   directory per that doc's Pre-flight evidence paragraph and include its
+   output in the task packet. Give both seats the same task packet: scope,
+   current source snapshot, actual test commands, constraints, and expected
+   output. Pick a lens from
    [references/review-profiles.md](references/review-profiles.md) (Code,
    Architecture, or Document — inferred from the target, not asked of the user
    unless genuinely ambiguous) and give both seats the same choice.
@@ -79,23 +82,73 @@ request; falsification never runs without it.
 4. Start both isolated reviewers concurrently using this harness's supported
    model/effort mechanism. Pass the protocol and task explicitly; do not
    assume subagents inherit this conversation. In Phase 1, neither seat may
-   read the peer's file. Review only; no source edits or commits.
-5. Wait for both independent passes to complete. A reviewer may return after
+   read the peer's file. Review only; no source edits or commits. Each seat
+   is a harness subagent, not a spawned process, so no script here can
+   enforce a wall-clock bound the way `cross-review`'s dispatchers do; if
+   this harness offers a per-agent timeout or budget control, apply a
+   provisional 30-minute bound per seat (unless the user specifies otherwise)
+   and treat an exceeded bound as an incomplete review for that seat, the
+   same as any other failed pass — never as a completed one.
+5. Wait for both independent passes to complete, AND
+   `scripts/blind-relabel.mjs validate --phase1-dir <run-dir>` exits zero. A
+   nonzero `validate` exit means at least one claim block is missing a
+   recognized `Severity:`, `Basis:`, `Evidence strength:`, or non-empty
+   `Evidence:` line — return the affected seat's file to that seat's OWN
+   context for reformatting (restate the required field lines verbatim,
+   change nothing else), same procedure as a `scan` redaction round, never a
+   hand edit. A reviewer following the schema loosely (dropping the
+   `Evidence:` label and going straight to prose) is common enough in
+   practice to gate here, before it surfaces only much later as a `translate
+   --phase1-dir` refusal. A reviewer may return after
    its initial pass; resume it for the exchange. This avoids agents waiting
    indefinitely for a peer that has not been released by the orchestrator.
    Missing files may be recovered verbatim from a valid final response.
+   **Never resume by forking** (e.g. an `Agent` tool call with
+   `subagent_type: "fork"`, or any equivalent that inherits the orchestrator's
+   own conversation): by the exchange step that conversation already
+   contains the peer's real findings and identity, so a fork handed to either
+   seat is a blinding breach by construction, not a resume. Resume the exact
+   Phase 1 agent/session ID only.
 6. Unless mode is `none`, use `scripts/blind-relabel.mjs relabel` to relabel
    each seat's findings per the protocol's Three label layers before sending to
    the other reviewer (seat A's claims become `P1..Pn` in seat B's brief, seat
    B's claims become a separate `P1..Pn` in seat A's brief), then
-   `scripts/blind-relabel.mjs scan` the relabeled text for vendor/model tokens;
-   a self-identification hit is a hard stop, return it to that seat for
-   redaction (one redaction round, then stop and report). Even with both seats
-   on Claude, this keeps a reviewer from tailoring its rebuttal to which
-   specific model it believes wrote a claim. Use file-ready messages when
+   `scripts/blind-relabel.mjs scan` the relabeled text for vendor/model tokens
+   AND (`--phase1-dir <run-dir> --forbid-seats A` on the peer-view built from
+   seat A's file, `--forbid-seats B` on the one built from seat B's file) the
+   source seat's own real claim IDs surviving anywhere, fenced Evidence
+   included — `relabel` deliberately never rewrites fence content, so a
+   reviewer's own cross-reference to an earlier claim by real letter (e.g.
+   "my A4") inside its Evidence block survives relabel undetected by the
+   vendor/model-token scan alone; omitting `--forbid-seats` here reopens that
+   leak. A self-identification hit or a `--forbid-seats` hit is a hard stop,
+   return it to that seat for redaction (one redaction round, then stop and
+   report). Even with both seats on Claude, this keeps a reviewer from
+   tailoring its rebuttal to which specific model it believes wrote a claim.
+   Use file-ready messages when
    supported; otherwise relay via the orchestrator. Append rebuttals
-   (translated back to real `A`/`B` IDs) without overwriting original claims.
-   Wait for both exchanges before synthesis.
+   (translated back to real `A`/`B` IDs) without overwriting original claims,
+   under a section heading of the exact literal form `## Rebuttals (from
+   <seat>) of <peer> claims` (e.g. `## Rebuttals (from A) of B claims`
+   appended to `B-findings.md`) — `blind-relabel.mjs relabel` matches this
+   heading by exact regex during the `X`/`Y` relabel in step 7b below; any
+   other wording is invisible to the tool. Wait for both exchanges before
+   synthesis. Once both rebuttal sections are appended, run
+   `scripts/blind-relabel.mjs validate --phase1-dir <run-dir>` again (step 5's
+   gate already ran it before any rebuttal existed) — this second run is a
+   mechanical check on the rebuttal heading's exact form (both seat letters,
+   `A`/`B`, never a claim ID or any other shape) and rejects a seat naming
+   itself as its own rebutter. A malformed heading produces the identical "no
+   rebuttal heading found" signal `relabel`'s second pass gives for a seat
+   with zero rebuttals (step 7b's own expected zero-rebuttal case), so
+   without this run the two are silently indistinguishable. `validate`
+   deliberately does not enforce WHICH file a rebuttal heading is appended
+   to — placement is standardized in prose (this step's own example above
+   and review-protocol.md: onto the PEER's file), but `relabel` itself is
+   placement-agnostic (it relabels a seat's letter wherever the heading
+   appears), so `validate` only rejects the universally-invalid case: a seat
+   naming itself as its own rebutter. A nonzero exit here uses the same
+   redaction-round procedure as a `scan` hit.
 7. Do not synthesize in this conversation. Follow this exact order:
 
    a. Run `scripts/blind-relabel.mjs flip` for `seat_to_audit_label` FIRST.
@@ -105,7 +158,12 @@ request; falsification never runs without it.
       only run after this relabel, never before it.
    b. Relabel both seats' complete findings-plus-rebuttals to `X`/`Y` with
       `scripts/blind-relabel.mjs relabel`, per the protocol's Fresh-context
-      auditor.
+      auditor. Then run `scripts/blind-relabel.mjs scan` on each fully
+      double-relabeled file for vendor/model tokens AND `--phase1-dir
+      <run-dir> --forbid-seats A,B` (both real seat letters — a
+      double-relabeled file must contain NEITHER real letter anywhere,
+      fenced Evidence included). A hit is a hard stop, one redaction round,
+      then stop and report — same as step 6's scan.
    c. If falsification was explicitly requested, apply the protocol's
       Falsification pass now, using the just-relabeled `X`/`Y` files:
       - Select every claim with `Severity` HIGH or CRITICAL AND a rebuttal
@@ -136,12 +194,17 @@ request; falsification never runs without it.
         directly from each file's own `Basis:`/`Evidence:` lines.
       - When falsification was not requested, skip this entire step, but
         still report how many claims would have qualified.
-   d. Spawn a new subagent with only the task packet, the relabeled
-      findings, any verification files from step c, read-only access to the
-      exact Phase 1 target snapshot, and review-protocol.md. No seat
-      identity or model names. The target snapshot is the isolated worktree
-      path if `--isolate` was used, the target directory otherwise; the
-      auditor must never modify it.
+   d. Spawn a genuinely new subagent — **never** a fork of this
+      conversation (e.g. an `Agent` tool call with `subagent_type: "fork"`,
+      or any equivalent that inherits context): this conversation already
+      contains both un-relabeled findings files, the coin-flip mapping, and
+      seat identity, so a fork would hand the auditor exactly the leak the
+      fresh-context auditor exists to prevent. Give it only the task packet,
+      the relabeled findings, any verification files from step c, read-only
+      access to the exact Phase 1 target snapshot, and review-protocol.md.
+      No seat identity or model names. The target snapshot is the isolated
+      worktree path if `--isolate` was used, the target directory otherwise;
+      the auditor must never modify it.
    e. The auditor applies the protocol's evidence and evidence-strength
       rules and returns adjudication-added fields (Peer response,
       Verification, Final state) per claim. `Verification` is a REQUIRED
@@ -187,10 +250,17 @@ request; falsification never runs without it.
       (adversarial/independent mode) from the translated `findings.json`,
       one row per finding. Read its `independently_discovered` field; never
       re-derive it by hand.
-   i. Emit the run manifest with honest requested-versus-observed model and
-      effort information, the `seat_to_audit_label` mapping, and the
+   i. Write the manifest body with honest requested-versus-observed model
+      and effort information, the `seat_to_audit_label` mapping, and the
       auditor model-family limitation (both seats and the auditor are
       Claude; this bounds but does not eliminate self-preference risk).
+      Then run `scripts/build-manifest.mjs --in <that body> --out
+      manifest.json` with `--task-packet`/`--phase1`/`--phase2`/
+      `--verification`/`--findings` pointing at whichever artifact files
+      this run produced,
+      to stamp a deterministic `run_id` and content hashes — see
+      `review-protocol.md`'s Manifest and final output section. Never
+      author `run_id` or `hashes` by hand.
 
 A failed or unavailable seat means an incomplete review. Report what completed
 and the failure; never label a single pass as a completed pair review.

@@ -41,6 +41,37 @@ Subagents may finish and later resume; do not require them to wait indefinitely
 for messages. A completed no-findings pass explicitly states scope and checks.
 An empty or missing result is not a no-findings verdict.
 
+**Pre-flight evidence.** Before dispatching either seat, run
+`scripts/preflight.mjs` against the target directory and include its output
+in the task packet as a citable evidence source both seats may reference. By
+default (no `--exec`) this runs Tier 1 only: `git diff`, `git status`, and the
+changed-file list — pure repository-state inspection, never execution of
+anything the target defines. Tier 2 (running the target's own test/lint/build
+commands) requires the explicit `--exec "<command>"` flag per run; it is never
+enabled silently. Every Tier 2 result is bound to a `snapshotHash` of the
+target's exact git state at capture time — before either seat cites Tier 2
+output as `Basis: EXECUTED` evidence, re-run `preflight.mjs --cd <target>
+--check-stale <snapshotHash>` and treat a `stale: true` result as stale
+evidence, never citable as current. Pre-flight output is raw fact only
+(command text, exit status, stdout/stderr verbatim) — never interpretive
+text; if a summary is needed for token efficiency, that is a separate,
+explicitly-flagged step, never silently merged into what is presented as raw
+evidence.
+
+**Context Builder (experimental, opt-in).** `scripts/context-builder.mjs` can
+assemble a scoped starting packet — a diff against an explicit `--base`, the
+changed-file list, colocated tests found by naming convention, and a
+best-effort symbol-reference grep — instead of the default full-repository
+free-text scope. Use it only when the task explicitly calls for scoped
+context; it is never the default, because its scoped-vs-full recall has not
+yet been benchmark-compared (see `bench/run-comparison.mjs`). If used, state
+in the task packet that this is a starting point, not the complete relevant
+context — both seats retain their full existing ability to read beyond it
+(codex/opencode via `--cd` filesystem access, pair-review via Read/Grep).
+With no `--base` given, or against a non-git target, the builder returns
+`{packet: null, reason: "..."}` rather than guessing a scope; treat that the
+same as not using it at all.
+
 ## Three label layers
 
 This protocol uses three separate ID namespaces for the same underlying claims,
@@ -74,10 +105,13 @@ Model and effort validation), a reviewer's own seat letter is equally an
 identity leak in prose — never write "as seat A" or "seat B says"; the seat
 letter belongs only in claim IDs and the `# Seat <letter> findings` header,
 which the blind exchange relabels mechanically.
-Never put a claim ID inside an `Evidence` fence: `blind-relabel.mjs` skips
-fenced/inline spans by design, so a claim ID placed there survives relabeling
-unchanged. This is instruction-enforced, not mechanically guaranteed; see
-Blind exchange below for the orchestrator-side check.
+Never put a claim ID inside an `Evidence` fence: `blind-relabel.mjs relabel`
+skips fenced/inline spans by design, so a claim ID placed there survives
+relabeling unchanged. This is instruction-enforced on the reviewer's own
+prose, but `scan --phase1-dir --forbid-seats` (see Blind exchange below) is
+a mandatory, mechanical backstop against exactly this failure mode — every
+`scan` in this protocol MUST pass `--forbid-seats` so a real claim ID
+surviving inside a fence is caught, not merely discouraged by instruction.
 
 ## Evidence and findings: reviewer-authored fields
 
@@ -105,6 +139,16 @@ Evidence:
 <actual command and relevant output, or source path:line / quoted passage>
 ```
 ````
+
+A seat with genuinely zero findings writes the exact literal heading
+`## No findings` under its own seat header — this, not free prose like "no
+findings" or "(nothing found)", is the fixed marker `blind-relabel.mjs
+validate` checks for. A seat file with zero recognized `## A<n>`/`## B<n>`
+claim headings AND no `## No findings` marker is never treated as a
+legitimate zero-findings result — it is indistinguishable from a model that
+ignored the claim-ID schema (e.g. wrote a bare `## 1` instead of `## A1`),
+which `validate` rejects as a malformed claim-like heading, not silently
+read as "no claims."
 
 `Severity` is impact if the claim is real. `Basis` is how it was discovered:
 EXECUTED (ran it), STATIC_TRACE (read the code path without running it),
@@ -155,6 +199,18 @@ Tiers 1 and 2 behave identically: return the file to the reviewer's own
 context for redaction. Never silently forward or hand-edit prose on the
 reviewer's behalf. Allow at most one redaction round per file; if the second
 scan still hits, stop and report to the user rather than looping.
+
+**Every `scan` in this protocol MUST also pass `--phase1-dir <run-dir>/phase1
+--forbid-seats <the real seat letter(s) that must not survive in THIS
+file>`** (the source seat only for a Phase 2 peer-view; both real letters for
+a Phase 3 double-relabeled file). Unlike the vendor/model-token check above,
+this scans the RAW text — fenced Evidence content INCLUDED — for the run's
+actual enumerable real claim IDs, so a claim ID a reviewer places inside its
+own Evidence fence (which `relabel` never touches) is still caught. A hit is
+a hard stop, same redaction procedure as tiers 1/2. Never scoped to a generic
+pattern like `\b[AB]\d+\b`, which would false-positive on a legitimate
+target-code identifier, hex digest, or cell reference — only the real claim
+IDs that exist in this run's own Phase 1 files are forbidden.
 
 This check is necessary but not sufficient. Three residual limitations:
 
@@ -360,9 +416,14 @@ exactly one `F`, `origins` lists every `X`/`Y` claim ID that is that finding, an
 a single-claim finding is still an `F` with one origin — this is a grouping
 step, not a filter. Only group claims that assert the SAME defect; a claim that
 merely touches the same file or function as another is a different finding, not
-the same one. When in doubt, keep them separate — a false merge destroys the
-independent-corroboration signal this exists to capture; a missed merge only
-costs a duplicate row.
+the same one. Two claims that share a root cause but surface as distinct,
+separately-observable symptoms in different code paths (e.g. the same
+never-reset error marker misread by two different callers) are the SAME
+defect, and belong in one finding, only when a single fix at the shared root
+cause closes both symptoms — cite that shared fix location in the finding.
+When the fix locations differ, or it is unclear whether one fix closes both,
+keep them separate — a false merge destroys the independent-corroboration
+signal this exists to capture; a missed merge only costs a duplicate row.
 
 The auditor returns these findings as its own output: a JSON object in the
 exact shape documented under `findings.json` below, with `X`/`Y` claim IDs in
@@ -416,6 +477,7 @@ same bug surface as any other script.
       "severity": "HIGH",
       "basis": "EXECUTED",
       "evidence_strength": "REPRODUCED",
+      "basis_from": "A3",
       "peer_responses": [
         { "claim": "A3", "response": "conceded" },
         { "claim": "B7", "response": "disputed-no-counter-fact" }
@@ -448,18 +510,29 @@ a dropped-SPECULATIVE claim is still present in this file (see Synthesis's
 is the artifact that rule refers to; nothing is silently absent from it.
 `evidence` should be verbatim captured output or a cited source passage — never
 relabeled, translated, or rewritten by the translate step (or by anything else),
-same as an Evidence fence is never touched by `relabel`. **Current limitation:**
-`translate` enforces this non-mutation and the shape (non-empty array of
-non-empty strings), but does not yet cross-check a canonical finding's
-`evidence`, `severity`, `basis`, or `evidence_strength` against its origins'
-own Phase 1 content — these four fields are still auditor-transcribed and
-trusted, the same way `verifications[].basis`/`.evidence` used to be before
-`translate` was changed to derive those from the verifier file directly (see
-Falsification pass above). Deterministic derivation of these four canonical
-fields from Phase 1 origin content is planned, not yet built. `severity`,
-`basis`, `evidence_strength`, `final_state`, and every `peer_responses[].response`
+same as an Evidence fence is never touched by `relabel`. **With `--phase1-dir`**,
+`translate` derives a canonical finding's `evidence`, `severity`, `basis`, and
+`evidence_strength` mechanically from its own origins' real Phase 1 claim
+blocks and OVERWRITES whatever the auditor's JSON supplied for these — the
+same authority precedent `verifications[].basis`/`.evidence` already have over
+the verifier file (see Falsification pass above). `severity` takes the single
+strongest value among the finding's origins, independently (never a value the
+weakest origin alone would justify) — severity is impact, not evidence
+quality. `basis`/`evidence_strength` are copied together, as a PAIR, from the
+single strongest-evidenced origin per the Canonical findings section above —
+NEVER independently maximized per field, which can synthesize a
+(`basis`, `evidence_strength`) combination no origin ever actually asserted.
+The strongest-evidenced origin is chosen by `basis` first, `evidence_strength`
+as the tiebreak, then `origins` array order as a final deterministic
+tiebreak; its real claim ID is recorded on a new `basis_from` field so the
+provenance is explicit in the artifact. `evidence` becomes one verbatim entry
+per origin, in `origins` order, extracted from each origin's own Evidence
+fence. Without `--phase1-dir`, these four fields are still auditor-transcribed
+and trusted, and `basis_from` is omitted entirely. `severity`, `basis`,
+`evidence_strength`, `final_state`, and every `peer_responses[].response`
 must be one of the exact values in this protocol's own tables; `translate`
-refuses to publish `findings.json` if the auditor emitted anything outside them.
+refuses to publish
+`findings.json` if the auditor emitted anything outside them.
 
 `verifications` is present only when the Falsification pass ran on one or more
 of a finding's origins; a finding it never touched has no `verifications` key
@@ -576,8 +649,15 @@ handing the auditor a direct `A`/`B` cross-reference.
 
 ## Manifest and final output
 
-Write `manifest.json` and lead the report with pairing, mode, and completion
-status. Record the actual run, not intended success:
+Write the manifest body (everything below except `run_id` and `hashes`) and
+lead the report with pairing, mode, and completion status. Record the actual
+run, not intended success. Then run `scripts/build-manifest.mjs` with `--in`
+pointing at that body and `--out manifest.json`, passing `--task-packet`/
+`--phase1`/`--phase2`/`--verification`/`--findings` for whichever artifact
+files this run actually produced — the script stamps a fresh `run_id` and
+content hashes onto the manifest deterministically; never author `run_id` or
+`hashes` by hand, and the
+script itself refuses to run if the input body already declares either key:
 
 ```json
 {
@@ -624,12 +704,20 @@ status. Record the actual run, not intended success:
     "qualified_claims": 2,
     "verifiers_run": 0
   },
-  "source_write": null
+  "source_write": null,
+  "run_id": "3f9c2b1a-...",
+  "hashes": {
+    "task_packet": "...",
+    "phase1": { "A.md": "...", "B.md": "..." },
+    "phase2": { "A.md": "...", "B.md": "..." },
+    "findings_json": "..."
+  }
 }
 ```
 
-This is a schema example, not a configured pair. Unknown resolved fields stay
-null. `source_write` is false only when verified, true for observed source edits,
+This is a schema example, not a configured pair. `run_id` and `hashes` are
+stamped by `build-manifest.mjs`, never authored by hand (see above). Unknown
+resolved fields stay null. `source_write` is false only when verified, true for observed source edits,
 and null when unknown. Git status alone cannot prove already-dirty or ignored
 files were untouched. A failed seat yields `status: incomplete`, never a
 completed two-reviewer result. Pair-review also needs evidence of distinct

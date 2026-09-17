@@ -17,6 +17,8 @@ import {
   installSignalForwarding,
   RESULT_REQUIRED_KEYS,
   spawnCli,
+  buildChildEnv,
+  buildUsageField,
 } from '../codex-dispatch.mjs';
 
 // assertWin32Safe only throws on win32; skip the throwing tests elsewhere.
@@ -223,6 +225,30 @@ test('model and effort options parse and reject missing or unsafe values', () =>
   assert.throws(() => parseArgs([...common, '--effort', 'default']), /omit/);
 });
 
+test('parseArgs: --timeout defaults to a provisional non-null value when omitted, never unlimited by omission', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  const config = parseArgs(common);
+  assert.equal(typeof config.timeout, 'number');
+  assert.ok(config.timeout > 0, 'the default must be a positive bound, not 0/unlimited');
+});
+
+test('parseArgs: --timeout 0 means explicitly unlimited, distinct from omitting the flag', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  const config = parseArgs([...common, '--timeout', '0']);
+  assert.equal(config.timeout, 0);
+});
+
+test('parseArgs: --timeout accepts a whole number (including 0) and rejects non-numeric, fractional, or negative-looking values', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  assert.equal(parseArgs([...common, '--timeout', '45']).timeout, 45);
+  assert.throws(() => parseArgs([...common, '--timeout', 'abc']), /whole number of seconds/);
+  assert.throws(() => parseArgs([...common, '--timeout', '5.5']), /whole number of seconds/);
+  // A value starting with "-" is consumed as the next flag by takeValue, not
+  // as a negative number -- this is existing CLI-parsing behavior, exercised
+  // here as "requires a value" rather than the numeric-format error.
+  assert.throws(() => parseArgs([...common, '--timeout', '-5']), /requires a value/);
+});
+
 test('fresh and resumed argument vectors forward selections without resume sandbox flags', () => {
   const options = { cd: '/target', sandbox: 'read-only', model: 'gpt-test', effort: 'high' };
   assert.deepEqual(buildCodexArgs(options), [
@@ -349,4 +375,134 @@ test('installSignalForwarding: uninstall removes the listeners, a later signal d
 test('RESULT_REQUIRED_KEYS: codex and opencode dispatchers share the same result.json schema (minus their own session-id key)', async () => {
   const { RESULT_REQUIRED_KEYS: opencodeKeys } = await import('../opencode-dispatch.mjs');
   assert.deepEqual([...RESULT_REQUIRED_KEYS].sort(), [...opencodeKeys].sort());
+});
+
+test('buildChildEnv: envMode "inherit" returns undefined, matching Node spawn()\'s own full-inheritance default', () => {
+  const env = buildChildEnv({ envMode: 'inherit', sourceEnv: { PATH: '/x', AWS_SECRET_ACCESS_KEY: 'super-secret' } });
+  assert.equal(env, undefined);
+});
+
+test('buildChildEnv: envMode "filtered" strips a secret-shaped variable that is not on the allowlist', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'linux',
+    sourceEnv: { PATH: '/usr/bin', HOME: '/home/x', AWS_SECRET_ACCESS_KEY: 'super-secret', GITHUB_TOKEN: 'ghp_x', DB_PASSWORD: 'hunter2' },
+  });
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.HOME, '/home/x');
+  assert.ok(!('AWS_SECRET_ACCESS_KEY' in env), 'a secret-shaped var not on the allowlist must be stripped');
+  assert.ok(!('GITHUB_TOKEN' in env), 'a secret-shaped var not on the allowlist must be stripped');
+  assert.ok(!('DB_PASSWORD' in env), 'a secret-shaped var not on the allowlist must be stripped');
+});
+
+test('buildChildEnv: envMode "filtered" keeps CODEX_HOME, codex\'s own credential-locator variable', () => {
+  const env = buildChildEnv({ envMode: 'filtered', platform: 'linux', sourceEnv: { PATH: '/usr/bin', CODEX_HOME: '/custom/.codex' } });
+  assert.equal(env.CODEX_HOME, '/custom/.codex');
+});
+
+test('buildChildEnv: envMode "filtered" on POSIX keeps LC_*/XDG_* prefixed variables by prefix match, not just exact allowlist entries', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'linux',
+    sourceEnv: { PATH: '/usr/bin', LC_ALL: 'en_US.UTF-8', XDG_DATA_HOME: '/home/x/.local/share', RANDOM_VAR: 'not-allowed' },
+  });
+  assert.equal(env.LC_ALL, 'en_US.UTF-8');
+  assert.equal(env.XDG_DATA_HOME, '/home/x/.local/share');
+  assert.ok(!('RANDOM_VAR' in env));
+});
+
+test('buildChildEnv: envMode "filtered" on win32 uses the win32 allowlist, not the POSIX one (no LC_/XDG_ prefix matching)', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'win32',
+    sourceEnv: { SystemRoot: 'C:\\Windows', USERPROFILE: 'C:\\Users\\x', LC_ALL: 'en_US.UTF-8', HOME: '/should-not-apply-on-win32' },
+  });
+  assert.equal(env.SystemRoot, 'C:\\Windows');
+  assert.equal(env.USERPROFILE, 'C:\\Users\\x');
+  assert.ok(!('LC_ALL' in env), 'POSIX-only prefix matching must not apply on win32');
+  assert.ok(!('HOME' in env), 'HOME is POSIX-only; win32 uses USERPROFILE');
+});
+
+test('buildChildEnv: envPassthrough adds an explicitly named variable that the base allowlist does not cover', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'linux',
+    envPassthrough: ['MY_PROVIDER_API_KEY'],
+    sourceEnv: { PATH: '/usr/bin', MY_PROVIDER_API_KEY: 'sk-real-key', OTHER_SECRET: 'not-passed' },
+  });
+  assert.equal(env.MY_PROVIDER_API_KEY, 'sk-real-key');
+  assert.ok(!('OTHER_SECRET' in env));
+});
+
+test('buildChildEnv: an env var with value undefined is never included, filtered or inherit-by-name', () => {
+  const sourceEnv = { PATH: '/usr/bin' };
+  Object.defineProperty(sourceEnv, 'WEIRD', { value: undefined, enumerable: true });
+  const env = buildChildEnv({ envMode: 'filtered', platform: 'linux', sourceEnv });
+  assert.ok(!('WEIRD' in env));
+});
+
+test('buildChildEnv: envMode "filtered" on win32 matches allowlisted names case-insensitively (cmd.exe/PowerShell expose "Path", not "PATH")', () => {
+  const env = buildChildEnv({
+    envMode: 'filtered',
+    platform: 'win32',
+    sourceEnv: { Path: 'C:\\Windows\\system32', SystemRoot: 'C:\\Windows' },
+  });
+  assert.equal(env.Path, 'C:\\Windows\\system32', 'a differently-cased allowlisted name must still pass through on win32');
+});
+
+test('parseArgs: --env-mode defaults to "filtered", the safe-by-default choice', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  assert.equal(parseArgs(common).envMode, 'filtered');
+});
+
+test('parseArgs: --env-mode accepts "inherit" and rejects anything else', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  assert.equal(parseArgs([...common, '--env-mode', 'inherit']).envMode, 'inherit');
+  assert.throws(() => parseArgs([...common, '--env-mode', 'yolo']), /must be "filtered" or "inherit"/);
+});
+
+test('parseArgs: --env-passthrough splits a comma-separated list and rejects an invalid variable name', () => {
+  const common = ['--brief', 'b.txt', '--cd', '.'];
+  const config = parseArgs([...common, '--env-passthrough', 'FOO_KEY, BAR_TOKEN']);
+  assert.deepEqual(config.envPassthrough, ['FOO_KEY', 'BAR_TOKEN']);
+  assert.throws(() => parseArgs([...common, '--env-passthrough', '123BAD']), /not a valid environment variable name/);
+  assert.throws(() => parseArgs([...common, '--env-passthrough', 'has-a-dash']), /not a valid environment variable name/);
+});
+
+test('buildUsageField: maps a real turn.completed.usage event to the nested usage shape with source "provider"', () => {
+  // Exact shape captured from a live "codex exec --json --sandbox read-only" run.
+  const rawUsage = {
+    input_tokens: 26076,
+    cached_input_tokens: 8960,
+    cache_write_input_tokens: 0,
+    output_tokens: 6,
+    reasoning_output_tokens: 0,
+  };
+  assert.deepEqual(buildUsageField(rawUsage), {
+    input_tokens: 26076,
+    cached_input_tokens: 8960,
+    cache_write_input_tokens: 0,
+    output_tokens: 6,
+    reasoning_tokens: 0,
+    estimated_cost_usd: null,
+    source: 'provider',
+    raw: rawUsage,
+  });
+});
+
+test('buildUsageField: no turn.completed event observed yields {source: "unavailable"}, never a fabricated value', () => {
+  assert.deepEqual(buildUsageField(null), { source: 'unavailable' });
+});
+
+test('buildUsageField: never assumes a relationship between cached_input_tokens and input_tokens -- both are passed through verbatim, no derived/combined total', () => {
+  const rawUsage = { input_tokens: 100, cached_input_tokens: 40, cache_write_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0 };
+  const field = buildUsageField(rawUsage);
+  assert.equal(field.input_tokens, 100, 'input_tokens must be the raw provider value, not reduced by cached_input_tokens');
+  assert.equal(field.cached_input_tokens, 40, 'cached_input_tokens must be the raw provider value, not added to input_tokens');
+  assert.ok(!('derived_total_input_tokens_estimate' in field), 'this dispatcher computes no derived total -- that is a separate, explicitly-labeled downstream concern');
+});
+
+test('estimated_cost_usd is always null from buildUsageField: no price table is embedded in this dispatcher', () => {
+  assert.equal(buildUsageField({ input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 }).estimated_cost_usd, null);
+  assert.equal(buildUsageField(null).estimated_cost_usd, undefined, '{source: "unavailable"} carries no numeric fields at all, not even a null cost');
 });

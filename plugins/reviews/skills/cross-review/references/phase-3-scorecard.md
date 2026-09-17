@@ -14,7 +14,7 @@ Before spawning the auditor, run `scripts/blind-relabel.mjs flip --out
 Record it in the manifest now; never show it to the auditor.
 
 Each findings-plus-rebuttals file contains BOTH that seat's own claims (its own
-letter) AND its rebuttal of the peer's claims (the peer's letter, carried
+letter) AND the peer's rebuttal OF those claims (the peer's letter, carried
 through Phase 2's translate-back-to-real-IDs step). MUST relabel each file
 TWICE, once per letter, chaining the second pass onto the first file's output
 rather than the original.
@@ -42,8 +42,10 @@ node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase3/tmp-
 ```
 
 (`phase1/A-findings.md` and `phase1/B-findings.md` are Phase 2's target files:
-Phase 2 appends each seat's rebuttal directly onto its own Phase 1 file rather
-than writing new ones.)
+Phase 2 appends each seat's rebuttal onto the PEER'S Phase 1 file — the file
+of the seat being rebutted, not the rebutting seat's own — rather than
+writing new ones. `A-findings.md` therefore carries seat A's own claims AND
+seat B's rebuttal of them.)
 
 MUST NOT relabel a file only once. A single pass leaves the peer's real letter
 inside that file's rebuttal-section heading and prose (see review-protocol.md's
@@ -58,8 +60,12 @@ MUST NOT reuse Phase 2's `P` labels here — this is a third, separate namespace
 real identity.
 
 MUST run `blind-relabel.mjs scan` (with the same `--tokens` model/provider
-strings used in Phase 2) over each fully double-relabeled file, same
-self-identification hard stop as Phase 2's Blind exchange check. Allow at most
+strings used in Phase 2, AND `--phase1-dir "<run-dir>/phase1" --forbid-seats
+A,B` — both real seat letters, since a double-relabeled file must contain
+NEITHER real letter anywhere, fenced Evidence included) over each fully
+double-relabeled file, same self-identification hard stop as Phase 2's Blind
+exchange check. Omitting `--forbid-seats` here reopens the fenced Evidence
+claim-ID leak class documented under Model identity below. Allow at most
 one redaction round, then stop and report.
 
 The second (peer-letter) pass on a seat that had zero rebuttals to append —
@@ -133,7 +139,13 @@ and populates `verifications[].basis`/`.evidence` directly from the file's own
 
 ## Spawn the fresh auditor
 
-Spawn a new subagent (not the orchestrator's own context) with ONLY:
+Spawn a genuinely new subagent with ONLY the items below — **never** a fork
+of the orchestrator's own conversation (e.g. an `Agent` tool call with
+`subagent_type: "fork"`, or any equivalent that inherits context): a fork
+would hand the auditor the orchestrator's own conversation, which by Phase 3
+already contains both un-relabeled findings files, the coin-flip mapping, and
+seat identity — the exact leak the fresh-context auditor exists to prevent.
+Give it ONLY:
 
 - the original task packet;
 - the relabeled `X`/`Y` combined findings;
@@ -291,7 +303,10 @@ with `git -C "<target-dir>" worktree prune`, and confirm with `git -C
 
 ## Report
 
-Lead with the manifest and whether both seats completed. Include key findings,
+Produce `manifest.json` per review-protocol.md's Manifest and final output
+section (write the manifest body, then run `build-manifest.mjs` to stamp
+`run_id`/`hashes` — never author those two fields by hand). Lead with the
+manifest and whether both seats completed. Include key findings,
 the scorecard, prominent unresolved disagreements, execution limitations, pass
 counts (reviewer passes, blind rebuttal exchanges, whether the fresh auditor
 ran, falsification verifiers run — from `manifest.json`'s `falsification`

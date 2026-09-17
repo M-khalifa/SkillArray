@@ -9,6 +9,9 @@ import {
   splitProseAndCode,
   relabelText,
   scanText,
+  scanForKnownClaimIdLeaks,
+  extractClaimBlocks,
+  claimBlockProblems,
   flipMapping,
   invertSeatMapping,
   translateFindings,
@@ -405,6 +408,73 @@ test('scanText: an unterminated fenced code block throws rather than silently hi
   );
 });
 
+test('scanForKnownClaimIdLeaks: a real claim ID surviving INSIDE an Evidence fence is caught, closing relabelText\'s own documented limitation (the exact leak found in a real Phase 2 run)', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'scan-claim-leak-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — one\nEvidence: e1\n\n## A4 — four\nEvidence: e4\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+  // Simulates a Phase 2 peer-view already relabeled A->P, but seat A's own rebuttal prose
+  // still references its earlier claim by real letter INSIDE an Evidence fence -- relabelText
+  // deliberately never touches fence content, so this is exactly the leak the vendor/seat scan
+  // above (which also exempts fences) cannot see either.
+  const relabeled = '# Peer findings\n\n## P1 — one\nEvidence: e1\n\n### P1\nAction: CONCEDE\nEvidence:\n```\nsame issue as my A4\n```\n';
+  const hits = await scanForKnownClaimIdLeaks(relabeled, dir, ['A']);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].id, 'A4');
+  assert.match(hits[0].text, /my A4/);
+});
+
+test('scanForKnownClaimIdLeaks: only the forbidden seat\'s own real claim IDs are checked -- a Phase 2 peer-view forbidding seat A does not flag a literal "B2" appearing in prose', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'scan-claim-leak-scope-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — one\nEvidence: e1\n');
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## B2 — two\nEvidence: e2\n');
+  const text = 'discusses a config key named B2 in the target code, unrelated to any claim ID';
+  const hits = await scanForKnownClaimIdLeaks(text, dir, ['A']);
+  assert.equal(hits.length, 0);
+});
+
+test('scanForKnownClaimIdLeaks: clean text with no forbidden claim ID anywhere returns zero hits', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'scan-claim-leak-clean-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — one\nEvidence: e1\n');
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+  const hits = await scanForKnownClaimIdLeaks('# Peer findings\n\n## P1 — one\nEvidence:\n```\nclean, no leak\n```\n', dir, ['A']);
+  assert.equal(hits.length, 0);
+});
+
+test('parseArgs: scan --forbid-seats requires --phase1-dir alongside it, and rejects a malformed seat list', () => {
+  assert.throws(
+    () => parseArgs(['scan', '--in', 'x.md', '--forbid-seats', 'A']),
+    (err) => err instanceof RelayError && /requires --phase1-dir and --forbid-seats together/.test(err.message)
+  );
+  assert.throws(
+    () => parseArgs(['scan', '--in', 'x.md', '--phase1-dir', 'd']),
+    (err) => err instanceof RelayError && /requires --phase1-dir and --forbid-seats together/.test(err.message)
+  );
+  assert.throws(
+    () => parseArgs(['scan', '--in', 'x.md', '--phase1-dir', 'd', '--forbid-seats', 'a']),
+    (err) => err instanceof RelayError && /single uppercase letters/.test(err.message)
+  );
+  const args = parseArgs(['scan', '--in', 'x.md', '--phase1-dir', 'd', '--forbid-seats', 'A,B']);
+  assert.equal(args.forbidSeats, 'A,B');
+});
+
+test('parseArgs: --forbid-seats is only accepted by scan, rejected on relabel/flip/translate', () => {
+  assert.throws(
+    () => parseArgs(['relabel', '--in', 'x', '--out', 'y', '--from', 'A', '--to', 'P', '--forbid-seats', 'A']),
+    RelayError
+  );
+  assert.throws(() => parseArgs(['flip', '--out', 'y', '--forbid-seats', 'A']), RelayError);
+  assert.throws(
+    () => parseArgs(['translate', '--in', 'x', '--out', 'y', '--mapping', 'm', '--forbid-seats', 'A']),
+    RelayError
+  );
+});
+
 test('relabelText: a mid-line ``` inside one Evidence fence no longer flips fence parity for a LATER, separate fence (the exact bug that broke a real Phase 2 run)', () => {
   const backtick3 = '`'.repeat(3);
   const text = [
@@ -730,7 +800,7 @@ test('translateFindings: with --phase1-dir, a real translated claim ID passes an
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — real claim\nEvidence: something\n'
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: something\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
   const real = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
@@ -746,7 +816,7 @@ test('translateFindings: a claim heading appearing only inside a fenced Evidence
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — real finding\nEvidence:\n```text\n## A99 — literal text inside evidence\n```\n'
+    '# Seat A findings\n\n## A1 — real finding\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```text\n## A99 — literal text inside evidence\n```\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
 
@@ -760,6 +830,208 @@ test('translateFindings: a claim heading appearing only inside a fenced Evidence
   assert.deepEqual(result.findings[0].origins, ['A1']);
 });
 
+test('translateFindings: with --phase1-dir, basis/evidence_strength/evidence are derived mechanically from the origin claim block, overwriting whatever the auditor supplied', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-single-origin-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nran it live\n```\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+  const audit = JSON.stringify({
+    findings: [validFinding({
+      origins: ['X1'],
+      severity: 'LOW',
+      basis: 'INFERENCE',
+      evidence_strength: 'SPECULATIVE',
+      peer_responses: [{ claim: 'X1', response: 'conceded' }],
+      evidence: ['auditor typed this condensed summary'],
+    })],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  const f = result.findings[0];
+  assert.equal(f.severity, 'HIGH');
+  assert.equal(f.basis, 'EXECUTED');
+  assert.equal(f.evidence_strength, 'REPRODUCED');
+  assert.deepEqual(f.evidence, ['ran it live']);
+});
+
+test('translateFindings: with --phase1-dir, a multi-origin finding takes the single STRONGEST value per field across origins, and one evidence entry per origin in origins[] order', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-multi-origin-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — weaker origin\nSeverity: MEDIUM\nBasis: SOURCE_CITATION\nEvidence strength: SUPPORTED\nEvidence:\n```\nA1 evidence text\n```\n'
+  );
+  await fs.writeFile(
+    path.join(dir, 'B-findings.md'),
+    '# Seat B findings\n\n## B1 — stronger origin\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nB1 evidence text\n```\n'
+  );
+  const audit = JSON.stringify({
+    findings: [validFinding({
+      origins: ['X1', 'Y1'],
+      severity: 'LOW',
+      basis: 'INFERENCE',
+      evidence_strength: 'SPECULATIVE',
+      peer_responses: [
+        { claim: 'X1', response: 'conceded' },
+        { claim: 'Y1', response: 'conceded' },
+      ],
+      evidence: ['auditor summary only'],
+    })],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  const f = result.findings[0];
+  assert.deepEqual(f.origins, ['A1', 'B1']);
+  assert.equal(f.severity, 'HIGH');
+  assert.equal(f.basis, 'EXECUTED');
+  assert.equal(f.evidence_strength, 'REPRODUCED');
+  assert.equal(f.basis_from, 'B1');
+  assert.deepEqual(f.evidence, ['A1 evidence text', 'B1 evidence text']);
+});
+
+test('translateFindings: with --phase1-dir, basis/evidence_strength are copied as a PAIR from the single strongest-evidenced origin (basis-primary tiebreak), never independently maximized per field into a combination no origin actually had', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-crossed-strength-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  // A1: EXECUTED + SUPPORTED. B1: STATIC_TRACE + REPRODUCED. Neither origin ever asserted
+  // EXECUTED + REPRODUCED -- independent-per-field-max would synthesize exactly that pair.
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — executed but weakly evidenced\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: SUPPORTED\nEvidence:\n```\nA1 evidence text\n```\n'
+  );
+  await fs.writeFile(
+    path.join(dir, 'B-findings.md'),
+    '# Seat B findings\n\n## B1 — traced but strongly evidenced\nSeverity: HIGH\nBasis: STATIC_TRACE\nEvidence strength: REPRODUCED\nEvidence:\n```\nB1 evidence text\n```\n'
+  );
+  const audit = JSON.stringify({
+    findings: [validFinding({
+      origins: ['X1', 'Y1'],
+      peer_responses: [
+        { claim: 'X1', response: 'conceded' },
+        { claim: 'Y1', response: 'conceded' },
+      ],
+    })],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  const f = result.findings[0];
+  // basis is primary: EXECUTED (A1) outranks STATIC_TRACE (B1), so A1 is the strongest-evidenced
+  // origin and BOTH fields come from it -- not EXECUTED (from A1) + REPRODUCED (from B1).
+  assert.equal(f.basis, 'EXECUTED');
+  assert.equal(f.evidence_strength, 'SUPPORTED');
+  assert.equal(f.basis_from, 'A1');
+});
+
+test('translateFindings: with --phase1-dir, when two origins tie on basis, evidence_strength is the secondary tiebreak (still a pair from one origin)', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-basis-tie-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — tied basis, weaker strength\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: SUPPORTED\nEvidence:\n```\nA1 evidence text\n```\n'
+  );
+  await fs.writeFile(
+    path.join(dir, 'B-findings.md'),
+    '# Seat B findings\n\n## B1 — tied basis, stronger strength\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nB1 evidence text\n```\n'
+  );
+  const audit = JSON.stringify({
+    findings: [validFinding({
+      origins: ['X1', 'Y1'],
+      peer_responses: [
+        { claim: 'X1', response: 'conceded' },
+        { claim: 'Y1', response: 'conceded' },
+      ],
+    })],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  const f = result.findings[0];
+  assert.equal(f.basis, 'EXECUTED');
+  assert.equal(f.evidence_strength, 'REPRODUCED');
+  assert.equal(f.basis_from, 'B1');
+});
+
+test('translateFindings: with --phase1-dir, an Evidence fence WITH an info string (```text, as Codex/real fixtures write it) still derives the evidence body correctly, stripping only the fence markers', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-info-string-fence-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```text\nbody line\n```\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+  const audit = JSON.stringify({
+    findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  assert.deepEqual(result.findings[0].evidence, ['body line']);
+});
+
+test('translateFindings: with --phase1-dir, a bare ``` mid-fence inside a ~~~-opened Evidence block stays evidence CONTENT, not a false closer', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-tilde-fence-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n~~~\nliteral ```\n~~~\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+  const audit = JSON.stringify({
+    findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  assert.deepEqual(result.findings[0].evidence, ['literal ```']);
+});
+
+test('translateFindings: with --phase1-dir, refuses (does not silently trust the auditor) when an origin claim block is missing a recognized Severity/Basis/Evidence strength/Evidence line', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-missing-field-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — no severity line\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  const missingSeverity = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
+  await assert.rejects(translateFindings(missingSeverity, { A: 'X', B: 'Y' }, dir), /origin "A1" has no recognized "Severity:" line/);
+
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — bad basis\nSeverity: HIGH\nBasis: MADE_UP_VALUE\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  const badBasis = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
+  await assert.rejects(translateFindings(badBasis, { A: 'X', B: 'Y' }, dir), /origin "A1" has no recognized "Basis:" line/);
+
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — no evidence body\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n');
+  const missingEvidence = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
+  await assert.rejects(translateFindings(missingEvidence, { A: 'X', B: 'Y' }, dir), /origin "A1" has no non-empty "Evidence:" body/);
+});
+
+test('translateFindings: with --phase1-dir, a "---" thematic break between claims (a real Phase 1 output shape) terminates the evidence body and does not leak into it, and does not get mistaken for a new claim', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-thematic-break-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\nprose before\n\n```\nfenced body\n```\nprose after\n\n---\n\n## A2 — second\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nEvidence: e2\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+  const audit = JSON.stringify({
+    findings: [
+      validFinding({ id: 'F1', origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] }),
+      validFinding({ id: 'F2', origins: ['X2'], peer_responses: [{ claim: 'X2', response: 'conceded' }] }),
+    ],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  assert.deepEqual(result.findings[0].evidence, ['prose before\n\nfenced body\nprose after']);
+  assert.deepEqual(result.findings[1].evidence, ['e2']);
+});
+
+test('translateFindings: without --phase1-dir, the auditor-supplied severity/basis/evidence_strength/evidence are still trusted as before (opt-in, not automatic)', async () => {
+  const audit = JSON.stringify({
+    findings: [validFinding({
+      severity: 'LOW',
+      basis: 'INFERENCE',
+      evidence_strength: 'SPECULATIVE',
+      evidence: ['whatever the auditor wrote'],
+    })],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, null);
+  const f = result.findings[0];
+  assert.equal(f.severity, 'LOW');
+  assert.equal(f.basis, 'INFERENCE');
+  assert.equal(f.evidence_strength, 'SPECULATIVE');
+  assert.deepEqual(f.evidence, ['whatever the auditor wrote']);
+});
+
 test('translateFindings: an inline-code span prefixing a heading-shaped string does not fabricate a Phase 1 claim (heading detection uses the RAW line, not the code-stripped one)', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-inline-prefix-heading-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -767,7 +1039,7 @@ test('translateFindings: an inline-code span prefixing a heading-shaped string d
     path.join(dir, 'A-findings.md'),
     // Stripping "`prefix`" would shift "## A99..." to position 0 -- a real Markdown renderer
     // never treats this as a heading, since the backtick span still occupies that position.
-    '# Seat A findings\n\n## A1 — real finding\nEvidence: e\n\n`prefix`## A99 — this is not a heading\n'
+    '# Seat A findings\n\n## A1 — real finding\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n`prefix`## A99 — this is not a heading\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
 
@@ -799,11 +1071,11 @@ test('translateFindings: with --phase1-dir, refuses when a real Phase 1 claim is
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — first\nEvidence: e\n\n## A2 — second\nEvidence: e\n'
+    '# Seat A findings\n\n## A1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n## A2 — second\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n'
   );
   await fs.writeFile(
     path.join(dir, 'B-findings.md'),
-    '# Seat B findings\n\n## B1 — first\nEvidence: e\n'
+    '# Seat B findings\n\n## B1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n'
   );
 
   const missingA2 = JSON.stringify({
@@ -827,7 +1099,7 @@ test('translateFindings: with --phase1-dir, refuses when a real Phase 1 claim is
 test('translateFindings: with --phase1-dir, a seat with zero Phase 1 claims does not force a spurious coverage failure', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-coverage-zero-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — only\nEvidence: e\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — only\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings this pass)\n');
 
   const audit = JSON.stringify({
@@ -1733,6 +2005,226 @@ test('CLI flip: writes a JSON file with exactly one of the two mappings', async 
   assert.ok((mapping.A === 'X' && mapping.B === 'Y') || (mapping.A === 'Y' && mapping.B === 'X'));
 });
 
+test('claimBlockProblems: a fully complete claim block has no problems', () => {
+  const { blocks } = extractClaimBlocks('# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  assert.deepEqual(claimBlockProblems(blocks.get('A1')), []);
+});
+
+test('claimBlockProblems: reports every missing/unrecognized field, not just the first (the real Phase 2 run\'s shape: no "Evidence:" label at all)', () => {
+  const { blocks } = extractClaimBlocks('# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n\nprose with no Evidence: label\n');
+  const problems = claimBlockProblems(blocks.get('A1'));
+  assert.deepEqual(problems, ['no non-empty "Evidence:" body']);
+});
+
+test('extractClaimBlocks: reports a bare-number malformed heading ("## 1", the exact live-run shape) rather than silently treating it as zero claims', () => {
+  const { blocks, malformedHeadings, noFindingsMarker } = extractClaimBlocks(
+    '# Seat A findings\n\n## 1 — bad heading\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n'
+  );
+  assert.equal(blocks.size, 0);
+  assert.equal(malformedHeadings.length, 1);
+  assert.equal(malformedHeadings[0].attempted, '1');
+  assert.equal(noFindingsMarker, false);
+});
+
+test('extractClaimBlocks: reports a duplicate real claim ID heading instead of silently letting the second block overwrite the first', () => {
+  const { blocks, duplicateIds } = extractClaimBlocks(
+    '# Seat A findings\n\n## A1 — first version\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: first\n\n' +
+      '## A1 — duplicate\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nEvidence: second\n'
+  );
+  assert.equal(blocks.size, 1);
+  assert.equal(blocks.get('A1').evidence, 'first'); // first occurrence wins, never silently overwritten
+  assert.equal(duplicateIds.length, 1);
+  assert.equal(duplicateIds[0].id, 'A1');
+});
+
+test('extractClaimBlocks: recognizes the fixed "## No findings" marker, distinct from prose like "(no findings)"', () => {
+  const marked = extractClaimBlocks('# Seat A findings\n\n## No findings\n');
+  assert.equal(marked.noFindingsMarker, true);
+  assert.equal(marked.blocks.size, 0);
+
+  const prose = extractClaimBlocks('# Seat A findings\n\n(no findings)\n');
+  assert.equal(prose.noFindingsMarker, false);
+});
+
+test('extractClaimBlocks: an ordinary non-claim-shaped prose heading ("## Checks performed") is never flagged as a malformed claim attempt', () => {
+  const { malformedHeadings } = extractClaimBlocks('# Seat A findings\n\n## Checks performed\n- did a thing\n');
+  assert.equal(malformedHeadings.length, 0);
+});
+
+test('parseArgs: validate requires --phase1-dir and rejects every other flag', () => {
+  assert.throws(() => parseArgs(['validate']), /validate requires --phase1-dir/);
+  assert.throws(
+    () => parseArgs(['validate', '--phase1-dir', 'd', '--in', 'x']),
+    /validate accepts only --phase1-dir/
+  );
+  const args = parseArgs(['validate', '--phase1-dir', 'd']);
+  assert.equal(args.phase1Dir, 'd');
+});
+
+test('CLI validate: exits 0 on two fully complete seat files, and nonzero listing every problem when a real-shaped claim block (no "Evidence:" label) is missing one', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## B1 — y\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nEvidence: e2\n');
+
+  const clean = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.match(clean.stdout, /validate clean/);
+
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — no evidence label\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n\njust prose, the real Phase 2 run\'s exact shape\n'
+  );
+  const dirty = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(dirty.status, 0);
+  assert.match(dirty.stderr, /A-findings\.md: claim "A1" has no non-empty "Evidence:" body/);
+});
+
+test('CLI validate: a bare-number heading ("## 1", the exact live-run shape ChatGPT reproduced) is rejected, not silently treated as zero findings', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-bare-number-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## 1 — bad heading\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: something\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /looks like an attempted claim ID \("1"\) but does not match/);
+});
+
+test('CLI validate: two "## A1" headings in the same file are rejected as a duplicate claim ID, not silently collapsed', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-duplicate-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e1\n\n' +
+      '## A1 — duplicate\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nEvidence: e2\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /claim "A1" heading appears more than once/);
+});
+
+test('CLI validate: a "## B1" heading inside A-findings.md is rejected as the wrong seat\'s letter', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-wrong-seat-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## B1 — wrong seat letter\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /claim "B1" uses seat "B"'s letter, not this file's own seat "A"/);
+});
+
+test('CLI validate: an empty seat file with no "## No findings" marker is rejected, distinguishing "ignored the schema" from a genuine zero-findings pass', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-empty-no-marker-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /B-findings\.md: has zero recognized claim headings and no "## No findings" marker/);
+
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const clean = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.equal(clean.status, 0, clean.stderr);
+});
+
+test('CLI validate: a malformed rebuttal-section heading is rejected, instead of being silently indistinguishable from relabel\'s expected "no rebuttal heading" exit for a zero-rebuttal seat', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-bad-rebuttal-heading-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+      '## Rebuttals from B of A claims\n\n### A1\nRebuttal text.\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /does not match the required "## Rebuttals \(from <letter>\) of <letter> claims" form/);
+
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+      '## Rebuttals (from B) of A claims\n\n### A1\nRebuttal text.\n'
+  );
+  const clean = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.equal(clean.status, 0, clean.stderr);
+});
+
+test('CLI validate: a rebuttal heading naming a claim ID instead of a bare seat letter ("from B1") is rejected -- must match relabel\'s own regex exactly, not a looser pattern', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-rebuttal-claimid-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+      '## Rebuttals (from B1) of A claims\n\n### A1\nRebuttal text.\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /does not match the required "## Rebuttals \(from <letter>\) of <letter> claims" form/);
+});
+
+test('CLI validate: "(from A) of B" inside A-findings.md itself is ACCEPTED -- validate deliberately does not enforce WHICH file a rebuttal heading is appended to (relabel itself is placement-agnostic), even though this shape is not the standardized placement docs now describe', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-rebuttal-selfplaced-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+      '## Rebuttals (from A) of B claims\n\n### A1\nRebuttal text.\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('CLI validate: a rebuttal heading naming a seat rebutting its own claims ("from A) of A") is rejected -- a rebuttal always addresses the peer, never the same seat', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-rebuttal-selfsame-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+      '## Rebuttals (from A) of A claims\n\n### A1\nRebuttal text.\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /names a seat rebutting its own claims/);
+});
+
+test('CLI validate: a rebuttal heading with trailing whitespace is rejected -- must match relabel\'s own raw, untrimmed regex, or a heading relabel silently ignores would pass validate clean', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-rebuttal-trailing-ws-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+      '## Rebuttals (from B) of A claims \n\n### A1\nRebuttal text.\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /does not match the required "## Rebuttals \(from <letter>\) of <letter> claims" form/);
+});
+
+test('CLI validate: a rebuttal-shaped heading QUOTED INSIDE an Evidence fence is never flagged as malformed -- fenced text is evidence, not a real heading relabel would ever act on', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-rebuttal-fenced-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n' +
+      'Evidence:\n```text\n## Rebuttals junk\n```\n\n' +
+      '## Rebuttals (from B) of A claims\n\n### A1\nRebuttal text.\n'
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('CLI relabel: a wrong --from that matches nothing fails loudly and writes no output, instead of silently succeeding on an unchanged file', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blind-relabel-wrongfrom-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -1825,15 +2317,28 @@ test('dogfood: scanning the real relabeled peer-views finds zero self-identifica
     );
     assert.equal(relabelResult.status, 0, relabelResult.stderr);
 
+    // Also exercise the exact wired command phase-2-cross-examination.md now requires: the
+    // known-real-claim-ID leak check, not just the vendor/model-token scan above.
     const scanResult = spawnSync(
       process.execPath,
-      [SCRIPT, 'scan', '--in', outPath, '--target-dir', targetDir],
+      [
+        SCRIPT,
+        'scan',
+        '--in',
+        outPath,
+        '--target-dir',
+        targetDir,
+        '--phase1-dir',
+        FIXTURE_DIR,
+        '--forbid-seats',
+        from,
+      ],
       { encoding: 'utf8' }
     );
     assert.equal(
       scanResult.status,
       0,
-      `expected a clean scan (no identity leak) for ${outName}, got:\n${scanResult.stderr}`
+      `expected a clean scan (no identity leak, no forbidden-seat claim ID) for ${outName}, got:\n${scanResult.stderr}`
     );
     assert.doesNotMatch(scanResult.stderr, /SELF-IDENTIFICATION/);
     assert.doesNotMatch(scanResult.stderr, /IDENTITY line/);

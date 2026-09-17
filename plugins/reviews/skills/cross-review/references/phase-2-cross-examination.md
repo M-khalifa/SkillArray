@@ -7,7 +7,12 @@ same-round rebuttal.
 Resume the Claude agent by its exact ID and seat B by Phase 1's exact session
 ID (`threadId` for Codex, `sessionId` for OpenCode). If a runtime cannot
 resume, report the limitation before replacing that seat; do not pretend a new
-context is a resumed reviewer.
+context is a resumed reviewer. **Never resume seat A by forking** (e.g. an
+`Agent` tool call with `subagent_type: "fork"`, or any equivalent): a fork
+inherits the orchestrator's own conversation, which by Phase 2 already
+contains the peer's real findings and identity — handing that context to
+"seat A" for a rebuttal is a blinding breach by construction, not a resume at
+all. Resume the exact Phase 1 agent ID only.
 
 ## Blind relabel before handoff
 
@@ -30,10 +35,17 @@ checks for the actual configured identifiers, not just the hardcoded vendor-name
 
 ```text
 node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase1/A-findings.md" --out "<run-dir>/phase2/peer-view-for-B.md" --from A --to P
-node "<skill-dir>/scripts/blind-relabel.mjs" scan --in "<run-dir>/phase2/peer-view-for-B.md" --target-dir "<target-dir>" --tokens "<seat-a-model>,<seat-b-model>"
+node "<skill-dir>/scripts/blind-relabel.mjs" scan --in "<run-dir>/phase2/peer-view-for-B.md" --target-dir "<target-dir>" --tokens "<seat-a-model>,<seat-b-model>" --phase1-dir "<run-dir>/phase1" --forbid-seats A
 node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase1/B-findings.md" --out "<run-dir>/phase2/peer-view-for-A.md" --from B --to P
-node "<skill-dir>/scripts/blind-relabel.mjs" scan --in "<run-dir>/phase2/peer-view-for-A.md" --target-dir "<target-dir>" --tokens "<seat-a-model>,<seat-b-model>"
+node "<skill-dir>/scripts/blind-relabel.mjs" scan --in "<run-dir>/phase2/peer-view-for-A.md" --target-dir "<target-dir>" --tokens "<seat-a-model>,<seat-b-model>" --phase1-dir "<run-dir>/phase1" --forbid-seats B
 ```
+
+`--phase1-dir`/`--forbid-seats` on each `scan` is mandatory, not optional: it
+mechanically closes the fenced Evidence claim-ID leak class documented under
+Model identity below — the source seat's OWN real claim IDs must never
+survive relabel inside its own peer-facing view, including inside an
+Evidence fence, which `relabel` deliberately never rewrites. Skipping this
+flag on either `scan` call reopens exactly that leak.
 
 A nonzero `scan` exit is a hard stop — first-person self-identification and
 any other non-target-derived identity mention (third-person included, e.g.
@@ -103,8 +115,15 @@ only by their relabeled `P` IDs:
 
 Run both directions concurrently. Persist their returned rebuttals by
 translating each rebuttal's `P` ID back to the real peer claim ID (`A`/`B`) and
-appending a "Rebuttals of peer findings" section to that peer's own findings
-file, preserving the original claims. Do not require direct reviewer-to-reviewer
+appending a section to that peer's own findings file, preserving the original
+claims. This section's heading MUST be the exact literal string
+`## Rebuttals (from <seat>) of <peer> claims` — e.g. `## Rebuttals (from A) of
+B claims` appended to `B-findings.md` for seat A's rebuttals of seat B's
+claims — because `blind-relabel.mjs relabel`'s `countRelabelTargets`/
+`relabelText` match this heading by exact regex to detect and rewrite it
+during Phase 3's double relabel; any other wording (e.g. "Rebuttals of peer
+findings") is invisible to the tool and a second relabel pass on that file
+will report zero targets found. Do not require direct reviewer-to-reviewer
 messaging.
 
 A nonzero exit, `status: error`, `status: timed-out`, absent or mismatched
@@ -112,3 +131,22 @@ session ID, missing response, or incomplete rebuttal coverage blocks the
 completed scorecard. Diagnose the failure; do not repeatedly resend or start a
 fresh session silently. Audit source changes again and wait for both rebuttals
 before Phase 3.
+
+Once both rebuttal sections are appended, run `scripts/blind-relabel.mjs
+validate --phase1-dir <run-dir>/phase1` again before Phase 3's double relabel.
+This second run (Phase 1's own gate already ran `validate` before any
+rebuttal existed) is a mechanical check on the rebuttal heading's exact
+literal form (both seat letters, `A`/`B`, never a claim ID or any other
+shape) and rejects a seat naming itself as its own rebutter ("from A) of A").
+A malformed heading produces the identical "no rebuttal heading found" signal
+`relabel`'s second pass gives for a seat with zero rebuttals to append (see
+Phase 3's own note on that expected zero-rebuttal exit), so without this
+`validate` run the two cases are silently indistinguishable. `validate`
+deliberately does not enforce WHICH file a rebuttal heading is appended
+to — placement is standardized in prose (this file's own worked example
+above and review-protocol.md: onto the PEER's file), but `relabel` itself
+is placement-agnostic (it relabels a seat's letter wherever the heading
+appears), so `validate` only rejects the universally-invalid case: a seat
+naming itself as its own rebutter. A nonzero exit here is the same
+redaction-round procedure as a `scan` hit: return to that seat's own context
+for reformatting, never a hand edit.

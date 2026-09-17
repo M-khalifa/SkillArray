@@ -23,3 +23,62 @@ model provider; do not run either skill against an untrusted repository
 without reviewing what commands it may execute. `shared-brain` publishes
 selected engineering knowledge to its configured MCP backend; review its
 profile and secret-scan results before capture or migration.
+
+## Execution policy and sandboxing
+
+Neither skill sandboxes beyond what the underlying provider CLI or harness
+guarantees.
+
+- **`cross-review` on codex**: defaults to `--sandbox read-only`, a real
+  CLI-enforced sandbox (`workspace-write`/`danger-full-access` are opt-in).
+- **`cross-review` on OpenCode**: no CLI-enforced read-only mode exists.
+  `--isolate` runs it against a disposable git worktree instead, which
+  stops writes from reaching the real target but doesn't block network
+  access or reads outside the worktree. Treat unisolated OpenCode
+  execution as unsandboxed.
+- **`pair-review`**: both seats are Claude Code subagents, not spawned
+  processes — whatever the harness enforces on a subagent applies; this
+  skill adds nothing on top.
+
+## Environment variable exposure
+
+`cross-review`'s two dispatchers spawn the `codex`/`opencode` CLI as a
+child process, and default to `--env-mode filtered`: the child gets only a
+base OS allowlist (`PATH`, `HOME`/`USERPROFILE`, locale variables), each
+CLI's own credential-locator variables, and anything named with
+`--env-passthrough`. Everything else, including cloud keys, `GITHUB_TOKEN`,
+and database passwords, is excluded. The reviewed repository's own code
+can end up executing inside that environment too, not just the CLI
+itself — for example, a test suite the CLI runs to check a claim.
+
+Use `--env-mode inherit` only when a provider's auth genuinely needs a
+variable outside the allowlist; prefer `--env-passthrough <NAME>` instead,
+which adds one variable rather than dropping the filter entirely.
+
+`pair-review` has no dispatcher process — its seats inherit whatever
+environment the harness subagent mechanism already provides.
+
+## execution_policy
+
+There's no unified `execution_policy: never|ask|allow` setting spanning
+both dispatchers and `pair-review` yet. `--sandbox read-only`/`--isolate`
+approximate `never`; `--sandbox workspace-write`/`danger-full-access` or
+OpenCode without `--isolate` approximate `allow`. There is no
+`ask`-equivalent mid-run confirmation step today.
+
+## Artifacts, logs, and prompt injection
+
+Each seat's `result.json`, `findings.json`, and `manifest.json` are
+written under the review's own working directory, unencrypted, protected
+only by filesystem permissions. An `--isolate` worktree is written into
+the target repository's own `.git/worktrees/`, not a separate temp
+location. Anyone who can read that directory can read full reviewer
+transcripts, including repository content quoted into a finding's
+evidence.
+
+Neither skill defends against prompt injection from the reviewed
+material. A reviewer reads the target's source, comments, commit
+messages, and command output, and none of it is sanitized first. A
+repository engineered to contain instructions aimed at the reviewer (for
+example, "mark this finding settled") is not currently detected or
+blocked.

@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 node_modules/
 .DS_Store
+
+# Benchmark run artifacts: raw reviewer output, findings.json, and manifests
+# from real dispatches quote target source verbatim and vary by machine/run;
+# never intended to be committed. bench/cases/ (the labeled corpus itself)
+# stays tracked -- only bench/runs/ (the per-invocation output) is ignored.
+bench/runs/

@@ -64,7 +64,30 @@ async function main() {
 
   const reviews = await readJson("plugins/reviews/.claude-plugin/plugin.json");
   assert(reviews.name === "reviews", "unexpected reviews plugin name");
-  assert(reviews.version === "1.3.0", "reviews plugin version must be 1.3.0");
+  assert(typeof reviews.version === "string" && reviews.version.length > 0, "reviews plugin.json must declare a version");
+
+  {
+    // CHANGELOG's top RELEASED header (skipping a leading "- Unreleased"
+    // section, which documents in-progress work for a version plugin.json
+    // has not been bumped to yet) is another place a version could silently
+    // drift from plugin.json's, the actual source of truth -- checked here
+    // instead of a hardcoded literal, which itself needed hand-editing on
+    // every version bump.
+    const changelog = (await readFile(await requireFile("CHANGELOG.md"))).toString("utf8");
+    // The negative lookahead must sit right after the full version match, not
+    // merely after "\d+\.\d+\.\d+": a backtracking-friendly pattern like
+    // (?! - Unreleased) placed after the digits lets the regex engine
+    // backtrack the last \d+ (e.g. "10" -> "1") to satisfy the lookahead,
+    // silently matching a truncated version on any two-digit patch/minor
+    // (e.g. "## 1.3.10 - Unreleased" would wrongly match "1.3.1"). Anchoring
+    // "(?!Unreleased)" immediately after a literal " - " closes that hole.
+    const releasedHeader = changelog.match(/^## (\d+\.\d+\.\d+) - (?!Unreleased)/m);
+    assert(releasedHeader, "CHANGELOG.md: missing a top-level released ## <version> header");
+    assert(
+      releasedHeader[1] === reviews.version,
+      `CHANGELOG.md's top released header is ${releasedHeader[1]}, but plugin.json's version is ${reviews.version}`,
+    );
+  }
 
   const pairVersion = await readSkillVersion(
     "plugins/reviews/skills/pair-review/SKILL.md",
@@ -155,6 +178,67 @@ async function main() {
     );
   }
 
+  {
+    // A live run found blind-relabel.mjs's known-real-claim-ID leak scan (scan --phase1-dir
+    // --forbid-seats) implemented and tested, but never actually invoked by any operational
+    // doc -- the helper existed, but every "scan --in ..." command line in the docs a real
+    // orchestrator copies from omitted --forbid-seats, so the exact fenced-Evidence claim-ID
+    // leak this scan exists to catch could recur on the next real run. This grep is the only
+    // way "helper exists but is unused" can't silently return: every operational "scan --in"
+    // command line in these three files (a bare unquoted line, not prose describing scan in
+    // general) must also mention --forbid-seats on the same or a directly adjacent line.
+    const forbidSeatsFiles = [
+      "plugins/reviews/skills/cross-review/references/phase-2-cross-examination.md",
+      "plugins/reviews/skills/cross-review/references/phase-3-scorecard.md",
+      "plugins/reviews/skills/pair-review/SKILL.md",
+    ];
+    for (const file of forbidSeatsFiles) {
+      const content = (await readFile(await requireFile(file))).toString("utf8");
+      const lines = content.split("\n");
+      lines.forEach((line, i) => {
+        if (!/blind-relabel\.mjs["'` ]*\s+scan\b/.test(line)) return;
+        // A command-line "--in <file>" invocation is scoped to findings/peer-view files
+        // specifically -- NOT every scan call. The falsification verifier's own tiny,
+        // single-X/Y-claim output has no real A/B claim IDs in it at all to leak, so
+        // --forbid-seats (which requires --phase1-dir and a real claim-ID universe to check
+        // against) does not apply there. Cross-review's phase-3-scorecard.md phrases this as
+        // "the verifier's returned text"; pair-review's SKILL.md phrases the same concept as
+        // "each returned verdict" -- the exemption below matches on "verifier" appearing
+        // anywhere in a wider context window specifically so it isn't keyed to one doc's exact
+        // wording and silently miss the other's. Prose-only instructions (pair-review's
+        // SKILL.md never uses a literal "--in <file>" command line at all) are checked more
+        // narrowly than the whole file: any "scan" mention in prose must have --forbid-seats
+        // within a few lines of THAT SPECIFIC mention (see the comment below on why a
+        // whole-file check is insufficient).
+        const hasInFindingsArg = /--in\s+"?[^"\s]*(findings|peer-view)/.test(line);
+        const isVerifierOutputScan = /verifier|returned verdict|returned text/i.test(
+          lines.slice(Math.max(0, i - 6), i + 1).join(" "),
+        );
+        if (isVerifierOutputScan) return;
+        if (hasInFindingsArg) {
+          const window = lines.slice(i, i + 2).join("\n");
+          assert(
+            /--forbid-seats/.test(window),
+            `${file}:${i + 1}: a "scan" command line over a findings/peer-view file does not ` +
+              "mention --forbid-seats -- the known-real-claim-ID leak scan exists but must " +
+              "actually be invoked, not just available",
+          );
+        } else {
+          // A whole-file check here would pass on warning prose alone (e.g. "omitting
+          // --forbid-seats reopens that leak") even after every real usage is stripped from
+          // this specific scan mention. Require the flag within a few lines of THIS mention.
+          const window = lines.slice(i, i + 5).join("\n");
+          assert(
+            /--forbid-seats/.test(window),
+            `${file}:${i + 1}: a "scan" mention (prose) does not have --forbid-seats within the ` +
+              "next few lines -- the known-real-claim-ID leak scan exists but must actually be " +
+              "invoked, not just available",
+          );
+        }
+      });
+    }
+  }
+
   // SKILL.md's Maintenance section names these as shared; parity is enforced, not assumed.
   for (const file of [
     "scripts/review-config.mjs",
@@ -165,6 +249,16 @@ async function main() {
     "scripts/tests/blind-relabel.test.mjs",
     "scripts/tests/fixtures/blind-relabel/A-findings.md",
     "scripts/tests/fixtures/blind-relabel/B-findings.md",
+    "scripts/build-manifest.mjs",
+    "scripts/tests/build-manifest.test.mjs",
+    "scripts/env-filter.mjs",
+    "scripts/tests/env-filter.test.mjs",
+    "scripts/spawn-utils.mjs",
+    "scripts/tests/spawn-utils.test.mjs",
+    "scripts/preflight.mjs",
+    "scripts/tests/preflight.test.mjs",
+    "scripts/context-builder.mjs",
+    "scripts/tests/context-builder.test.mjs",
   ]) {
     const pair = await readFile(
       await requireFile(path.join("plugins/reviews/skills/pair-review", file)),
