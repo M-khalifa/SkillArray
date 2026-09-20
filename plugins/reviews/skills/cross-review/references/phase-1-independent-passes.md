@@ -35,9 +35,23 @@ instruction verbatim: never name your own vendor, model, or runtime anywhere in
 your findings, and never name your own seat letter in prose either (it belongs
 only in claim IDs and the seat header); describe tools generically.
 
+Give both seats this instruction verbatim: once you confirm a defect pattern
+at one location, grep or search the rest of the target for the same pattern
+and report every location it actually occurs, each as its own claim — not
+only the first instance found. A confirmed defect class (e.g. a `.get(key,
+default)` result fed into `int()`/`float()`/string-concat/slicing without a
+None-check) is exactly as real at every other occurrence as at the one first
+noticed, and stopping at the first materially understates the review.
+
 Claude (seat A): use the selected seat-A model and supported effort mechanism.
-Give the agent a unique name and keep its agent ID for the next phase. Its
-claims use `A1, A2, ...`. It must not read seat B's findings during this phase.
+Spawn it as a general-purpose agent (`Tools: *`), not a restricted-toolset
+subagent type — this is what gives it WebFetch/WebSearch for the Web
+verification rules in [review-protocol.md](review-protocol.md); naming a
+different, more restricted spawn type here silently loses that capability
+without any error to catch it. Include the Web verification rules from
+review-protocol.md verbatim in its brief. Give the agent a unique name and
+keep its agent ID for the next phase. Its claims use `A1, A2, ...`. It must
+not read seat B's findings during this phase.
 
 Seat B: write a self-contained brief under `<run-dir>/phase1/brief.txt`.
 Its claims use `B1, B2, ...`. It must not read seat A's findings during this
@@ -48,19 +62,29 @@ alone; use the saved/resolved `runtime` field.
 For a Codex seat B (quote substituted paths in shell):
 
 ```text
-node "<skill-dir>/scripts/codex-dispatch.mjs" --brief "<run-dir>/phase1/brief.txt" --cd "<target-dir>" --sandbox read-only --model SELECTED_MODEL
+node "<skill-dir>/scripts/codex-dispatch.mjs" --brief "<run-dir>/phase1/brief.txt" --cd "<target-dir>" --sandbox read-only --model SELECTED_MODEL --web
 ```
 
 Append `--effort SELECTED_LEVEL` only for a non-default effort. Append
 `--timeout SELECTED_TIMEOUT_SECONDS` only when the user opted into a bound for
 this run; the orchestrator's default is no limit, so omit the flag entirely
-otherwise.
+otherwise. `--web` enables Codex's native web search per Web verification in
+review-protocol.md — always pass it unless the task text disabled web
+verification ("repo-only review"); the brief must still carry the Web
+verification rules verbatim regardless of this flag, since the flag alone
+does not tell the model when or how to use the capability.
 
 For an OpenCode seat B:
 
 ```text
-node "<skill-dir>/scripts/opencode-dispatch.mjs" --brief "<run-dir>/phase1/brief.txt" --cd "<target-dir>" --model SELECTED_MODEL --isolate
+node "<skill-dir>/scripts/opencode-dispatch.mjs" --brief "<run-dir>/phase1/brief.txt" --cd "<target-dir>" --model SELECTED_MODEL --isolate --web
 ```
+
+`--web` is accepted here for call-site parity only — OpenCode has no
+web-capable CLI flag, so this seat's `webAccess` is always `false` regardless
+(see Web verification in review-protocol.md). Still include the Web
+verification rules in its brief so it reports the gap explicitly rather than
+silently reasoning without web access when a claim would have needed it.
 
 (the saved `model` value already includes the `provider/` prefix, e.g. `google/gemini-x` — do not prepend the provider again.)
 
@@ -115,8 +139,8 @@ result.json — Phase 2's resume dispatch reuses it, and Phase 3 removes it.
 Both dispatchers write the same result.json schema (`codex-dispatch.mjs` and
 `opencode-dispatch.mjs`'s own USAGE blocks list every field). Copy
 `modelRequested`/`effortRequested`/`modelResolved`/`effortResolved`/`isolated`/
-`worktreePath`/`isolationNote` from each seat's result.json into that seat's
-manifest entry verbatim; `selectionNote` becomes the manifest's
+`worktreePath`/`isolationNote`/`webAccess` from each seat's result.json into
+that seat's manifest entry verbatim; `selectionNote` becomes the manifest's
 `verification_note`. Codex seats always show `isolated: false,
 worktreePath: null, isolationNote: null` (its read-only guarantee is a native
 CLI flag, not a worktree). For an isolated OpenCode seat, `isolationNote`

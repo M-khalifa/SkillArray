@@ -128,6 +128,13 @@ Optional:
                          matching pre-1.4.0 behavior.
   --env-passthrough <names>  Comma-separated extra environment variable names to allow through
                          under --env-mode filtered. Ignored under --env-mode inherit.
+  --web                  Accepted for call-site parity with codex-dispatch.mjs, but NOT wired
+                         to anything: "opencode run --help" has no web/search/fetch flag on
+                         this CLI (confirmed), and OpenCode is never given web access as a
+                         silent fallback through some other mechanism. result.json's
+                         webAccess is always false for this dispatcher regardless of this
+                         flag. A run that genuinely needs web verification for an OpenCode
+                         seat has no supported path today; that gap is not solved by this flag.
   --isolate              Run OpenCode against a disposable git worktree of --cd instead of
                          --cd itself, since OpenCode has no --sandbox read-only equivalent
                          (see model-capabilities.md). The worktree is created once under
@@ -176,6 +183,9 @@ Output:
     isolationNote string|null   Set when isolated is true: whether the worktree was reused or
                                  rebuilt, and any untracked nested-git-repo directories that were
                                  skipped rather than copied in. Always null when isolated is false.
+    webAccess     false         Always false: OpenCode's CLI has no web/search/fetch flag to
+                                 wire --web to. Present so this shares a schema with
+                                 codex-dispatch.mjs's result.json.
     status        "completed"|"error"|"timed-out"
     error         string        Present when status is "error" or "timed-out"; failure reason.
     usage         object        {input_tokens, cached_input_tokens, cache_write_input_tokens,
@@ -210,6 +220,7 @@ function parseArgs(argv) {
     isolate: false,
     envMode: 'filtered',
     envPassthrough: [],
+    web: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -257,6 +268,15 @@ function parseArgs(argv) {
         break;
       case '--isolate':
         args.isolate = true;
+        break;
+      case '--web':
+        // Accepted, not wired: OpenCode's CLI surface has no web/search/fetch flag
+        // at all (confirmed against "opencode run --help") -- this is never a
+        // silent fallback to some other web mechanism. Recorded as-requested so
+        // result.json's webAccess is always false for this dispatcher, matching
+        // codex-dispatch.mjs's schema so a manifest reader never needs to
+        // special-case which runtime a seat used.
+        args.web = true;
         break;
       default:
         throw new RelayError(`unrecognized argument: ${tok}`);
@@ -933,6 +953,7 @@ const RESULT_REQUIRED_KEYS = [
   'startedAt', 'finishedAt', 'durationMs', 'timeoutS',
   'usage',
   'envMode',
+  'webAccess',
 ];
 
 async function main() {
@@ -983,6 +1004,7 @@ async function main() {
         modelResolved: null, effortResolved: null,
         selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
         isolated, worktreePath, isolationNote,
+        webAccess: false,
         status: 'error',
         error: message,
         ...timingFields(),
@@ -1097,6 +1119,7 @@ async function main() {
     modelResolved: null, effortResolved: null,
     selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
     isolated, worktreePath, isolationNote,
+    webAccess: false,
     ...timingFields(opencodeResult.tokens),
   };
   if (touchedFiles === null && touchedFilesNote) {

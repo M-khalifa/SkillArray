@@ -1681,6 +1681,48 @@ test('translateFindings: a CRLF verifier file trims the structural leading/trail
   assert.equal(result.findings[0].verifications[0].evidence, 'first line\r\nsecond line');
 });
 
+test('relabelText: a genuine interior \\r\\n inside a fenced Evidence block on an otherwise-LF file is preserved byte-exact, not stripped -- parseFenceLines tracks each line\'s OWN terminator instead of guessing one file-level eol from the first line, since a mixed-EOL fence (e.g. pasted Windows tool output) is real content, not a signal to normalize', () => {
+  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nline-one\r\nline-two\n```\n';
+  const out = relabelText(text, 'A', 'P');
+  assert.ok(out.includes('line-one\r\nline-two'), 'interior \\r\\n inside the fence must survive relabel unchanged');
+  assert.match(out, /^# Peer findings\n/, 'the file-level LF structure outside the fence must stay LF, not get upgraded by the fence\'s own CRLF');
+});
+
+test('extractClaimBlocks: a genuine interior \\r\\n inside a fenced Evidence block on an otherwise-LF file is preserved byte-exact in the extracted evidence string', () => {
+  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nline-one\r\nline-two\n```\n';
+  const { blocks } = extractClaimBlocks(text);
+  assert.equal(blocks.get('A1').evidence, 'line-one\r\nline-two');
+});
+
+test('translateFindings: a genuine interior \\r\\n inside a verifier file\'s multi-line Evidence body, on an otherwise-LF verification file, is preserved byte-exact -- this is the mixed-EOL case an all-CRLF or all-LF fixture cannot distinguish from "normalized away"', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-verif-evidence-mixed-eol-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(dir, 'verification-X3.md'),
+    'Claim: X3\nVerdict: CONFIRMED\nBasis: STATIC_TRACE\nEvidence:\nfirst line\r\nsecond line\n'
+  );
+  const withMixedEol = JSON.stringify({
+    findings: [validFinding({ origins: ['X3'], peer_responses: [{ claim: 'X3', response: 'conceded' }], verifications: [{ claim: 'X3', verdict: 'CONFIRMED' }] })],
+  });
+  const result = await translateFindings(withMixedEol, { A: 'X', B: 'Y' }, null, dir);
+  assert.equal(result.findings[0].verifications[0].evidence, 'first line\r\nsecond line');
+});
+
+test('relabelText: a bare \\n inside a fenced Evidence block on an otherwise-CRLF file stays a bare \\n, never silently upgraded to \\r\\n by the surrounding file\'s own line ending', () => {
+  const text = '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\nEvidence strength: REPRODUCED\r\nEvidence:\r\n```\r\nline-one\nline-two\r\n```\r\n';
+  const out = relabelText(text, 'A', 'P');
+  assert.ok(out.includes('line-one\nline-two'), 'bare interior \\n inside the fence must survive unchanged');
+  assert.ok(!out.includes('line-one\r\nline-two'), 'the bare \\n must not be upgraded to \\r\\n just because the rest of the file is CRLF');
+  assert.match(out, /^# Peer findings\r\n/, 'the file-level CRLF structure outside the fence must stay CRLF');
+});
+
+test('relabelText: a fence closer with trailing whitespace (CommonMark-legal, e.g. an editor\'s trailing-whitespace-on-save) still closes the fence, not flagged as unterminated -- the close-fence regex\'s "\\\\s*$" must stay a real backslash-escaped whitespace class, never a literal "s*$" from an unescaped template-literal backslash', () => {
+  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nsome content\n```  \n';
+  const out = relabelText(text, 'A', 'P');
+  assert.match(out, /^# Peer findings\n/, 'relabel must succeed, not throw "unterminated fenced code block"');
+  assert.ok(out.includes('some content'), 'the fenced body must survive untouched');
+});
+
 test('translateFindings: refuses a verification file missing "Basis:" or "Evidence:", or with an unrecognized Basis value', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-verif-missing-basis-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -2051,6 +2093,14 @@ test('extractClaimBlocks: an ordinary non-claim-shaped prose heading ("## Checks
   assert.equal(malformedHeadings.length, 0);
 });
 
+test('extractClaimBlocks: a CRLF claim block preserves interior \\r\\n line breaks in its Evidence body verbatim, same as parseVerificationFile does for verifier files', () => {
+  const crlf =
+    '# Seat A findings\r\nSeverity: HIGH\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\n' +
+    'Evidence strength: REPRODUCED\r\nEvidence: first line\r\nsecond line\r\n\r\n## No findings\r\n';
+  const { blocks } = extractClaimBlocks(crlf);
+  assert.equal(blocks.get('A1').evidence, 'first line\r\nsecond line');
+});
+
 test('parseArgs: validate requires --phase1-dir and rejects every other flag', () => {
   assert.throws(() => parseArgs(['validate']), /validate requires --phase1-dir/);
   assert.throws(
@@ -2240,6 +2290,64 @@ test('CLI relabel: a wrong --from that matches nothing fails loudly and writes n
   assert.notEqual(result.status, 0, 'a --from that matches nothing must fail, not report success');
   assert.match(result.stderr, /no "A" claim IDs, seat header, or rebuttal heading/);
   await assert.rejects(fs.access(outPath), 'no output file should be written on this failure');
+});
+
+test('CLI relabel: a CRLF-terminated file relabels the seat header and rebuttal heading correctly, and stays CRLF -- \\r left on every line by splitting on bare \\n alone previously made every $-anchored regex here unreachable, silently leaving the real seat letter in peer-facing text', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blind-relabel-crlf-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const inPath = path.join(dir, 'A-findings.md');
+  const crlf =
+    '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\n' +
+    'Evidence strength: REPRODUCED\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
+  await fs.writeFile(inPath, crlf);
+  const outPath = path.join(dir, 'peer-view.md');
+
+  const result = spawnSync(
+    process.execPath,
+    [SCRIPT, 'relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P'],
+    { encoding: 'utf8' }
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const out = await fs.readFile(outPath, 'utf8');
+  assert.match(out, /^# Peer findings\r\n/, 'seat header must relabel even with a trailing \\r on the line');
+  assert.match(out, /## Rebuttals \(from P\) of B claims\r\n/, 'rebuttal heading must relabel even with a trailing \\r');
+  assert.ok(out.includes('\r\n'), 'CRLF input must stay CRLF, never silently downgraded to LF');
+  assert.ok(!/(?<!\r)\n/.test(out), 'no bare LF anywhere -- every newline must still be preceded by \\r');
+});
+
+test('CLI validate: a CRLF-terminated Phase 1 file is accepted exactly like its LF equivalent -- no false malformed-heading or missing-field problems from the trailing \\r alone', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blind-relabel-crlf-validate-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const crlfBody =
+    '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\n' +
+    'Evidence strength: REPRODUCED\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
+  await fs.writeFile(path.join(dir, 'A-findings.md'), crlfBody);
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\r\n\r\n## No findings\r\n');
+  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('CLI scan: relabeling a CRLF file to P and scanning the result finds zero real-seat-letter leaks -- this is the end-to-end symptom the CRLF regex bug actually produced on a real Windows run', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blind-relabel-crlf-scan-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const crlfBody =
+    '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\n' +
+    'Evidence strength: REPRODUCED\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
+  const inPath = path.join(dir, 'A-findings.md');
+  await fs.writeFile(inPath, crlfBody);
+  const peerViewPath = path.join(dir, 'peer-view.md');
+  const relabelResult = spawnSync(
+    process.execPath,
+    [SCRIPT, 'relabel', '--in', inPath, '--out', peerViewPath, '--from', 'A', '--to', 'P'],
+    { encoding: 'utf8' }
+  );
+  assert.equal(relabelResult.status, 0, relabelResult.stderr);
+  const scanResult = spawnSync(
+    process.execPath,
+    [SCRIPT, 'scan', '--in', peerViewPath, '--phase1-dir', dir, '--forbid-seats', 'A'],
+    { encoding: 'utf8' }
+  );
+  assert.equal(scanResult.status, 0, `expected zero real-seat-letter leaks, got: ${scanResult.stdout}${scanResult.stderr}`);
 });
 
 test('dogfood: relabeling the shipped A-findings.md fixture produces P-labeled prose with no A-claim IDs left, and the fenced Evidence blocks are byte-identical', async (t) => {

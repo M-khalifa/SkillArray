@@ -384,22 +384,37 @@ function parseArgs(argv) {
 const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 function parseFenceLines(text) {
+  // Every line-anchored regex in this file (seat headers, rebuttal headings, claim headings,
+  // field lines) ends in a bare `$`, which cannot match past a trailing `\r` left by splitting
+  // CRLF text on '\n' alone -- `.` does not consume `\r`, so `$` (true end-of-string, no `m`
+  // flag) is unreachable. Stripping `\r` here, once, fixes every caller at once instead of
+  // patching each regex. A single file-level eol guess is wrong for a mixed-terminator file
+  // (e.g. a CRLF tool's output pasted into an otherwise-LF fenced Evidence block) -- each line
+  // records its OWN terminator instead, so a caller reassembling text reproduces exactly what
+  // was there, never upgrading or downgrading a line's real ending.
+  const pieces = text.split('\n');
   let open = null; // { char, len } while inside a fence, else null
-  const lines = text.split('\n').map((line) => {
+  const lines = pieces.map((raw, i) => {
+    // The last piece has no following '\n', so a trailing \r there (if any) is real content,
+    // not half of a \r\n pair -- only a non-last piece's trailing \r is provably a line ending.
+    const isLast = i === pieces.length - 1;
+    const hasCR = !isLast && raw.endsWith('\r');
+    const line = hasCR ? raw.slice(0, -1) : raw;
+    const eol = isLast ? '' : hasCR ? '\r\n' : '\n';
     if (open === null) {
       const m = FENCE_OPEN_RE.exec(line);
       // A backtick-fenced opening line must not itself contain a backtick after the fence run
       // (CommonMark: an info string on a backtick fence can't contain a backtick).
       if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
         open = { char: m[1][0], len: m[1].length };
-        return { text: line, inFence: true };
+        return { text: line, inFence: true, eol };
       }
-      return { text: line, inFence: false };
+      return { text: line, inFence: false, eol };
     }
     const closeRe = new RegExp(`^ {0,3}(?:${open.char === '`' ? '`' : '~'}{${open.len},})\\s*$`);
     const wasOpen = open;
     if (closeRe.test(line)) open = null;
-    return { text: line, inFence: wasOpen !== null ? true : false };
+    return { text: line, inFence: wasOpen !== null ? true : false, eol };
   });
   return { lines, unterminated: open !== null };
 }
@@ -480,22 +495,24 @@ function relabelText(text, from, to) {
   // "`x`# Seat A findings" match, since the non-code span's own text is just "# Seat A findings"
   // -- a real Markdown renderer never treats that as a heading, since the preceding code span
   // still occupies the start of the line.
-  const relabeledLines = lines.map(({ text: line, inFence }) => {
+  const relabeledLines = lines.map(({ text: line, inFence, eol }) => {
     if (!inFence) {
-      if (seatHeader.test(line)) return newSeatHeader;
+      if (seatHeader.test(line)) return newSeatHeader + eol;
       const rebuttalMatch = rebuttalHeading.exec(line);
       if (rebuttalMatch) {
         const [, fromLetter, ofLetter] = rebuttalMatch;
         const newFrom = fromLetter === from ? to : fromLetter;
         const newOf = ofLetter === from ? to : ofLetter;
-        return `## Rebuttals (from ${newFrom}) of ${newOf} claims`;
+        return `## Rebuttals (from ${newFrom}) of ${newOf} claims` + eol;
       }
     }
-    return splitLineSpans(line, inFence)
-      .map((span) => (span.code ? span.text : span.text.replace(claimId, `${to}$1`)))
-      .join('');
+    return (
+      splitLineSpans(line, inFence)
+        .map((span) => (span.code ? span.text : span.text.replace(claimId, `${to}$1`)))
+        .join('') + eol
+    );
   });
-  return relabeledLines.join('\n');
+  return relabeledLines.join('');
 }
 
 const VENDOR_TOKENS = ['claude', 'anthropic', 'codex', 'openai', 'gpt-', 'opencode', 'fable', 'opus'];
@@ -809,14 +826,16 @@ function extractClaimBlocks(text) {
   let evidenceLines = null;
   const finishEvidence = () => {
     if (current === null || evidenceLines === null) return;
-    const isStructuralBlank = (l) => l === '' || l === '\r';
+    const isStructuralBlank = (l) => l.text === '';
     const trimmed = [...evidenceLines];
     while (trimmed.length > 0 && isStructuralBlank(trimmed[0])) trimmed.shift();
     while (trimmed.length > 0 && isStructuralBlank(trimmed[trimmed.length - 1])) trimmed.pop();
-    current.evidence = trimmed.join('\n').replace(/\r$/, '');
+    // Each line's own eol is the separator to the NEXT line, not a terminator on itself -- the
+    // last surviving line contributes no trailing eol, so the body has no trailing newline.
+    current.evidence = trimmed.map((l, i) => (i < trimmed.length - 1 ? l.text + l.eol : l.text)).join('');
     evidenceLines = null;
   };
-  lines.forEach(({ text: line, inFence }, idx) => {
+  lines.forEach(({ text: line, inFence, eol }, idx) => {
     const headingMatch = !inFence ? CLAIM_HEADING_RE.exec(line) : null;
     const isHeading = !inFence && /^##\s+/.test(line);
     if (isHeading) {
@@ -864,7 +883,7 @@ function extractClaimBlocks(text) {
         const isCloser = !isOpener && !nextInFence;
         if (isOpener || isCloser) return;
       }
-      evidenceLines.push(line);
+      evidenceLines.push({ text: line, eol });
       return;
     }
     if (inFence) return;
@@ -875,7 +894,7 @@ function extractClaimBlocks(text) {
     const esMatch = CLAIM_EVIDENCE_STRENGTH_LINE_RE.exec(line);
     if (esMatch && current.evidenceStrength === null) { current.evidenceStrength = esMatch[1]; return; }
     const evMatch = CLAIM_EVIDENCE_LINE_RE.exec(line);
-    if (evMatch && current.evidence === null) { evidenceLines = [evMatch[1]]; return; }
+    if (evMatch && current.evidence === null) { evidenceLines = [{ text: evMatch[1], eol }]; return; }
   });
   finishEvidence();
   return { blocks, malformedHeadings, duplicateIds, noFindingsMarker };
@@ -1065,9 +1084,9 @@ function parseVerificationFile(text, fileLabel) {
   let verdict = null;
   let basis = null;
   let evidenceLines = null;
-  for (const { text: line, inFence } of lines) {
+  for (const { text: line, inFence, eol } of lines) {
     if (evidenceLines !== null) {
-      evidenceLines.push(line);
+      evidenceLines.push({ text: line, eol });
       continue;
     }
     if (inFence) continue;
@@ -1091,7 +1110,7 @@ function parseVerificationFile(text, fileLabel) {
     }
     const evidenceMatch = VERIFICATION_EVIDENCE_LINE_RE.exec(line);
     if (evidenceMatch) {
-      evidenceLines = [evidenceMatch[1]];
+      evidenceLines = [{ text: evidenceMatch[1], eol }];
     }
   }
   if (claim === null) throw new RelayError(`${fileLabel}: missing a "Claim: <X|Y-id>" line`);
@@ -1104,20 +1123,17 @@ function parseVerificationFile(text, fileLabel) {
   // "Verbatim" means byte-identical content, not merely non-empty -- .trim() on the full joined
   // block would strip real leading indentation from the first content line (code, logs, YAML) and
   // any trailing whitespace a real evidence line legitimately ends with. Only the STRUCTURAL
-  // wrapper -- a blank first line from "Evidence:" alone on its own line, and blank trailing
-  // lines from the file's own trailing newline(s) -- is trimmed; interior blank lines and interior
-  // indentation are untouched. text.split('\n') on a CRLF file leaves a trailing '\r' glued to
-  // every line's own content (never stripped elsewhere in this function, and NOT a separate blank
-  // line the way a bare '' entry is), so a CRLF file's structural blank line is '\r' alone;
-  // additionally the single '\r' terminating the FINAL real content line (the file's own line
-  // ending, not interior content) is stripped from the joined string's trailing edge only --
-  // matching what the previous .trim()-based implementation did for a CRLF file, without
-  // touching any interior \r\n line break.
-  const isStructuralBlank = (line) => line === '' || line === '\r';
+  // wrapper -- a blank first line from "Evidence:" alone on its own line, and blank trailing lines
+  // from the file's own trailing newline(s) -- is trimmed; interior blank lines and indentation are
+  // untouched. Each line carries its OWN original terminator (parseFenceLines tracks per line, not
+  // per file, since a mixed-EOL fence -- e.g. pasted CRLF tool output inside an LF file -- is real
+  // and must round-trip byte-exact); rejoining per-line reproduces the original interior breaks
+  // verbatim instead of guessing one file-level line ending.
+  const isStructuralBlank = (line) => line.text === '';
   const trimmedLines = [...evidenceLines];
   while (trimmedLines.length > 0 && isStructuralBlank(trimmedLines[0])) trimmedLines.shift();
   while (trimmedLines.length > 0 && isStructuralBlank(trimmedLines[trimmedLines.length - 1])) trimmedLines.pop();
-  const evidence = trimmedLines.join('\n').replace(/\r$/, '');
+  const evidence = trimmedLines.map((l, i) => (i < trimmedLines.length - 1 ? l.text + l.eol : l.text)).join('');
   if (evidence.trim().length === 0) throw new RelayError(`${fileLabel}: has an "Evidence:" line but no non-empty evidence body`);
   return { claim, verdict, basis, evidence };
 }

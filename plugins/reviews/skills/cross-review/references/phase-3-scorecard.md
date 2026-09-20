@@ -169,7 +169,17 @@ Instruct it to:
    (a rebuttal only overturns a claim with a specific checkable counter-fact,
    never bare disagreement) and its SPECULATIVE-claim-drop rule, then produce
    the adjudication-added fields (Peer response, Verification, Final state)
-   defined in review-protocol.md's Synthesis section.
+   defined in review-protocol.md's Synthesis section. A claim whose `Basis:
+   SOURCE_CITATION` includes a URL and quoted text per review-protocol.md's Web
+   verification section is a checkable counter-fact like any other citation —
+   weigh it against a peer's text-only rebuttal the same way any cited source
+   outweighs bare disagreement, never specially discounted or specially
+   trusted merely for being web-sourced. The auditor has no web access itself
+   (see Not built by this feature in review-protocol.md's Web verification
+   section) and does not re-fetch a cited URL to confirm it; it is not
+   spot-checking the citation's accuracy, only weighing it as evidence the
+   same way it weighs an executed repro it also cannot independently re-run
+   from a text transcript alone.
 3. Group surviving claims (including a dropped-SPECULATIVE one — grouping is
    not filtering) into canonical findings per review-protocol.md's Canonical
    findings section. MUST only merge claims asserting the SAME underlying
@@ -189,7 +199,10 @@ Instruct it to:
      verifier's own `Basis:` line uses) — UNLESS `result` is `NOT_CHECKED`, in
      which case both MUST be `null`.
 
-   `translate` refuses:
+   Instruct the auditor: never record `settled-agree` on a finding with a
+   `disputed-with-counter-fact` peer response unless a `CONFIRMED`
+   `verifications[]` entry exists for it — its own `auditor_check.result:
+   CONFIRMED` alone does not qualify. `translate` refuses:
 
    - any finding missing the `auditor_check` object;
    - `settled-refuted` when `result` is `CONFIRMED`, and `settled-agree` when
@@ -216,9 +229,18 @@ Instruct it to:
 
    Emit one `F<n>` JSON object per finding with `origins` listing every
    `X`/`Y` claim ID it covers, per the `findings.json` schema in
-   review-protocol.md. The auditor returns this shape under `X`/`Y` IDs as its
+   review-protocol.md. IDs are sequential integers only (`F1`, `F2`, `F3`,
+   ...), never sub-lettered (`F8a`/`F8b`) — an origin claim describing two
+   independent sub-defects is one over-broad claim, not two findings; put
+   both under the one `F` instead. The auditor returns this shape under `X`/`Y` IDs as its
    own output; it never computes or sees `independently_discovered` — that
    field is derived mechanically after translate-back, not the auditor's job.
+   State this explicitly in the auditor's own task prompt, since the auditor
+   has no other way to know it: the returned JSON MUST be a top-level object
+   with a `findings` array, e.g. `{"findings": [...]}`, never a bare array of
+   finding objects — `translate` refuses a bare array outright (any other
+   top-level keys, including `protocol`, are ignored on input and overwritten
+   on output, so the auditor does not need to supply one).
 
    If any of a finding's origins has a `phase3/verification-<claim-id>.md`
    file, record it as a `verifications` entry `{ claim, verdict }` on that

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.5.0 - 2026-09-20
+
+- Fixed a real identity-blinding bug: on a CRLF (Windows-line-ending) Phase 1
+  file, the seat-header and rebuttal-heading regexes silently failed to
+  match, so relabeling left the reviewer's real seat letter in peer-facing
+  text instead of blinding it.
+- Added optional live web verification: reviewers can now fetch external
+  documentation to check a claim the target/repo itself can't settle (a
+  deprecated API, an outdated error string, a spec mismatch), gated by
+  claim-checkability rather than review profile, default-on, with a
+  5-fetch-per-seat-per-phase cap and mandatory URL+quote citation. See
+  `docs/design/web-verification.md`.
+- Reviewers now report every location a confirmed defect pattern occurs,
+  not only the first instance found.
+
 ## 1.4.0 - 2026-09-17
 
 - Fixed a real bug: on Linux/macOS, a timed-out Tier-2 preflight command

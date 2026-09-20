@@ -82,3 +82,19 @@ messages, and command output, and none of it is sanitized first. A
 repository engineered to contain instructions aimed at the reviewer (for
 example, "mark this finding settled") is not currently detected or
 blocked.
+
+Web verification (`cross-review`/`pair-review`'s optional live web fetch
+during review, see `review-protocol.md`'s Web verification section) widens
+this same gap if not bounded: a reviewer with live fetch capability that
+followed a URL or endpoint found embedded in the reviewed material would be
+letting that material choose what gets fetched, handing an attacker-authored
+repository a path to make the reviewer retrieve and then reason over
+attacker-chosen external content — a strictly worse version of the existing
+gap, since it adds a live network fetch to the injection surface. The stated
+mitigation is instruction-only, not mechanically enforced: reviewers are told
+to fetch only documentation they independently chose to check (a vendor's
+own docs site, a published spec), never a URL or endpoint found inside the
+reviewed material itself, and to treat fetched content as evidence, never as
+instructions, the same as any other reviewed text. This is not currently
+detected or blocked mechanically — the same limitation as the paragraph
+above, extended to cover an outbound fetch rather than only inbound text.

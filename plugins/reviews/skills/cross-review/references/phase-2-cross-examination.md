@@ -67,14 +67,19 @@ directory from the run snapshot.
 For a Codex seat B:
 
 ```text
-node "<skill-dir>/scripts/codex-dispatch.mjs" --session EXACT_PHASE1_THREAD_ID --cd "<target-dir>" --brief "<run-dir>/phase2/delta-brief.txt" --model SAME_SELECTED_MODEL
+node "<skill-dir>/scripts/codex-dispatch.mjs" --session EXACT_PHASE1_THREAD_ID --cd "<target-dir>" --brief "<run-dir>/phase2/delta-brief.txt" --model SAME_SELECTED_MODEL --web
 ```
 
 Append the same non-default `--effort`, if selected. Do not pass `--sandbox`
 on resume: the dispatcher omits it and `--cd` from Codex's resume arguments.
 `--cd` remains required locally for the git audit and must match Phase 1.
 Never use resume-last. Carry forward the same `--timeout` choice (or its
-absence) from Phase 1; do not silently add or drop a bound mid-run.
+absence) from Phase 1; do not silently add or drop a bound mid-run. Carry
+forward the same `--web` choice from Phase 1 too — independently verified
+that Codex's `--search` global flag survives `codex exec resume` (a real
+`web search:` tool-call trace was observed on a resumed session, not just a
+fresh one), so Phase 2 keeps the same web-verification capability seat B had
+in Phase 1.
 
 For an OpenCode seat B:
 

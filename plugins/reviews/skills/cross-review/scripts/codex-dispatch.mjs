@@ -68,6 +68,7 @@ Usage:
   node codex-dispatch.mjs --brief <path> --cd <path> [--session <threadId>]
                  [--sandbox <mode>] [--skip-git-repo-check] [--model <id>] [--effort <level>]
                  [--timeout <seconds>] [--env-mode filtered|inherit] [--env-passthrough NAME,NAME]
+                 [--web]
 
 Required:
   --brief <path>         Path to a text file containing the prompt/brief to send to Codex.
@@ -115,6 +116,15 @@ Optional:
   --env-passthrough <names>  Comma-separated extra environment variable names to allow through
                          under --env-mode filtered (e.g. a provider auth var this allowlist
                          doesn't already cover). Ignored under --env-mode inherit.
+  --web                  Enable Codex's native live web search (the Responses API's
+                         web_search tool) by passing --search to "codex". This flag is
+                         GLOBAL on the codex CLI and must precede the "exec" subcommand
+                         in argv (confirmed empirically: "codex exec --search" is
+                         rejected as an unrecognized argument, but "codex --search exec"
+                         works and was independently verified to produce real
+                         "web search:" tool-call traces and genuinely fetched page
+                         content, both on a fresh dispatch and on "exec resume"). Sets
+                         result.json's webAccess to true; false when omitted.
   -h, --help             Print this message and exit 0.
 
 Output:
@@ -144,6 +154,12 @@ Output:
                                  schema with opencode-dispatch.mjs's result.json.
     worktreePath   null         Always null, same reason as isolated.
     isolationNote  null         Always null, same reason as isolated.
+    webAccess      boolean      true when --web was passed (codex was launched with the
+                                 global --search flag ahead of "exec"), false otherwise.
+                                 Records that the flag was requested, not that a search
+                                 actually occurred during the run -- Phase 3's auditor
+                                 reads this to decide whether a seat could have verified
+                                 a URL-backed claim at all.
     status        "completed"|"error"|"timed-out"
     error         string        Present when status is "error" or "timed-out"; failure reason.
     usage         object        {input_tokens, cached_input_tokens, cache_write_input_tokens,
@@ -191,6 +207,7 @@ function parseArgs(argv) {
     timeout: null,
     envMode: 'filtered',
     envPassthrough: [],
+    web: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -235,6 +252,9 @@ function parseArgs(argv) {
         break;
       case '--skip-git-repo-check':
         args.skipGitRepoCheck = true;
+        break;
+      case '--web':
+        args.web = true;
         break;
       case '--isolate':
         throw new RelayError(
@@ -389,8 +409,16 @@ async function checkCdExists(cdPath) {
 // Spawns codex exec (fresh or resume), feeds the brief over stdin, parses the JSONL stream.
 // forceSkipGitCheck: set when --cd isn't a git repo, so codex still runs
 // without --skip-git-repo-check needing to be typed explicitly.
-function buildCodexArgs({ cd, session, sandbox, skipGitRepoCheck, forceSkipGitCheck, model, effort }) {
-  const args = ['exec'];
+//
+// --search is a GLOBAL codex flag, not an "exec" subcommand flag (confirmed:
+// "codex exec --search" is rejected as an unrecognized argument; "codex
+// --search exec ..." works). It must be the first element, ahead of "exec",
+// on both the fresh and resume argv shapes -- pushing it anywhere after
+// "exec" reproduces that rejection.
+function buildCodexArgs({ cd, session, sandbox, skipGitRepoCheck, forceSkipGitCheck, model, effort, web }) {
+  const args = [];
+  if (web) args.push('--search');
+  args.push('exec');
   if (session) {
     args.push('resume', session);
   } else {
@@ -570,6 +598,7 @@ const RESULT_REQUIRED_KEYS = [
   'startedAt', 'finishedAt', 'durationMs', 'timeoutS',
   'usage',
   'envMode',
+  'webAccess',
 ];
 
 async function main() {
@@ -613,6 +642,7 @@ async function main() {
         modelResolved: null, effortResolved: null,
         selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
         isolated: false, worktreePath: null, isolationNote: null,
+        webAccess: args.web,
         status: 'error',
         error: message,
         ...timingFields(),
@@ -663,6 +693,7 @@ async function main() {
       sandbox: args.sandbox,
       skipGitRepoCheck: args.skipGitRepoCheck,
       forceSkipGitCheck: !gitTracked, // --cd already known not to be a git repo
+      web: args.web,
       timeout: args.timeout,
       envMode: args.envMode,
       envPassthrough: args.envPassthrough,
@@ -701,6 +732,7 @@ async function main() {
     // Codex's read-only guarantee is its own --sandbox flag, not a worktree;
     // these stay constant so both dispatchers' result.json feed the same manifest fields.
     isolated: false, worktreePath: null, isolationNote: null,
+    webAccess: args.web,
     ...timingFields(codexResult.usage),
   };
   if (touchedFiles === null && touchedFilesNote) {

@@ -210,6 +210,13 @@ test('parseArgs: sandbox defaults to read-only when --sandbox is omitted', () =>
   assert.equal(args.sandbox, 'read-only');
 });
 
+test('parseArgs: --web defaults to false and is a boolean flag with no value', () => {
+  const withoutWeb = parseArgs(['--brief', 'b.txt', '--cd', '.']);
+  assert.equal(withoutWeb.web, false);
+  const withWeb = parseArgs(['--brief', 'b.txt', '--cd', '.', '--web']);
+  assert.equal(withWeb.web, true);
+});
+
 test('model and effort options parse and reject missing or unsafe values', () => {
   const common = ['--brief', 'b.txt', '--cd', '.'];
   const config = parseArgs([...common, '--model', 'gpt-test', '--effort', 'high']);
@@ -262,6 +269,20 @@ test('fresh and resumed argument vectors forward selections without resume sandb
   const defaults = buildCodexArgs({ cd: '.', sandbox: 'read-only' });
   assert.equal(defaults.includes('--model'), false);
   assert.equal(defaults.includes('-c'), false);
+});
+
+test('buildCodexArgs: --web prepends --search BEFORE "exec" (a global codex flag, rejected if placed after), on both fresh and resumed argv shapes', () => {
+  const fresh = buildCodexArgs({ cd: '/target', sandbox: 'read-only', web: true });
+  assert.deepEqual(fresh, ['--search', 'exec', '-C', '/target', '-s', 'read-only', '--json', '-']);
+  assert.equal(fresh[0], '--search', '--search must be argv[0], ahead of "exec"');
+  assert.equal(fresh.indexOf('--search') < fresh.indexOf('exec'), true);
+
+  const resumed = buildCodexArgs({ cd: '/target', sandbox: 'read-only', session: 'thread-123', web: true });
+  assert.deepEqual(resumed, ['--search', 'exec', 'resume', 'thread-123', '--json', '-']);
+  assert.equal(resumed.indexOf('--search') < resumed.indexOf('exec'), true);
+
+  const withoutWeb = buildCodexArgs({ cd: '/target', sandbox: 'read-only' });
+  assert.equal(withoutWeb.includes('--search'), false);
 });
 
 test('spawnCli: the POSIX branch passes detached:true and shell:false to spawn(), the load-bearing options for posixKillTree\'s process-group kill', () => {

@@ -27,7 +27,8 @@ Do not change authentication or provider configuration during setup.
 ## Start here: model setup
 
 Read [references/configuration.md](references/configuration.md) before dispatch.
-Run the bundled configuration helper's `show` and `catalog` commands. Without
+Run the bundled configuration helper's (`scripts/review-config.mjs`) `show` and
+`catalog` commands. Without
 saved choices, ask for each seat's provider, runtime, model, and optional effort.
 Show the catalog returned by the helper. Fable must be offered with the Claude
 choices. Codex choices must include `gpt-6-astra`, `gpt-5.6-sol`,

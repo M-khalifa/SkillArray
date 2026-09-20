@@ -22,7 +22,8 @@ findings. The orchestrator coordinates and verifies; it never fills either seat.
 ## Start here: model setup
 
 Read [references/configuration.md](references/configuration.md) before dispatch.
-Run the bundled configuration helper's `show` command. If no saved configuration
+Run the bundled configuration helper's (`scripts/review-config.mjs`) `show`
+command. If no saved configuration
 exists, ask the user to choose both models and optional effort levels before
 the first review. Do not silently install a default pair.
 
@@ -88,7 +89,15 @@ request; falsification never runs without it.
    this harness offers a per-agent timeout or budget control, apply a
    provisional 30-minute bound per seat (unless the user specifies otherwise)
    and treat an exceeded bound as an incomplete review for that seat, the
-   same as any other failed pass — never as a completed one.
+   same as any other failed pass — never as a completed one. Spawn both seats
+   as a general-purpose agent (`Tools: *`), not a restricted-toolset subagent
+   type — this is what gives each seat WebFetch/WebSearch for
+   review-protocol.md's Web verification rules; naming a more restricted spawn
+   type for either seat silently loses that capability with no error to catch
+   it. Include the Web verification rules from review-protocol.md verbatim in
+   both seats' briefs — pair-review is Claude-and-Claude, so this capability
+   is symmetric between seats by construction, unlike cross-review's
+   Codex/OpenCode asymmetry.
 5. Wait for both independent passes to complete, AND
    `scripts/blind-relabel.mjs validate --phase1-dir <run-dir>` exits zero. A
    nonzero `validate` exit means at least one claim block is missing a
@@ -158,7 +167,19 @@ request; falsification never runs without it.
       only run after this relabel, never before it.
    b. Relabel both seats' complete findings-plus-rebuttals to `X`/`Y` with
       `scripts/blind-relabel.mjs relabel`, per the protocol's Fresh-context
-      auditor. Then run `scripts/blind-relabel.mjs scan` on each fully
+      auditor. Each file carries both real letters (its own seat's claims
+      AND the peer's rebuttal-of-it) and needs TWO separate relabel calls,
+      one per letter, chaining the second call's input from the first's
+      output — a single pass leaves the untouched letter exposed:
+
+      ```text
+      node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase1/A-findings.md" --out "<run-dir>/phase3/tmp-A.md" --from A --to <label-A>
+      node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase3/tmp-A.md" --out "<run-dir>/phase3/<label-A>-findings.md" --from B --to <label-B>
+      node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase1/B-findings.md" --out "<run-dir>/phase3/tmp-B.md" --from B --to <label-B>
+      node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase3/tmp-B.md" --out "<run-dir>/phase3/<label-B>-findings.md" --from A --to <label-A>
+      ```
+
+      Then run `scripts/blind-relabel.mjs scan` on each fully
       double-relabeled file for vendor/model tokens AND `--phase1-dir
       <run-dir> --forbid-seats A,B` (both real seat letters — a
       double-relabeled file must contain NEITHER real letter anywhere,
@@ -235,9 +256,23 @@ request; falsification never runs without it.
         verdict alongside `settled-agree`, for any origin.
    f. The auditor groups surviving claims into canonical findings per the
       protocol's Canonical findings section — only merging claims describing
-      the SAME underlying defect; when in doubt, keep them separate — and
-      writes them as JSON per the `findings.json` schema, still under `X`/`Y`
-      IDs. Save that raw output as `findings.audit.json`.
+      the SAME underlying defect; when in doubt, keep them separate. IDs are
+      sequential integers only (`F1`, `F2`, `F3`, ...), never sub-lettered
+      (`F8a`/`F8b`) — an origin claim describing two independent sub-defects
+      is one over-broad claim, not two findings; put both under the one `F`
+      instead. The auditor
+      writes these as JSON per the `findings.json` schema, still under `X`/`Y`
+      IDs. State this explicitly in the auditor's own task prompt: the
+      returned JSON MUST be a top-level object with a `findings` array, e.g.
+      `{"findings": [...]}`, never a bare array of finding objects —
+      `translate` refuses a bare array outright (any other top-level keys,
+      including `protocol`, are ignored on input and overwritten on output,
+      so the auditor does not need to supply one). Save that raw output as
+      `findings.audit.json`.
+      Never record `settled-agree` on a finding with a
+      `disputed-with-counter-fact` peer response unless a `CONFIRMED`
+      `verifications[]` entry exists for it — its own `auditor_check.result:
+      CONFIRMED` alone does not qualify.
    g. Run `scripts/blind-relabel.mjs translate --in findings.audit.json --out
       findings.json --mapping <the flip mapping> --phase1-dir <phase1 dir>
       [--verification-dir <phase3 dir>]` (the verification flag only when
