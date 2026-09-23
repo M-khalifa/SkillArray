@@ -8,6 +8,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 
 class RelayError extends Error {}
 
@@ -18,17 +19,33 @@ function log(msg) {
 const USAGE = `blind-relabel.mjs — relabel, scan, and coin-flip for review-protocol.md's blind exchange.
 
 Usage:
-  node blind-relabel.mjs relabel --in <path> --out <path> --from <A|B> --to <P|X|Y>
+  node blind-relabel.mjs relabel --in <path> --out <path> --from <A|B|P> --to <P|X|Y> [--phase1-dir <path>]
   node blind-relabel.mjs scan --in <path> [--target-dir <path>] [--tokens t1,t2,...]
-    [--phase1-dir <path> --forbid-seats <A|B|A,B>]
+    [--phase1-dir <path> --forbid-seats <A|B|A,B>] [--phase2-dir <path>] [--target-urls <file>]
   node blind-relabel.mjs flip --out <path>
   node blind-relabel.mjs translate --in <path> --out <path> --mapping <path> [--phase1-dir <path>] [--verification-dir <path>]
   node blind-relabel.mjs validate --phase1-dir <path>
+  node blind-relabel.mjs append-rebuttals --in <raw rebuttals, P ids> --onto <peer's phase1 file>
+    --rebutter <A|B> --peer-view <phase2 peer-view the rebutter saw>
+  node blind-relabel.mjs audit-prep --phase1-dir <path> --mapping <flip json> --out-dir <path>
+    --target-dir <path> [--tokens t1,t2,...] [--phase2-dir <path>]
   node blind-relabel.mjs -h | --help
 
 relabel:
-  Rewrites heading and prose occurrences of "<from><N>" (e.g. A1, B12) to
-  "<to><N>", and any "# Seat <from> findings" header to "# Peer findings".
+  Rewrites heading and prose occurrences of the REAL "<from><N>" claim IDs
+  (e.g. A1, B12) to "<to><N>" (numbers are kept, so P<n> -> A<n> is the
+  identity on numbers), and any "# Seat <from> findings" header to
+  "# Peer findings". A real claim ID is one this file itself declares -- a
+  "## <from><n>" or "### <from><n>" heading or a "Claim: <from><n>" line
+  (raw line, fence-skipped) -- plus, with --phase1-dir (only for --from A|B),
+  every such ID in that seat's own <from>-findings.md there. A Phase 3 second
+  pass (--from <peer letter>) needs --phase1-dir, since the peer's IDs appear
+  in this file only as prose cross-references. Any other claim-ID-shaped token
+  (a product name like A100/B200, a cell reference, an A10 when no claim A10
+  exists) is left untouched. Residual: a token shaped like a claim ID that is
+  not a real claim (e.g. a hallucinated "A99") is therefore no longer
+  rewritten, and scan --forbid-seats (which checks only real heading IDs) does
+  not flag it either.
   Text inside fenced code blocks and inline code spans is left untouched, so
   claim IDs referenced there (a rare but real case) do not relabel; never put
   a claim ID inside an Evidence fence for this reason. Fences follow CommonMark:
@@ -119,6 +136,22 @@ scan:
   file seat B will read), both seats for a Phase 3 double-relabeled X/Y file
   (--forbid-seats A,B). --phase1-dir and --forbid-seats must be supplied
   together or not at all.
+  Vendor/--tokens matching is word-bounded ("affable" never hits "fable",
+  "octopus" never hits "opus"); a token glued to punctuation such as
+  codex-dispatch.mjs still counts as a mention. With --target-dir on a git
+  work tree, the exempt names come from "git ls-files --cached --others
+  --exclude-standard" (so a branch name under .git/ or an ignored install
+  tree never exempts a token); otherwise the directory walk skips .git/ and
+  node_modules/.
+  (With --phase2-dir) Hard stop, same exit as a claim-ID leak: any P<n> token,
+  fence content included, whose number is a claim ("## P<n>" heading) in that
+  run's peer-view-for-A.md / peer-view-for-B.md -- a stale Phase 2 label
+  points at the other letter's claim. Run it on every Phase 3 file.
+  (With --target-urls <file>, one URL per line) Every URL in the scanned text,
+  fences included, that matches a listed URL after normalization (lowercase
+  scheme/host, fragment dropped, trailing slash dropped) is reported as a
+  TRUST-BOUNDARY line on stderr. Non-blocking: it never changes the exit code;
+  the orchestrator resolves each one (was a target-embedded URL fetched?).
 
 flip:
   Writes --out (a JSON file) with a coin-flipped { "A": "X", "B": "Y" } or
@@ -126,11 +159,17 @@ flip:
   it to the auditor.
 
 translate:
-  Rewrites the fresh Phase 3 auditor's canonical-findings JSON (--in, X/Y IDs
-  throughout, including inside prose fields -- "evidence" is exempt, kept
-  verbatim, since it is captured output/citation, not prose to relabel) back
-  to real A/B claim IDs using --mapping (the flip mapping from the "flip"
-  subcommand above), and writes --out. Derives each finding's
+  Rewrites the fresh Phase 3 auditor's canonical-findings JSON (--in) back to
+  real A/B claim IDs using --mapping (the flip mapping from the "flip"
+  subcommand above), and writes --out. Only structured ID fields are
+  rewritten: id, origins[], peer_responses[].claim, verifications[].claim,
+  basis_from. Every other string is copied verbatim, never ID-rewritten --
+  the documented pass-through prose fields are summary, recommended_fix,
+  title, priority, and suggested_fix (plus evidence and auditor_check.evidence,
+  which are captured output). Refuses when any non-evidence prose string
+  contains one of this run's anonymous origin IDs (the X<n>/Y<n> origins in
+  --in, plus every Phase 1 claim's anonymous form with --phase1-dir) or any
+  P<n> token: such a label would ship unresolved. Derives each finding's
   "independently_discovered" field mechanically from whether its translated
   origins span both seat letters -- never trusts the auditor's own claim about
   this. Refuses (writes nothing) on: invalid JSON; a malformed or hand-edited
@@ -233,7 +272,13 @@ translate:
   the pair came from is explicit in the artifact, not just inferable from
   the rule. evidence becomes one verbatim entry per origin, in origins[]
   order, extracted from each origin's own Evidence fence (same
-  structural-blank-trim rule as a verification file's Evidence: body).
+  structural-blank-trim rule as a verification file's Evidence: body). The
+  body ends at the fence's closing line, or at the end of a group of fences
+  separated only by blank lines; fence delimiter lines are never content.
+  Unfenced evidence ends at the next heading, thematic break, or
+  "Suggested fix:" line. suggested_fix becomes one "<origin-id>: <text>" entry
+  per origin whose block has a "Suggested fix:" line (empty array if none);
+  that line never enters evidence.
   Without --phase1-dir, the auditor's own severity/basis/evidence_strength/
   evidence are trusted as before (no basis_from field is added in that case)
   -- this recomputation is opt-in via the same flag as the origin-coverage
@@ -281,6 +326,46 @@ validate:
   (bare ---/***/___, 3+ chars) between claims is recognized as a claim
   boundary the same way a heading is, so a real reviewer's own paragraph
   separator does not corrupt evidence capture.
+  Rebuttal entries inside a "## Rebuttals (from <S>) of <T> claims" section
+  MUST use "### <id>" headings (or none). A claim-shaped "##" heading inside
+  such a section (e.g. "## P71", or a "## A1" duplicating a real claim) is
+  reported against the REBUTTING seat <S>, which wrote it -- return that
+  section to <S>, not to the file's owner. The section runs to the next "##"
+  heading that is neither claim-shaped nor another rebuttal heading.
+
+append-rebuttals:
+  Persists one seat's Phase 2 rebuttals onto the peer's Phase 1 file. --in is
+  the rebutter's raw output using P ids; --onto must be the peer's
+  "<peer>-findings.md"; --peer-view is the phase2 peer-view the rebutter saw.
+  Normalizes "## P<n>" entry headings to "### P<n>", then refuses (listing
+  every problem, --onto left unchanged) unless every "## P<n>" claim in
+  --peer-view is covered by exactly one entry (a "##"/"###" P<n> heading or a
+  "Claim: P<n>" line) with an "Action: CONCEDE" or "Action: DISPUTE" line.
+  Also refuses: an entry for a P id not in --peer-view; a heading and Claim
+  line naming different ids; a P token inside a fence or inline code span
+  whose number is a peer-view claim (relabel never rewrites code, so it would
+  leak into Phase 3); a "## Rebuttals" line in --in; an --onto that already has this
+  section. Relabels P -> the peer letter (real-ID rule above, widened with the
+  peer-view's claims), appends a blank line, the exact
+  "## Rebuttals (from <rebutter>) of <peer> claims" heading, a blank line and
+  the entries, then runs validate's checks on --onto's directory with the new
+  content. Writes --onto atomically (temp file + rename) only when all pass.
+
+audit-prep:
+  The whole Phase 3 double relabel in one step. Reads the flip --mapping and
+  both seats' files under --phase1-dir (they must pass validate), relabels
+  each seat's own letter then the peer letter (a second pass with nothing to
+  rewrite, e.g. zero rebuttals, is fine here), and scans each result with
+  --target-dir/--tokens, --forbid-seats A,B, and (when given) --phase2-dir.
+  All work is in memory; nothing is written to --phase1-dir or next to the
+  mapping. Only when both scans are clean does it write exactly
+  "<label>-findings.md" for both seats into --out-dir. Refuses when --out-dir
+  already contains any file or equals --phase1-dir or the mapping file's
+  folder. On any scan hit it prints the hits, writes nothing, exits nonzero.
+  On success it also prints one JSON line
+  {"falsificationBreakdown":{"high_or_critical","disputed","conceded","unaddressed"}}:
+  HIGH/CRITICAL claims of both seats, split by the peer's rebuttal Action
+  (an entry without a CONCEDE/DISPUTE Action, or no entry, is unaddressed).
 `;
 
 function printUsageAndExit(code) {
@@ -299,7 +384,7 @@ function takeValue(argv, i, flag) {
 function parseArgs(argv) {
   if (argv.length === 0) throw new RelayError('missing subcommand');
   const [sub, ...rest] = argv;
-  if (!['relabel', 'scan', 'flip', 'translate', 'validate'].includes(sub)) {
+  if (!['relabel', 'scan', 'flip', 'translate', 'validate', 'append-rebuttals', 'audit-prep'].includes(sub)) {
     throw new RelayError(`unknown subcommand "${sub}"`);
   }
   const args = { sub };
@@ -315,7 +400,47 @@ function parseArgs(argv) {
     else if (a === '--phase1-dir') { args.phase1Dir = takeValue(rest, i, '--phase1-dir'); i++; }
     else if (a === '--verification-dir') { args.verificationDir = takeValue(rest, i, '--verification-dir'); i++; }
     else if (a === '--forbid-seats') { args.forbidSeats = takeValue(rest, i, '--forbid-seats'); i++; }
+    else if (a === '--phase2-dir') { args.phase2Dir = takeValue(rest, i, '--phase2-dir'); i++; }
+    else if (a === '--target-urls') { args.targetUrls = takeValue(rest, i, '--target-urls'); i++; }
+    else if (a === '--onto') { args.onto = takeValue(rest, i, '--onto'); i++; }
+    else if (a === '--rebutter') { args.rebutter = takeValue(rest, i, '--rebutter'); i++; }
+    else if (a === '--peer-view') { args.peerView = takeValue(rest, i, '--peer-view'); i++; }
+    else if (a === '--out-dir') { args.outDir = takeValue(rest, i, '--out-dir'); i++; }
     else throw new RelayError(`unknown argument "${a}"`);
+  }
+  const newFlagOwners = {
+    phase2Dir: ['--phase2-dir', ['scan', 'audit-prep']],
+    targetUrls: ['--target-urls', ['scan']],
+    onto: ['--onto', ['append-rebuttals']],
+    rebutter: ['--rebutter', ['append-rebuttals']],
+    peerView: ['--peer-view', ['append-rebuttals']],
+    outDir: ['--out-dir', ['audit-prep']],
+  };
+  for (const [key, [flag, owners]] of Object.entries(newFlagOwners)) {
+    if (args[key] !== undefined && !owners.includes(sub)) {
+      throw new RelayError(`${flag} is only accepted by ${owners.join(' and ')}`);
+    }
+  }
+  if (sub === 'append-rebuttals') {
+    for (const [key, flag] of [['in', '--in'], ['onto', '--onto'], ['rebutter', '--rebutter'], ['peerView', '--peer-view']]) {
+      if (!args[key]) throw new RelayError(`append-rebuttals requires ${flag}`);
+    }
+    if (args.rebutter !== 'A' && args.rebutter !== 'B') throw new RelayError('--rebutter must be A or B');
+    for (const key of ['out', 'from', 'to', 'targetDir', 'tokens', 'mapping', 'phase1Dir', 'verificationDir', 'forbidSeats']) {
+      if (args[key] !== undefined) throw new RelayError('append-rebuttals accepts only --in, --onto, --rebutter, --peer-view');
+    }
+    return args;
+  }
+  if (sub === 'audit-prep') {
+    for (const [key, flag] of [['phase1Dir', '--phase1-dir'], ['mapping', '--mapping'], ['outDir', '--out-dir'], ['targetDir', '--target-dir']]) {
+      if (!args[key]) throw new RelayError(`audit-prep requires ${flag}`);
+    }
+    for (const key of ['in', 'out', 'from', 'to', 'verificationDir', 'forbidSeats']) {
+      if (args[key] !== undefined) {
+        throw new RelayError('audit-prep accepts only --phase1-dir, --mapping, --out-dir, --target-dir, --tokens, --phase2-dir');
+      }
+    }
+    return args;
   }
   if (sub === 'relabel') {
     for (const req of ['in', 'out', 'from', 'to']) {
@@ -328,8 +453,8 @@ function parseArgs(argv) {
       throw new RelayError('--from and --to must differ; an identity relabel is never a real request and reports false success');
     }
     if (args.tokens !== undefined) throw new RelayError('--tokens is only accepted by scan');
-    if (args.mapping !== undefined || args.phase1Dir !== undefined || args.verificationDir !== undefined || args.forbidSeats !== undefined) {
-      throw new RelayError('--mapping and --verification-dir are only accepted by translate; --phase1-dir and --forbid-seats are only accepted by scan (with --phase1-dir) or translate (--phase1-dir only)');
+    if (args.mapping !== undefined || args.verificationDir !== undefined || args.forbidSeats !== undefined) {
+      throw new RelayError('--mapping and --verification-dir are only accepted by translate; --forbid-seats is only accepted by scan (with --phase1-dir)');
     }
   } else if (sub === 'scan') {
     if (!args.in) throw new RelayError('scan requires --in');
@@ -407,14 +532,14 @@ function parseFenceLines(text) {
       // (CommonMark: an info string on a backtick fence can't contain a backtick).
       if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
         open = { char: m[1][0], len: m[1].length };
-        return { text: line, inFence: true, eol };
+        return { text: line, inFence: true, eol, isOpen: true, isClose: false };
       }
-      return { text: line, inFence: false, eol };
+      return { text: line, inFence: false, eol, isOpen: false, isClose: false };
     }
     const closeRe = new RegExp(`^ {0,3}(?:${open.char === '`' ? '`' : '~'}{${open.len},})\\s*$`);
-    const wasOpen = open;
-    if (closeRe.test(line)) open = null;
-    return { text: line, inFence: wasOpen !== null ? true : false, eol };
+    const isClose = closeRe.test(line);
+    if (isClose) open = null;
+    return { text: line, inFence: true, eol, isOpen: false, isClose };
   });
   return { lines, unterminated: open !== null };
 }
@@ -479,12 +604,33 @@ function splitProseAndCode(text) {
   return parts;
 }
 
-function relabelText(text, from, to) {
+// The real claim IDs for one letter: "## L<n>" / "### L<n>" headings and "Claim: L<n>" lines,
+// raw line, fence-skipped. Only these are rewritten, so a product name like A100 survives.
+function realClaimIds(text, letter) {
+  const { lines } = parseFenceLines(text);
+  const re = new RegExp(`^(?:#{2,3}\\s+|Claim:\\s*)(${letter}\\d+)\\b`);
+  const ids = new Set();
+  for (const { text: line, inFence } of lines) {
+    if (inFence) continue;
+    const m = re.exec(line);
+    if (m) ids.add(m[1]);
+  }
+  return ids;
+}
+
+// Matches exactly the ids in the set as whole words; null when the set is empty.
+function buildClaimIdRe(ids) {
+  if (ids.size === 0) return null;
+  const alt = [...ids].map(escapeRegExp).join('|');
+  return new RegExp(`\\b(${alt})\\b`, 'g');
+}
+
+function relabelText(text, from, to, extraIds = []) {
   const { lines, unterminated } = parseFenceLines(text);
   if (unterminated) {
     throw new RelayError('unterminated fenced code block: cannot safely relabel past it, fix the file and re-run');
   }
-  const claimId = new RegExp(`\\b${from}(\\d+)\\b`, 'g');
+  const claimId = buildClaimIdRe(new Set([...realClaimIds(text, from), ...extraIds]));
   const seatHeader = new RegExp(`^# Seat ${from} findings.*$`);
   const newSeatHeader = to === 'P' ? '# Peer findings' : `# Seat ${to} findings`;
   const rebuttalHeading = /^## Rebuttals \(from ([A-Z])\) of ([A-Z]) claims$/;
@@ -508,7 +654,9 @@ function relabelText(text, from, to) {
     }
     return (
       splitLineSpans(line, inFence)
-        .map((span) => (span.code ? span.text : span.text.replace(claimId, `${to}$1`)))
+        .map((span) =>
+          span.code || claimId === null ? span.text : span.text.replace(claimId, (id) => `${to}${id.slice(1)}`)
+        )
         .join('') + eol
     );
   });
@@ -568,6 +716,50 @@ function parseTokensArg(raw) {
   return raw.split(',').map((t) => t.trim()).filter((t) => t.length > 0);
 }
 
+// Word-boundary matchers (buildExtraTokenAlt's shape) keyed by lowercased token, so "affable"
+// never hits "fable". No self-ID lookahead: "codex-dispatch.mjs" still counts as a mention.
+function buildTokenMatchers(extraTokens = []) {
+  const all = [...new Set([...VENDOR_TOKENS, ...extraTokens.map((t) => t.toLowerCase())])];
+  return all.map((t) => ({ token: t, re: new RegExp(buildExtraTokenAlt([t]), 'i') }));
+}
+
+function matchedTokens(text, matchers) {
+  return matchers.filter((m) => m.re.test(text)).map((m) => m.token);
+}
+
+const WALK_SKIP_DIRS = new Set(['.git', 'node_modules']);
+
+// Git targets: tracked + untracked-not-ignored names only, so a branch ref under .git/ or an
+// ignored install tree never exempts a token. Returns null when targetDir is not in a work tree.
+function gitListedNames(targetDir) {
+  const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: targetDir, encoding: 'utf8' });
+  if (probe.error || probe.status !== 0 || probe.stdout.trim() !== 'true') return null;
+  const r = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+    cwd: targetDir,
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  if (r.error || r.status !== 0) {
+    throw new RelayError(`--target-dir: git ls-files failed in ${targetDir}: ${r.error ? r.error.message : r.stderr.trim()}`);
+  }
+  return r.stdout.split('\0').filter((e) => e.length > 0);
+}
+
+async function walkNames(root, rel = '') {
+  const out = [];
+  const dirents = await fs.readdir(path.join(root, rel), { withFileTypes: true });
+  for (const d of dirents) {
+    const relPath = rel ? path.join(rel, d.name) : d.name;
+    if (d.isDirectory()) {
+      if (WALK_SKIP_DIRS.has(d.name)) continue;
+      out.push(relPath, ...(await walkNames(root, relPath)));
+    } else {
+      out.push(relPath);
+    }
+  }
+  return out;
+}
+
 // seatVocabulary is a SEPARATE exemption from the vendor-token Set: it is content-based (does
 // the target's own docs use "seat A"/"reviewer A" prose?), never name-based, since seat letters
 // are single characters and would false-positive constantly if checked against filenames the
@@ -576,15 +768,16 @@ function parseTokensArg(raw) {
 async function targetDerivedTokens(targetDir, extraTokens = []) {
   if (!targetDir) return { tokens: new Set(), seatVocabulary: false };
   const found = new Set();
-  const allTokens = [...VENDOR_TOKENS, ...extraTokens.map((t) => t.toLowerCase())];
+  const matchers = buildTokenMatchers(extraTokens);
   const check = (name) => {
-    const lower = name.toLowerCase();
-    for (const t of allTokens) if (lower.includes(t)) found.add(t);
+    for (const t of matchedTokens(name, matchers)) found.add(t);
   };
   let entries = [];
   try {
-    entries = await fs.readdir(targetDir, { recursive: true });
-  } catch {
+    entries = gitListedNames(targetDir) ?? (await walkNames(targetDir));
+  } catch (err) {
+    if (err instanceof RelayError) throw err;
+    log(`--target-dir: could not list ${targetDir} (${err.message}); no token is target-derived`);
     return { tokens: found, seatVocabulary: false };
   }
   for (const e of entries) check(e);
@@ -597,8 +790,8 @@ async function targetDerivedTokens(targetDir, extraTokens = []) {
       if (SEAT_VOCAB_MENTION_RE.test(content)) {
         seatVocabulary = true;
       }
-    } catch {
-      // unreadable entry; not an error for this best-effort check
+    } catch (err) {
+      log(`--target-dir: skipped unreadable ${docPath}: ${err.message}`);
     }
   }
   return { tokens: found, seatVocabulary };
@@ -635,6 +828,94 @@ async function scanForKnownClaimIdLeaks(text, phase1Dir, forbidSeats) {
   return hits;
 }
 
+const PEER_VIEW_FILES = ['peer-view-for-A.md', 'peer-view-for-B.md'];
+
+// The "## P<n>" claim IDs a Phase 2 peer-view carries, raw line, fence-skipped.
+function peerViewClaimIds(text) {
+  const { lines } = parseFenceLines(text);
+  const ids = new Set();
+  for (const { text: line, inFence } of lines) {
+    if (inFence) continue;
+    const m = /^##\s+(P\d+)\b/.exec(line);
+    if (m) ids.add(m[1]);
+  }
+  return ids;
+}
+
+async function readPhase2PeerIds(phase2Dir) {
+  const ids = new Set();
+  for (const name of PEER_VIEW_FILES) {
+    const filePath = path.join(phase2Dir, name);
+    let text;
+    try {
+      text = await fs.readFile(filePath, 'utf8');
+    } catch (err) {
+      throw new RelayError(`--phase2-dir: could not read ${filePath}: ${err.message}`);
+    }
+    for (const id of peerViewClaimIds(text)) ids.add(id);
+  }
+  return ids;
+}
+
+// A surviving Phase 2 label (e.g. "identified in P12") points at the other letter's claim 12,
+// so it is a leak even inside a fence. Only P numbers that were real peer-view claims count.
+function scanForPeerLabelLeaks(text, peerIds) {
+  const { lines, unterminated } = parseFenceLines(text);
+  if (unterminated) {
+    throw new RelayError('unterminated fenced code block: cannot safely scan past it, fix the file and re-run');
+  }
+  const hits = [];
+  lines.forEach(({ text: line }, i) => {
+    for (const tok of line.match(/\bP\d+\b/g) || []) {
+      if (peerIds.has(tok)) hits.push({ line: i + 1, text: line.trim(), id: tok });
+    }
+  });
+  return hits;
+}
+
+// Lowercase scheme/host (URL does this), drop the fragment and any trailing slash.
+function normalizeUrl(raw) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null; // not a URL; each caller decides whether that is worth reporting
+  }
+  u.hash = '';
+  return u.href.replace(/\/+$/, '');
+}
+
+const URL_IN_TEXT_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"'`]+/gi;
+
+async function readTargetUrls(filePath) {
+  let text;
+  try {
+    text = await fs.readFile(filePath, 'utf8');
+  } catch (err) {
+    throw new RelayError(`--target-urls: could not read ${filePath}: ${err.message}`);
+  }
+  const urls = new Set();
+  for (const raw of text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)) {
+    const n = normalizeUrl(raw);
+    if (n === null) log(`--target-urls: skipped unparseable entry "${raw}"`);
+    else urls.add(n);
+  }
+  return urls;
+}
+
+// Non-blocking: a cited URL that the target itself embeds is reported for the orchestrator
+// to resolve (was it fetched?), fence content included.
+function scanForTargetUrls(text, targetUrls) {
+  const hits = [];
+  text.split('\n').forEach((line, i) => {
+    for (const m of line.match(URL_IN_TEXT_RE) || []) {
+      const n = normalizeUrl(m.replace(/[.,;:!?)\]]+$/, ''));
+      if (n !== null && targetUrls.has(n)) hits.push({ line: i + 1, url: m });
+    }
+  });
+  return hits;
+}
+
 async function scanText(text, targetDir, extraTokens = []) {
   const derived = await targetDerivedTokens(targetDir, extraTokens);
   const { lines: fenceLines, unterminated } = parseFenceLines(text);
@@ -644,22 +925,21 @@ async function scanText(text, targetDir, extraTokens = []) {
   const lines = fenceLines.map(({ text: line, inFence }) =>
     inFence ? '' : splitLineSpans(line, inFence).filter((s) => !s.code).map((s) => s.text).join('')
   );
-  const allTokens = [...VENDOR_TOKENS, ...extraTokens.map((t) => t.toLowerCase())];
+  const matchers = buildTokenMatchers(extraTokens);
   const selfIdRe = buildSelfIdRe(extraTokens);
   const selfIdHits = [];
   const identityHits = [];
   const otherHits = [];
   lines.forEach((line, i) => {
-    const lower = line.toLowerCase();
-    const hasVendorToken = allTokens.some((t) => lower.includes(t));
+    const lineTokens = matchedTokens(line, matchers);
+    const hasVendorToken = lineTokens.length > 0;
     const hasSeatMention = SEAT_MENTION_RE.test(line);
     if (!hasVendorToken && !hasSeatMention) return;
     if (selfIdRe.test(line) || SEAT_SELF_ID_RE.test(line)) {
       selfIdHits.push({ line: i + 1, text: line.trim() });
       return;
     }
-    const matchedTokens = allTokens.filter((t) => lower.includes(t));
-    const vendorLeak = hasVendorToken && !matchedTokens.every((t) => derived.tokens.has(t));
+    const vendorLeak = hasVendorToken && !lineTokens.every((t) => derived.tokens.has(t));
     const seatLeak = hasSeatMention && !derived.seatVocabulary;
     if (vendorLeak || seatLeak) {
       identityHits.push({ line: i + 1, text: line.trim() });
@@ -693,26 +973,80 @@ function invertSeatMapping(mapping) {
 
 const AUDIT_ID_RE = /\b([XY])(\d+)\b/g;
 
-// Recursively rewrites every X<n>/Y<n> token in string values (keys and non-string
-// values untouched) using the inverted seat mapping -- prose fields included, since
-// a human reading findings.json should see A3, not X3. "evidence" is exempt: it is
-// verbatim captured output/citation, same rule as relabelText never touching fence
-// content -- a literal "X11" (X11 forwarding) or "Y2" in real output must survive
-// byte-identical, not be corrupted into a fake claim ID.
-function translateValue(value, auditToSeat, key) {
-  if (key === 'evidence') return value;
-  if (typeof value === 'string') {
-    return value.replace(AUDIT_ID_RE, (m, letter, digits) => `${auditToSeat[letter]}${digits}`);
+function translateId(value, auditToSeat) {
+  if (typeof value !== 'string') return value;
+  return value.replace(AUDIT_ID_RE, (m, letter, digits) => `${auditToSeat[letter]}${digits}`);
+}
+
+// Only structured ID fields are rewritten; every other string (summary, recommended_fix, title,
+// priority, suggested_fix, evidence, ...) is copied verbatim, so a literal X11 is never corrupted.
+function translateStructuredIds(parsed, auditToSeat) {
+  const out = structuredClone(parsed);
+  for (const f of out.findings) {
+    if (!f || typeof f !== 'object') continue;
+    f.id = translateId(f.id, auditToSeat);
+    if (Array.isArray(f.origins)) f.origins = f.origins.map((o) => translateId(o, auditToSeat));
+    if (f.basis_from !== undefined) f.basis_from = translateId(f.basis_from, auditToSeat);
+    for (const key of ['peer_responses', 'verifications']) {
+      if (!Array.isArray(f[key])) continue;
+      for (const entry of f[key]) {
+        if (entry && typeof entry === 'object') entry.claim = translateId(entry.claim, auditToSeat);
+      }
+    }
   }
-  if (Array.isArray(value)) {
-    return value.map((v) => translateValue(v, auditToSeat, key));
+  return out;
+}
+
+const STRUCTURED_ID_PATHS = [
+  /^findings\.\d+\.(?:id|basis_from)$/,
+  /^findings\.\d+\.origins\.\d+$/,
+  /^findings\.\d+\.(?:peer_responses|verifications)\.\d+\.claim$/,
+];
+const EVIDENCE_PATH_RE = /^findings\.\d+\.(?:evidence(?:\.\d+)?|auditor_check\.evidence|verifications\.\d+\.evidence)$/;
+const P_TOKEN_RE = /\bP\d+\b/;
+
+// Since prose is never rewritten, an anonymous claim ID of this run (or a stale Phase 2 P<n>)
+// left in prose would ship unresolved in findings.json -- refuse instead. Evidence is exempt.
+function assertNoAnonymousIdsInProse(parsed, anonIds) {
+  const walk = (value, keyPath) => {
+    if (typeof value === 'string') {
+      const joined = keyPath.join('.');
+      if (STRUCTURED_ID_PATHS.some((re) => re.test(joined)) || EVIDENCE_PATH_RE.test(joined)) return;
+      const anon = (value.match(AUDIT_ID_RE) || []).find((t) => anonIds.has(t));
+      const pTok = P_TOKEN_RE.exec(value);
+      const hit = anon ?? (pTok ? pTok[0] : null);
+      if (hit !== null) {
+        throw new RelayError(
+          `prose field "${joined}" contains "${hit}", ${anon ? "an anonymous claim ID of this run" : 'a Phase 2 peer label'} -- ` +
+            'prose fields are copied verbatim (never ID-rewritten), so this would publish an unresolved ' +
+            'label; cite claims only in origins/peer_responses/verifications and re-run the auditor output'
+        );
+      }
+      return;
+    }
+    if (Array.isArray(value)) value.forEach((v, i) => walk(v, [...keyPath, String(i)]));
+    else if (value && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value)) walk(v, [...keyPath, k]);
+    }
+  };
+  walk(parsed, []);
+}
+
+async function anonymousOriginIds(parsed, mapping, phase1Dir) {
+  const ids = new Set();
+  for (const f of parsed.findings) {
+    for (const o of (f && Array.isArray(f.origins) ? f.origins : [])) {
+      if (typeof o === 'string' && /^[XY]\d+$/.test(o)) ids.add(o);
+    }
   }
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = translateValue(v, auditToSeat, k);
-    return out;
+  if (phase1Dir) {
+    for (const seat of ['A', 'B']) {
+      for (const id of extractClaimHeadings(await readPhase1Seat(seat, phase1Dir))) {
+        ids.add(`${mapping[seat]}${id.slice(1)}`);
+      }
+    }
   }
-  return value;
+  return ids;
 }
 
 const REAL_CLAIM_ID_RE = /^[AB]\d+$/;
@@ -772,6 +1106,7 @@ const CLAIM_SEVERITY_LINE_RE = /^Severity:\s*(.+?)\s*$/;
 const CLAIM_BASIS_LINE_RE = /^Basis:\s*(.+?)\s*$/;
 const CLAIM_EVIDENCE_STRENGTH_LINE_RE = /^Evidence strength:\s*(.+?)\s*$/;
 const CLAIM_EVIDENCE_LINE_RE = /^Evidence:\s*(.*)$/;
+const SUGGESTED_FIX_LINE_RE = /^Suggested fix:\s*(.*?)\s*$/;
 // A CommonMark thematic break (bare ---/***/___, 3+ chars, optional spaces between them) used as
 // a claim separator, same as real Phase 1 output observed in practice: it terminates the current
 // block/evidence body the same way a "## " heading does, but starts no new block (there is no
@@ -803,9 +1138,9 @@ const NO_FINDINGS_MARKER_RE = /^##\s+No findings\s*$/;
 // runs from one "## A<n>"/"## B<n>" heading to the next heading of any kind (or EOF); only the
 // FIRST occurrence of each field line before the first "Evidence:" line is used, matching the
 // fixture's own shape (Severity/Basis/Evidence strength always precede Evidence). The evidence
-// body reuses parseVerificationFile's exact structural-blank-trim rule (leading blank line from
-// "Evidence:" alone, trailing blank line(s) from the block's own end) so a claim's Evidence fence
-// is captured the same verbatim way a falsification verifier's Evidence: block already is.
+// body ends at the close of its fence group (fences separated only by blank lines; delimiter lines
+// excluded) or, when unfenced, at a "Suggested fix:" line, heading, or thematic break; it then gets
+// parseVerificationFile's structural-blank-trim. The first "Suggested fix:" line becomes suggestedFix.
 // Also collects malformedHeadings (claim-like but not a real "## A<n>"/"## B<n>" heading -- the
 // exact live-run "## 1" shape) and duplicateIds (a real claim ID heading appearing more than
 // once -- silently overwriting the first block would let one claim erase another for mechanical
@@ -824,7 +1159,10 @@ function extractClaimBlocks(text) {
   let noFindingsMarker = false;
   let current = null;
   let evidenceLines = null;
+  // Non-null once an Evidence fence has closed: blank lines seen since, kept only if another fence follows.
+  let afterFence = null;
   const finishEvidence = () => {
+    afterFence = null;
     if (current === null || evidenceLines === null) return;
     const isStructuralBlank = (l) => l.text === '';
     const trimmed = [...evidenceLines];
@@ -835,7 +1173,7 @@ function extractClaimBlocks(text) {
     current.evidence = trimmed.map((l, i) => (i < trimmed.length - 1 ? l.text + l.eol : l.text)).join('');
     evidenceLines = null;
   };
-  lines.forEach(({ text: line, inFence, eol }, idx) => {
+  lines.forEach(({ text: line, inFence, eol, isOpen, isClose }, idx) => {
     const headingMatch = !inFence ? CLAIM_HEADING_RE.exec(line) : null;
     const isHeading = !inFence && /^##\s+/.test(line);
     if (isHeading) {
@@ -856,7 +1194,10 @@ function extractClaimBlocks(text) {
         current = null; // the duplicate's own body is not merged into or replacing the original
         return;
       }
-      current = { id: headingMatch[1], severity: null, basis: null, evidenceStrength: null, evidence: null };
+      current = {
+        id: headingMatch[1], line: idx + 1, severity: null, basis: null, evidenceStrength: null,
+        evidence: null, suggestedFix: null,
+      };
       blocks.set(current.id, current);
       return;
     }
@@ -870,23 +1211,29 @@ function extractClaimBlocks(text) {
       return;
     }
     if (current === null) return;
-    if (evidenceLines !== null) {
-      if (inFence) {
-        // A fence delimiter line (opener, matched by FENCE_OPEN_RE regardless of an info string
-        // like "```text"; or closer, the line whose OWN inFence is true but the NEXT line's is
-        // not, or end of file) is a structural marker, not evidence content -- only lines strictly
-        // BETWEEN the delimiters are the fenced body. A bare ``` mid-fence inside a ~~~-opened
-        // block stays content (parseFenceLines already keeps inFence true across it).
-        const prevInFence = idx > 0 ? lines[idx - 1].inFence : false;
-        const nextInFence = idx + 1 < lines.length ? lines[idx + 1].inFence : false;
-        const isOpener = !prevInFence && FENCE_OPEN_RE.test(line);
-        const isCloser = !isOpener && !nextInFence;
-        if (isOpener || isCloser) return;
+    // Evidence boundary rules: see the function doc above.
+    let evidenceEnded = false;
+    if (evidenceLines !== null && afterFence !== null) {
+      if (!inFence && line.trim() === '') { afterFence.push({ text: line, eol }); return; }
+      if (isOpen) { evidenceLines.push(...afterFence); afterFence = null; return; }
+      finishEvidence();
+      evidenceEnded = true;
+    }
+    if (evidenceLines !== null && !evidenceEnded) {
+      if (isOpen) return;
+      if (isClose) { afterFence = []; return; }
+      if (inFence || !SUGGESTED_FIX_LINE_RE.test(line)) {
+        evidenceLines.push({ text: line, eol });
+        return;
       }
-      evidenceLines.push({ text: line, eol });
-      return;
+      finishEvidence();
     }
     if (inFence) return;
+    const sfMatch = SUGGESTED_FIX_LINE_RE.exec(line);
+    if (sfMatch) {
+      if (current.suggestedFix === null && sfMatch[1].length > 0) current.suggestedFix = sfMatch[1];
+      return;
+    }
     const sevMatch = CLAIM_SEVERITY_LINE_RE.exec(line);
     if (sevMatch && current.severity === null) { current.severity = sevMatch[1]; return; }
     const basisMatch = CLAIM_BASIS_LINE_RE.exec(line);
@@ -1011,6 +1358,9 @@ async function deriveFromOrigins(finding, phase1Dir, blocksBySeat) {
   finding.evidence_strength = blocks[strongestIdx].evidenceStrength;
   finding.basis_from = finding.origins[strongestIdx];
   finding.evidence = blocks.map((b) => b.evidence);
+  finding.suggested_fix = finding.origins
+    .map((id, i) => (blocks[i].suggestedFix === null ? null : `${id}: ${blocks[i].suggestedFix}`))
+    .filter((s) => s !== null);
 }
 
 async function checkOriginsAgainstPhase1(origins, phase1Dir) {
@@ -1214,7 +1564,8 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir)
   if (!parsed || !Array.isArray(parsed.findings)) {
     throw new RelayError('--in must be a JSON object with a "findings" array');
   }
-  const translated = translateValue(parsed, auditToSeat);
+  assertNoAnonymousIdsInProse(parsed, await anonymousOriginIds(parsed, mapping, phase1Dir));
+  const translated = translateStructuredIds(parsed, auditToSeat);
   const seenFindingIds = new Set();
   const seenOrigins = new Set();
   const blocksBySeat = new Map();
@@ -1478,9 +1829,9 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir)
 // way relabelText does (raw-line header/rebuttal test, span-scoped claim-ID search), or the two
 // can disagree on a line like "`x`# Seat A findings" -- counted as a target here but correctly
 // left untouched there (or vice versa).
-function countRelabelTargets(text, from) {
+function countRelabelTargets(text, from, extraIds = []) {
   const { lines } = parseFenceLines(text);
-  const claimId = new RegExp(`\\b${from}(\\d+)\\b`, 'g');
+  const claimId = buildClaimIdRe(new Set([...realClaimIds(text, from), ...extraIds]));
   const seatHeader = new RegExp(`^# Seat ${from} findings.*$`);
   const rebuttalHeading = /^## Rebuttals \(from ([A-Z])\) of ([A-Z]) claims$/;
   let count = 0;
@@ -1493,6 +1844,7 @@ function countRelabelTargets(text, from) {
         continue;
       }
     }
+    if (claimId === null) continue;
     for (const span of splitLineSpans(line, inFence)) {
       if (span.code) continue;
       count += (span.text.match(claimId) || []).length;
@@ -1501,48 +1853,86 @@ function countRelabelTargets(text, from) {
   return count;
 }
 
+// --phase1-dir on relabel: the --from seat's real IDs from its own Phase 1 file, so a Phase 3
+// second pass also rewrites prose cross-references to the peer's claims.
+async function phase1ExtraIds(from, phase1Dir) {
+  if (!phase1Dir) return [];
+  if (from !== 'A' && from !== 'B') {
+    throw new RelayError('relabel --phase1-dir is only meaningful with --from A or --from B');
+  }
+  return [...realClaimIds(await readPhase1Seat(from, phase1Dir), from)];
+}
+
 async function runRelabel(args) {
   const text = await fs.readFile(args.in, 'utf8');
-  if (text.length > 0 && countRelabelTargets(text, args.from) === 0) {
+  const extraIds = await phase1ExtraIds(args.from, args.phase1Dir);
+  if (text.length > 0 && countRelabelTargets(text, args.from, extraIds) === 0) {
     throw new RelayError(
       `no "${args.from}" claim IDs, seat header, or rebuttal heading found in ${args.in}; ` +
         `wrong --from? (a legitimate zero case is a Phase 3 second pass on a file whose peer had ` +
         `zero findings — verify --in/--from before assuming this is that case)`
     );
   }
-  const out = relabelText(text, args.from, args.to);
+  const out = relabelText(text, args.from, args.to, extraIds);
   await fs.mkdir(path.dirname(args.out), { recursive: true });
   await fs.writeFile(args.out, out);
   process.stdout.write(`relabeled ${args.from} -> ${args.to}, wrote ${args.out}\n`);
 }
 
+// Library half of scan: every hit class for one text, no printing, no exit.
+async function collectScanHits(text, opts) {
+  const { selfIdHits, identityHits, otherHits } = await scanText(text, opts.targetDir, opts.tokens ?? []);
+  const claimIdHits = opts.forbidSeats
+    ? await scanForKnownClaimIdLeaks(text, opts.phase1Dir, opts.forbidSeats)
+    : [];
+  const peerLabelHits = opts.peerIds ? scanForPeerLabelLeaks(text, opts.peerIds) : [];
+  const trustHits = opts.targetUrls ? scanForTargetUrls(text, opts.targetUrls) : [];
+  const blocking = selfIdHits.length + identityHits.length + claimIdHits.length + peerLabelHits.length;
+  return { selfIdHits, identityHits, otherHits, claimIdHits, peerLabelHits, trustHits, blocking };
+}
+
+function logScanHits(hits, label = '') {
+  const pre = label ? `${label}: ` : '';
+  for (const h of hits.otherHits) {
+    log(`${pre}report line ${h.line}${h.targetDerived ? ' (target-derived)' : ''}: ${h.text}`);
+  }
+  for (const h of hits.trustHits) {
+    log(`${pre}TRUST-BOUNDARY line ${h.line}: ${h.url} is a URL embedded in the target; confirm it was not fetched`);
+  }
+  for (const h of hits.identityHits) log(`${pre}IDENTITY line ${h.line}: ${h.text}`);
+  for (const h of hits.claimIdHits) {
+    log(`${pre}CLAIM-ID LEAK line ${h.line} (real "${h.id}" survives relabel): ${h.text}`);
+  }
+  for (const h of hits.peerLabelHits) {
+    log(`${pre}PEER-LABEL LEAK line ${h.line} (Phase 2 "${h.id}" survives into this file): ${h.text}`);
+  }
+  for (const h of hits.selfIdHits) log(`${pre}SELF-IDENTIFICATION line ${h.line}: ${h.text}`);
+}
+
 async function runScan(args) {
   const text = await fs.readFile(args.in, 'utf8');
-  const { selfIdHits, identityHits, otherHits } = await scanText(text, args.targetDir, parseTokensArg(args.tokens));
-  const claimIdHits = args.forbidSeats
-    ? await scanForKnownClaimIdLeaks(text, args.phase1Dir, args.forbidSeats.split(','))
-    : [];
-  for (const h of otherHits) {
-    log(`report line ${h.line}${h.targetDerived ? ' (target-derived)' : ''}: ${h.text}`);
-  }
-  for (const h of identityHits) {
-    log(`IDENTITY line ${h.line}: ${h.text}`);
-  }
-  for (const h of claimIdHits) {
-    log(`CLAIM-ID LEAK line ${h.line} (real "${h.id}" survives relabel): ${h.text}`);
-  }
-  for (const h of selfIdHits) {
-    log(`SELF-IDENTIFICATION line ${h.line}: ${h.text}`);
-  }
-  if (selfIdHits.length > 0 || identityHits.length > 0 || claimIdHits.length > 0) {
+  const hits = await collectScanHits(text, {
+    targetDir: args.targetDir,
+    tokens: parseTokensArg(args.tokens),
+    phase1Dir: args.phase1Dir,
+    forbidSeats: args.forbidSeats ? args.forbidSeats.split(',') : null,
+    peerIds: args.phase2Dir ? await readPhase2PeerIds(args.phase2Dir) : null,
+    targetUrls: args.targetUrls ? await readTargetUrls(args.targetUrls) : null,
+  });
+  logScanHits(hits);
+  if (hits.blocking > 0) {
     log(
-      `${selfIdHits.length} self-identification match(es), ${identityHits.length} other ` +
-        `non-target-derived identity match(es), ${claimIdHits.length} real claim-ID leak(es); ` +
+      `${hits.selfIdHits.length} self-identification match(es), ${hits.identityHits.length} other ` +
+        `non-target-derived identity match(es), ${hits.claimIdHits.length} real claim-ID leak(es), ` +
+        `${hits.peerLabelHits.length} Phase 2 peer-label leak(es); ` +
         'return this file for redaction, do not forward'
     );
     process.exit(1);
   }
-  process.stdout.write(`scan clean: 0 identity matches, ${otherHits.length} target-derived reported\n`);
+  process.stdout.write(
+    `scan clean: 0 identity matches, ${hits.otherHits.length} target-derived reported, ` +
+      `${hits.trustHits.length} trust-boundary URL(s) reported\n`
+  );
 }
 
 async function runFlip(args) {
@@ -1584,11 +1974,51 @@ async function runTranslate(args) {
 const REBUTTAL_HEADING_EXACT_RE = /^## Rebuttals \(from ([AB])\) of ([AB]) claims$/;
 const REBUTTAL_HEADING_LIKE_RE = /^##\s+Rebuttals\b/;
 
-async function runValidate(args) {
+// Rebuttal sections by line range: from a "## Rebuttals..." heading to the next "## " heading
+// that is neither claim-shaped nor another rebuttal heading (or EOF). rebutter is null if malformed.
+function rebuttalSections(fenceLines) {
+  const sections = [];
+  let open = null;
+  fenceLines.forEach(({ text: line, inFence }, i) => {
+    if (inFence || !/^##\s+/.test(line)) return;
+    if (REBUTTAL_HEADING_LIKE_RE.test(line.trim())) {
+      if (open) sections.push(open);
+      const ex = REBUTTAL_HEADING_EXACT_RE.exec(line);
+      open = { start: i + 1, end: Infinity, rebutter: ex ? ex[1] : null, of: ex ? ex[2] : null, heading: line.trim() };
+      return;
+    }
+    if (open && !CLAIM_LIKE_HEADING_RE.test(line)) {
+      open.end = i;
+      sections.push(open);
+      open = null;
+    }
+  });
+  if (open) sections.push(open);
+  return sections;
+}
+
+// Every validate problem for both seats' texts; each problem names the seat to return it to.
+function validateProblems(textsBySeat) {
   const problems = [];
   for (const seat of ['A', 'B']) {
-    const text = await readPhase1Seat(seat, args.phase1Dir);
+    const text = textsBySeat[seat];
     const { blocks, malformedHeadings, duplicateIds, noFindingsMarker } = extractClaimBlocks(text);
+    const { lines: fenceLines } = parseFenceLines(text);
+    const sections = rebuttalSections(fenceLines);
+    const add = (problemText) => problems.push({ text: problemText, returnTo: seat });
+    const sectionAt = (line) => sections.find((s) => line >= s.start && line <= s.end) ?? null;
+    // A claim-shaped "##" heading inside a rebuttal section was written by the rebutting seat.
+    const rebuttalEntryProblem = (line, text) => {
+      const s = sectionAt(line);
+      if (s === null) return null;
+      const who = s.rebutter ? `seat ${s.rebutter} (the rebutting seat that wrote it)` : 'the rebutting seat that wrote it';
+      return {
+        text:
+          `${seat}-findings.md:${line}: heading "${text}" sits inside "${s.heading}" -- rebuttal ` +
+          `entries must use "### <id>" headings, not "##"; return this section to ${who}, not to seat ${seat}`,
+        returnTo: s.rebutter ?? 'rebutter',
+      };
+    };
     // relabel's second (peer-letter) pass legitimately exits nonzero with "no <letter> claim IDs,
     // seat header, or rebuttal heading found" when a seat had zero rebuttals to append -- that
     // exit code is documented as expected, not a failure, so a malformed rebuttal heading must be
@@ -1598,7 +2028,6 @@ async function runValidate(args) {
     // check (never trimmed, never applied inside a fence) -- a looser test here (trim, or ignore
     // fences) could accept a heading relabel itself would not recognize (e.g. trailing
     // whitespace), or flag one quoted verbatim inside an Evidence fence as if it were real.
-    const { lines: fenceLines } = parseFenceLines(text);
     fenceLines.forEach(({ text: line, inFence }, i) => {
       if (inFence) return;
       const likeMatch = REBUTTAL_HEADING_LIKE_RE.test(line.trim());
@@ -1606,14 +2035,14 @@ async function runValidate(args) {
       const exactMatch = REBUTTAL_HEADING_EXACT_RE.exec(line);
       if (exactMatch && exactMatch[1] !== exactMatch[2]) return;
       if (exactMatch) {
-        problems.push(
+        add(
           `${seat}-findings.md:${i + 1}: heading "${line.trim()}" names a seat rebutting its own ` +
             'claims ("from X) of X") -- a rebuttal always addresses the PEER\'s claims, never ' +
             'the same seat\'s own'
         );
         return;
       }
-      problems.push(
+      add(
         `${seat}-findings.md:${i + 1}: heading "${line.trim()}" looks like a rebuttal-section ` +
           'heading but does not match the required "## Rebuttals (from <letter>) of <letter> ' +
           'claims" form -- relabel\'s "no rebuttal heading found" exit is expected for a seat ' +
@@ -1622,20 +2051,24 @@ async function runValidate(args) {
       );
     });
     for (const [id, block] of blocks) {
+      const inRebuttal = rebuttalEntryProblem(block.line, `## ${id}`);
+      if (inRebuttal) { problems.push(inRebuttal); continue; }
       // Wrong-seat heading: a real "## B<n>" heading inside A-findings.md (CLAIM_HEADING_RE
       // matches [AB]\d+ regardless of which file it's in, since the regex has no seat context --
       // this is the one malformation class only the caller, which DOES know which file it's
       // reading, can catch).
       if (id[0] !== seat) {
-        problems.push(`${seat}-findings.md: claim "${id}" uses seat "${id[0]}"'s letter, not this file's own seat "${seat}"`);
+        add(`${seat}-findings.md: claim "${id}" uses seat "${id[0]}"'s letter, not this file's own seat "${seat}"`);
         continue;
       }
       for (const p of claimBlockProblems(block)) {
-        problems.push(`${seat}-findings.md: claim "${id}" has ${p}`);
+        add(`${seat}-findings.md: claim "${id}" has ${p}`);
       }
     }
     for (const m of malformedHeadings) {
-      problems.push(
+      const inRebuttal = rebuttalEntryProblem(m.line, m.text);
+      if (inRebuttal) { problems.push(inRebuttal); continue; }
+      add(
         `${seat}-findings.md:${m.line}: heading "${m.text}" looks like an attempted claim ID ` +
           `("${m.attempted}") but does not match the required "## ${seat}<n>" form -- a model ` +
           'ignoring the claim-ID schema (e.g. a bare "## 1") must not be mistaken for a genuine ' +
@@ -1643,7 +2076,9 @@ async function runValidate(args) {
       );
     }
     for (const d of duplicateIds) {
-      problems.push(
+      const inRebuttal = rebuttalEntryProblem(d.line, d.text);
+      if (inRebuttal) { problems.push(inRebuttal); continue; }
+      add(
         `${seat}-findings.md:${d.line}: claim "${d.id}" heading appears more than once -- a ` +
           'duplicate real claim ID would silently collapse two different claims into one for ' +
           'mechanical derivation'
@@ -1654,20 +2089,251 @@ async function runValidate(args) {
     // model genuinely found nothing" are mechanically indistinguishable, the exact ambiguity a
     // live run's false-clean validate result exposed.
     if (blocks.size === 0 && malformedHeadings.length === 0 && !noFindingsMarker) {
-      problems.push(
+      add(
         `${seat}-findings.md: has zero recognized claim headings and no "## No findings" marker ` +
           '-- an empty or unparseable result is never treated as a legitimate zero-findings ' +
           'verdict; the seat must state it explicitly'
       );
     }
   }
+  return problems;
+}
+
+function logValidateProblems(problems) {
+  for (const p of problems) log(p.text);
+  const seats = [...new Set(problems.map((p) => p.returnTo))].map((s) => (s === 'rebutter' ? 'the rebutting seat' : `seat ${s}`));
+  log(`${problems.length} claim block problem(s); return the affected seat's file to its own ` +
+    `context for reformatting -- return to: ${seats.join(', ')} (a problem inside a rebuttal ` +
+    'section goes to the rebutting seat named on its line) -- same procedure as a scan ' +
+    'redaction round, never a hand edit');
+}
+
+async function runValidate(args) {
+  const texts = {};
+  for (const seat of ['A', 'B']) texts[seat] = await readPhase1Seat(seat, args.phase1Dir);
+  const problems = validateProblems(texts);
   if (problems.length > 0) {
-    for (const p of problems) log(p);
-    log(`${problems.length} claim block problem(s); return the affected seat's file to its own ` +
-      'context for reformatting (same procedure as a scan redaction round, never a hand edit)');
+    logValidateProblems(problems);
     process.exit(1);
   }
   process.stdout.write('validate clean: every claim block in both seats has a recognized Severity/Basis/Evidence strength/Evidence, and every rebuttal-section heading matches the required form\n');
+}
+
+// Rebuttal entries for one letter within [start, end] (1-based lines): an entry opens at a
+// "##"/"###" <L><n> heading, or at a "Claim:" line when the open entry already has one.
+function parseRebuttalEntries(fenceLines, letter, start = 1, end = Infinity) {
+  const headRe = new RegExp(`^#{2,3}\\s+(${letter}\\d+)\\b`);
+  const claimRe = new RegExp(`^Claim:\\s*(${letter}\\d+)\\b`);
+  const actionRe = /^Action:\s*([A-Za-z_-]+)/;
+  const entries = [];
+  let cur = null;
+  fenceLines.forEach(({ text: line, inFence }, i) => {
+    const lineNo = i + 1;
+    if (lineNo < start || lineNo > end || inFence) return;
+    const h = headRe.exec(line);
+    if (h) {
+      cur = { headingId: h[1], claim: null, action: null, line: lineNo };
+      entries.push(cur);
+      return;
+    }
+    const c = claimRe.exec(line);
+    if (c) {
+      if (cur === null || cur.claim !== null) {
+        cur = { headingId: null, claim: null, action: null, line: lineNo };
+        entries.push(cur);
+      }
+      cur.claim = c[1];
+      return;
+    }
+    const a = actionRe.exec(line);
+    if (a && cur !== null && cur.action === null) cur.action = a[1];
+  });
+  for (const e of entries) e.id = e.claim ?? e.headingId;
+  return entries;
+}
+
+const REBUTTAL_ACTIONS = new Set(['CONCEDE', 'DISPUTE']);
+
+// Writes via a same-directory temp file + rename, so a failure never leaves a half-written target.
+async function writeFileAtomic(filePath, content) {
+  const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  await fs.writeFile(tmp, content);
+  try {
+    await fs.rename(tmp, filePath);
+  } catch (err) {
+    await fs.rm(tmp, { force: true });
+    throw err;
+  }
+}
+
+async function readRequired(filePath, flag) {
+  try {
+    return await fs.readFile(filePath, 'utf8');
+  } catch (err) {
+    throw new RelayError(`${flag}: could not read ${filePath}: ${err.message}`);
+  }
+}
+
+async function runAppendRebuttals(args) {
+  const rebutter = args.rebutter;
+  const peer = rebutter === 'A' ? 'B' : 'A';
+  if (path.basename(args.onto) !== `${peer}-findings.md`) {
+    throw new RelayError(`--onto must be the peer's Phase 1 file "${peer}-findings.md" (rebutter ${rebutter} rebuts ${peer}'s claims), got ${args.onto}`);
+  }
+  const [raw, peerViewText, onto] = await Promise.all([
+    readRequired(args.in, '--in'),
+    readRequired(args.peerView, '--peer-view'),
+    readRequired(args.onto, '--onto'),
+  ]);
+  const peerIds = peerViewClaimIds(peerViewText);
+  if (peerIds.size === 0) {
+    throw new RelayError(`--peer-view ${args.peerView} has no "## P<n>" claims; there is nothing to rebut or append`);
+  }
+  const { lines: rawLines, unterminated } = parseFenceLines(raw);
+  if (unterminated) throw new RelayError('--in: unterminated fenced code block, fix the file and re-run');
+  const problems = [];
+  // relabel never rewrites fences or inline code, so a peer-view P id there would leak into Phase 3.
+  const checkCode = (codeText, lineNo, where) => {
+    for (const tok of codeText.match(/\bP\d+\b/g) || []) {
+      if (peerIds.has(tok)) {
+        problems.push(`--in:${lineNo}: "${tok}" inside ${where} names a peer-view claim; relabel never rewrites it, so it would leak into Phase 3 -- move the reference out of the code`);
+      }
+    }
+  };
+  const normalized = rawLines
+    .map(({ text: line, inFence, eol }, i) => {
+      if (inFence) {
+        checkCode(line, i + 1, 'a fence');
+        return line + eol;
+      }
+      for (const span of splitLineSpans(line, false)) if (span.code) checkCode(span.text, i + 1, 'inline code');
+      if (REBUTTAL_HEADING_LIKE_RE.test(line.trim())) {
+        problems.push(`--in:${i + 1}: "${line.trim()}" -- the raw file must hold only the entries; append-rebuttals writes the section heading itself`);
+      }
+      return (/^##\s+P\d+\b/.test(line) ? `#${line}` : line) + eol;
+    })
+    .join('');
+  const entries = parseRebuttalEntries(parseFenceLines(normalized).lines, 'P');
+  const seen = new Map();
+  for (const e of entries) {
+    if (e.headingId !== null && e.claim !== null && e.headingId !== e.claim) {
+      problems.push(`--in:${e.line}: entry heading "${e.headingId}" has a "Claim: ${e.claim}" line naming a different claim`);
+    }
+    if (!REBUTTAL_ACTIONS.has(e.action)) {
+      problems.push(`--in:${e.line}: entry "${e.id}" has no "Action: CONCEDE" or "Action: DISPUTE" line`);
+    }
+    if (!peerIds.has(e.id)) problems.push(`--in:${e.line}: entry "${e.id}" is not a claim in --peer-view`);
+    seen.set(e.id, (seen.get(e.id) ?? 0) + 1);
+  }
+  for (const [id, n] of seen) if (n > 1) problems.push(`--in: claim "${id}" has ${n} entries; exactly one is required`);
+  const gaps = [...peerIds].filter((id) => !seen.has(id));
+  if (gaps.length > 0) problems.push(`--in: no rebuttal entry for peer-view claim(s) [${gaps.join(', ')}]`);
+  const heading = `## Rebuttals (from ${rebutter}) of ${peer} claims`;
+  if (parseFenceLines(onto).lines.some((l) => !l.inFence && l.text === heading)) {
+    problems.push(`--onto already contains "${heading}"; refusing to append a second section`);
+  }
+  if (problems.length > 0) {
+    for (const p of problems) log(p);
+    throw new RelayError(`${problems.length} rebuttal problem(s); --onto left unchanged -- return --in to seat ${rebutter} to fix`);
+  }
+  const body = relabelText(normalized, 'P', peer, [...peerIds]).replace(/^(?:[ \t]*\r?\n)+/, '');
+  const base = onto.length === 0 || onto.endsWith('\n') ? onto : `${onto}\n`;
+  const newOnto = `${base}\n${heading}\n\n${body.endsWith('\n') ? body : `${body}\n`}`;
+  const sibling = path.join(path.dirname(args.onto), `${rebutter}-findings.md`);
+  const texts = { [peer]: newOnto, [rebutter]: await readRequired(sibling, '--onto sibling') };
+  const validation = validateProblems(texts);
+  if (validation.length > 0) {
+    logValidateProblems(validation);
+    throw new RelayError('validate failed on the appended result; --onto left unchanged');
+  }
+  await writeFileAtomic(args.onto, newOnto);
+  process.stdout.write(`appended ${entries.length} rebuttal(s) from ${rebutter} to ${args.onto}; validate clean\n`);
+}
+
+// HIGH/CRITICAL claims per seat and what the peer's rebuttal section did with each.
+function falsificationBreakdown(textsBySeat) {
+  const out = { high_or_critical: 0, disputed: 0, conceded: 0, unaddressed: 0 };
+  for (const seat of ['A', 'B']) {
+    const actions = new Map();
+    for (const text of Object.values(textsBySeat)) {
+      const { lines } = parseFenceLines(text);
+      for (const s of rebuttalSections(lines).filter((sec) => sec.of === seat)) {
+        for (const e of parseRebuttalEntries(lines, seat, s.start, s.end)) {
+          if (!actions.has(e.id)) actions.set(e.id, e.action);
+        }
+      }
+    }
+    for (const [id, block] of extractClaimBlocks(textsBySeat[seat]).blocks) {
+      if (id[0] !== seat || (block.severity !== 'HIGH' && block.severity !== 'CRITICAL')) continue;
+      out.high_or_critical += 1;
+      const action = actions.get(id);
+      if (action === 'DISPUTE') out.disputed += 1;
+      else if (action === 'CONCEDE') out.conceded += 1;
+      else out.unaddressed += 1;
+    }
+  }
+  return out;
+}
+
+function sameDir(a, b) {
+  const norm = (p) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  return norm(a) === norm(b);
+}
+
+async function runAuditPrep(args) {
+  let mapping;
+  try {
+    mapping = JSON.parse(await readRequired(args.mapping, '--mapping'));
+  } catch (err) {
+    if (err instanceof RelayError) throw err;
+    throw new RelayError(`--mapping is not valid JSON: ${err.message}`);
+  }
+  invertSeatMapping(mapping);
+  if (sameDir(args.outDir, args.phase1Dir) || sameDir(args.outDir, path.dirname(path.resolve(args.mapping)))) {
+    throw new RelayError('--out-dir must differ from --phase1-dir and from the mapping file\'s folder; the auditor reads everything in it');
+  }
+  let existing = [];
+  try {
+    existing = await fs.readdir(args.outDir);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw new RelayError(`--out-dir: could not read ${args.outDir}: ${err.message}`);
+  }
+  if (existing.length > 0) {
+    throw new RelayError(`--out-dir ${args.outDir} is not empty (${existing.join(', ')}); it must hold only the two audit files`);
+  }
+  const texts = { A: await readPhase1Seat('A', args.phase1Dir), B: await readPhase1Seat('B', args.phase1Dir) };
+  const problems = validateProblems(texts);
+  if (problems.length > 0) {
+    logValidateProblems(problems);
+    throw new RelayError('--phase1-dir does not validate; nothing written to --out-dir');
+  }
+  const peerIds = args.phase2Dir ? await readPhase2PeerIds(args.phase2Dir) : null;
+  const finals = {};
+  let blocked = 0;
+  for (const seat of ['A', 'B']) {
+    const peer = seat === 'A' ? 'B' : 'A';
+    const pass1 = relabelText(texts[seat], seat, mapping[seat]);
+    // Zero peer-letter targets (no rebuttals, no cross-references) is a valid second pass here.
+    const pass2 = relabelText(pass1, peer, mapping[peer], [...realClaimIds(texts[peer], peer)]);
+    const name = `${mapping[seat]}-findings.md`;
+    const hits = await collectScanHits(pass2, {
+      targetDir: args.targetDir,
+      tokens: parseTokensArg(args.tokens),
+      phase1Dir: args.phase1Dir,
+      forbidSeats: ['A', 'B'],
+      peerIds,
+    });
+    logScanHits(hits, name);
+    blocked += hits.blocking;
+    finals[name] = pass2;
+  }
+  if (blocked > 0) {
+    throw new RelayError(`${blocked} blocking scan hit(s); nothing written to --out-dir -- return the named file(s) for redaction`);
+  }
+  await fs.mkdir(args.outDir, { recursive: true });
+  for (const [name, content] of Object.entries(finals)) await fs.writeFile(path.join(args.outDir, name), content);
+  process.stdout.write(`audit-prep: wrote ${Object.keys(finals).join(', ')} to ${args.outDir}; both scans clean\n`);
+  process.stdout.write(`${JSON.stringify({ falsificationBreakdown: falsificationBreakdown(texts) })}\n`);
 }
 
 async function main() {
@@ -1690,6 +2356,8 @@ async function main() {
     else if (args.sub === 'flip') await runFlip(args);
     else if (args.sub === 'translate') await runTranslate(args);
     else if (args.sub === 'validate') await runValidate(args);
+    else if (args.sub === 'append-rebuttals') await runAppendRebuttals(args);
+    else if (args.sub === 'audit-prep') await runAuditPrep(args);
   } catch (err) {
     if (err instanceof RelayError) {
       log(err.message);
@@ -1723,4 +2391,12 @@ export {
   parseTokensArg,
   RelayError,
   VENDOR_TOKENS,
+  realClaimIds,
+  peerViewClaimIds,
+  scanForPeerLabelLeaks,
+  scanForTargetUrls,
+  normalizeUrl,
+  validateProblems,
+  falsificationBreakdown,
+  parseFenceLines,
 };

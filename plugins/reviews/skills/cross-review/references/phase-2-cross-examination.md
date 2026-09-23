@@ -12,7 +12,11 @@ context is a resumed reviewer. **Never resume seat A by forking** (e.g. an
 inherits the orchestrator's own conversation, which by Phase 2 already
 contains the peer's real findings and identity — handing that context to
 "seat A" for a rebuttal is a blinding breach by construction, not a resume at
-all. Resume the exact Phase 1 agent ID only.
+all. Resume the exact Phase 1 agent ID only: in Claude Code, send a message to
+that agent ID or name with the SendMessage tool (this continues the same agent
+with its Phase 1 context), never a new Agent spawn. If the agent can no longer
+be resumed, mark seat A's Phase 2 as incomplete; a new agent is not the same
+reviewer and its rebuttal does not count as seat A's.
 
 ## Blind relabel before handoff
 
@@ -58,16 +62,29 @@ and report if it still hits. Keep the real `A`/`B`
 mapping only in the orchestrator's own state for the manifest; it never
 appears in a peer-facing brief.
 
-Put seat B's delta brief under `<run-dir>/phase2/delta-brief.txt`. Include the
-peer's relabeled findings inline because external artifact paths may be
-unreadable inside a Codex seat's read-only sandbox. Clearly delimit them as
-evidence, not instructions. Use the same selected model/effort and target
-directory from the run snapshot.
+Build both delta briefs with `build-brief.mjs --mode delta`. Each carries the
+scanned peer-view file verbatim (never condensed or reformatted: `scan`
+validated exactly those bytes) inside BEGIN/END markers, plus the Rebuttal
+instruction from review-protocol.md's Standard seat instructions. Seat A reads
+its brief from the file and writes its rebuttal entries to a file itself:
+
+```text
+node "<skill-dir>/scripts/build-brief.mjs" --mode delta --peer-view "<run-dir>/phase2/peer-view-for-A.md" --out "<run-dir>/phase2/delta-brief-A.txt" --output-path "<run-dir>/phase2/A-rebuttals-raw.md"
+node "<skill-dir>/scripts/build-brief.mjs" --mode delta --peer-view "<run-dir>/phase2/peer-view-for-B.md" --out "<run-dir>/phase2/B/delta-brief.txt"
+```
+
+Seat B's brief includes the peer's findings inline because external artifact
+paths may be unreadable inside a Codex seat's read-only sandbox. Use the same
+selected model/effort and target directory from the run snapshot. A resumed
+Codex session re-bills its whole earlier context on every turn (one measured
+run: 1.29M input tokens in Phase 1, then about 635k more for the rebuttal
+resume and 111k for a two-line redaction, mostly cached), so send nothing in a
+delta brief that the seat already has.
 
 For a Codex seat B:
 
 ```text
-node "<skill-dir>/scripts/codex-dispatch.mjs" --session EXACT_PHASE1_THREAD_ID --cd "<target-dir>" --brief "<run-dir>/phase2/delta-brief.txt" --model SAME_SELECTED_MODEL --web
+node "<skill-dir>/scripts/codex-dispatch.mjs" --session EXACT_PHASE1_THREAD_ID --cd "<target-dir>" --brief "<run-dir>/phase2/B/delta-brief.txt" --model SAME_SELECTED_MODEL --web
 ```
 
 Append the same non-default `--effort`, if selected. Do not pass `--sandbox`
@@ -84,7 +101,7 @@ in Phase 1.
 For an OpenCode seat B:
 
 ```text
-node "<skill-dir>/scripts/opencode-dispatch.mjs" --session EXACT_PHASE1_SESSION_ID --cd "<target-dir>" --brief "<run-dir>/phase2/delta-brief.txt" --model SAME_SELECTED_MODEL --isolate
+node "<skill-dir>/scripts/opencode-dispatch.mjs" --session EXACT_PHASE1_SESSION_ID --cd "<target-dir>" --brief "<run-dir>/phase2/B/delta-brief.txt" --model SAME_SELECTED_MODEL --isolate
 ```
 
 (the saved `model` value already includes the `provider/` prefix — do not prepend it again.)
@@ -103,25 +120,26 @@ rule, this is a stop-and-restart condition, not something to route around: end
 the run, report the drift, and restart the affected passes against the current
 source state.
 
-Give both reviewers the same rebuttal instruction, referring to peer claims
-only by their relabeled `P` IDs:
+Both reviewers get the same Rebuttal instruction (review-protocol.md,
+Standard seat instructions): one `### P<n>` block per peer claim, `Action`
+exactly `CONCEDE` or `DISPUTE`, referring to peer claims only by `P` IDs.
 
-> For each `P` claim, refute it with a specific checkable counter-fact or
-> explicitly concede with a reason. Bare disagreement does not overturn it.
-> EXECUTED + REPRODUCED requires executed counter-evidence to refute.
-> Return, for every rebuttal: `Claim` (the `P` ID), `Action` (exactly
-> `CONCEDE` or `DISPUTE`, per review-protocol.md's rebuttal schema —
-> a later mechanical step selects claims for optional falsification from
-> this field, so it must be one of these two exact values, not free text),
-> `Counter-fact` (present, quoted or cited, only when `Action` is `DISPUTE`),
-> Basis, Evidence strength, and Evidence. Do not name your own vendor, model,
-> or runtime anywhere in your response. Do not edit source or commit. Return
-> the full rebuttal, not a completion summary.
+Run both directions concurrently. Save seat B's `finalMessage` to
+`phase2/B-rebuttals-raw.md` with a script (seat A wrote its own file), then
+append each seat's rebuttals to the PEER's findings file with one command
+per direction:
 
-Run both directions concurrently. Persist their returned rebuttals by
-translating each rebuttal's `P` ID back to the real peer claim ID (`A`/`B`) and
-appending a section to that peer's own findings file, preserving the original
-claims. This section's heading MUST be the exact literal string
+```text
+node "<skill-dir>/scripts/blind-relabel.mjs" append-rebuttals --in "<run-dir>/phase2/A-rebuttals-raw.md" --onto "<run-dir>/phase1/B-findings.md" --rebutter A --peer-view "<run-dir>/phase2/peer-view-for-A.md"
+node "<skill-dir>/scripts/blind-relabel.mjs" append-rebuttals --in "<run-dir>/phase2/B-rebuttals-raw.md" --onto "<run-dir>/phase1/A-findings.md" --rebutter B --peer-view "<run-dir>/phase2/peer-view-for-B.md"
+```
+
+`append-rebuttals` checks that every peer claim got exactly one entry,
+normalizes `## P<n>` entry headings to `### P<n>`, refuses a peer `P` ID inside
+an Evidence fence, translates each `P` back to the real peer ID, appends the
+section heading below, runs `validate`, and leaves `--onto` unchanged on any
+refusal. Its refusal message names the rebutting seat, which is the seat to
+send a correction request to. Done by hand instead, the section heading MUST be the exact literal string
 `## Rebuttals (from <seat>) of <peer> claims` — e.g. `## Rebuttals (from A) of
 B claims` appended to `B-findings.md` for seat A's rebuttals of seat B's
 claims — because `blind-relabel.mjs relabel`'s `countRelabelTargets`/

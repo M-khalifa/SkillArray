@@ -37,7 +37,7 @@ not provide Claude subagents.
 ```
 
 Setup asks for provider, runtime, model, and optional effort for both seats.
-Codex offers GPT-6 Astra and GPT-5.6 Luna/Sol/Terra. Claude offers Fable when
+Codex offers the current GPT models from the bundled catalog. Claude offers Fable when
 the harness exposes it. Run setup again or say "change cross-review's second
 provider to PROVIDER" to update saved choices. Say "use MODEL for this review
 only" for a temporary override.

@@ -36,6 +36,10 @@ Secondary lenses, in addition to the shared rubric:
   the diff didn't touch.
 - **Test coverage** — is the new behavior actually exercised, or only the
   branch the author was thinking about.
+- **Data exposure** — identifiers that must not ship in fixtures, captures,
+  logs, or test data: serial numbers, WWN/NAA/EUI IDs, hostnames, IP and MAC
+  addresses, email addresses, tenant/account/subscription IDs, customer names.
+  Check hardest where the target claims a capture is anonymized.
 
 ## Architecture
 
@@ -74,6 +78,25 @@ Secondary lenses:
   was true when written and is checkable against current state.
 - **Ambiguity for the actual reader** — a step an implementer would need to
   guess at, not because it's wrong, but because it's underspecified.
+- **Data exposure** — the same identifiers as the Code profile's lens, in
+  screenshots, examples, and quoted output.
+
+For a binary document (`.docx`, `.pdf`, `.pptx`), both seats must read the same
+extraction, so the orchestrator freezes it before dispatch:
+
+1. Extract the text in reading order to a Markdown file, with a marker such as
+   `[IMAGE 3: images/image3.png]` where each figure sits, the images themselves,
+   and a list of the document's hyperlinks. Keep the original file next to them.
+2. Put downscaled copies of large images in the packet (longest edge about
+   1600 px); keep the originals only for claims that need pixel detail. A
+   3200 px screenshot costs each seat far more tokens and adds nothing a reader
+   can check at normal size.
+3. Record the extraction command and tool version in the task packet, and hash
+   the extracted files with the task packet (`build-manifest.mjs --task-packet`
+   plus the Phase 1 pre-flight inventory of the target folder), so a later
+   reader can tell which bytes the seats reviewed.
+4. Give the hyperlink list to `scan --target-urls` (see review-protocol.md's Web
+   verification).
 
 ## Choosing and combining
 

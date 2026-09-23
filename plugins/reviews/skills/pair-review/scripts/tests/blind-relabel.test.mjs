@@ -18,6 +18,14 @@ import {
   parseArgs,
   parseTokensArg,
   RelayError,
+  realClaimIds,
+  peerViewClaimIds,
+  scanForPeerLabelLeaks,
+  scanForTargetUrls,
+  normalizeUrl,
+  validateProblems,
+  falsificationBreakdown,
+  parseFenceLines,
 } from '../blind-relabel.mjs';
 
 const FIXTURE_DIR = fileURLToPath(new URL('./fixtures/blind-relabel', import.meta.url));
@@ -158,7 +166,7 @@ test('scanText: an escaped backtick pair around a vendor token does not hide it 
 });
 
 test('relabelText: an escaped backtick pair around a claim ID does not hide it from relabeling', () => {
-  const out = relabelText('\\`A1\\` is my claim', 'A', 'X');
+  const out = relabelText('\\`A1\\` is my claim', 'A', 'X', ['A1']);
   assert.equal(out, '\\`X1\\` is my claim');
 });
 
@@ -167,6 +175,7 @@ test('relabelText: rewrites headings and prose claim IDs, skips fenced/inline co
     '# Seat A findings — some target',
     '',
     '## A1 — a claim',
+    '## A2 — second claim',
     'See A1 and A2 in prose.',
     '`A3` stays as-is inline.',
     '```',
@@ -552,7 +561,7 @@ test('relabelText: a fence indented 0-3 spaces is still protected (CommonMark ca
 
 test('relabelText: a 4-space (or deeper) indented ``` is CommonMark indented code, NOT a fence -- its content is exposed and relabels normally', () => {
   const text = '## A1 — claim\n    ```\nA2 must relabel, this is not really a fence\n    ```\n## A3 — must still relabel';
-  const out = relabelText(text, 'A', 'P');
+  const out = relabelText(text, 'A', 'P', ['A2']);
   assert.match(out, /^## P1 — claim$/m);
   assert.match(out, /^## P3 — must still relabel$/m);
   assert.match(out, /P2 must relabel, this is not really a fence/, 'a 4-space "fence" must not hide a real claim ID from relabeling');
@@ -560,7 +569,7 @@ test('relabelText: a 4-space (or deeper) indented ``` is CommonMark indented cod
 
 test('relabelText: a tab-indented ``` is also not a fence (CommonMark space-only cap), content relabels normally', () => {
   const text = '## A1 — claim\n\t```\nA2 must relabel here too\n\t```\n## A3 — must still relabel';
-  const out = relabelText(text, 'A', 'P');
+  const out = relabelText(text, 'A', 'P', ['A2']);
   assert.match(out, /^## P1 — claim$/m);
   assert.match(out, /P2 must relabel here too/);
 });
@@ -587,7 +596,7 @@ test('relabelText: a ~~~ opened fence is not closed by a ``` line of the other c
 
 test('splitLineSpans: an inline span opened with a double-backtick run closes only at the next double-backtick run, so a single backtick and a claim ID inside stay code', () => {
   const text = '## A1 — claim\nSee ``literal ` backtick and A2`` here, but A3 in prose relabels.';
-  const out = relabelText(text, 'A', 'P');
+  const out = relabelText(text, 'A', 'P', ['A2', 'A3']);
   assert.match(out, /^## P1 — claim$/m);
   // A2 sits inside the double-backtick span, so it must survive byte-identical, unrewritten.
   assert.match(out, /``literal ` backtick and A2``/);
@@ -597,7 +606,7 @@ test('splitLineSpans: an inline span opened with a double-backtick run closes on
 
 test('splitLineSpans: a single unmatched backtick run is literal text, so a claim ID after it still relabels', () => {
   const text = '## A1 — claim\nAn unterminated `A2 span with no closing backtick, then A3 in prose.';
-  const out = relabelText(text, 'A', 'P');
+  const out = relabelText(text, 'A', 'P', ['A2', 'A3']);
   assert.match(out, /^## P1 — claim$/m);
   // A2 sits after an unmatched open backtick: treated as literal text, not code, so it relabels too.
   assert.match(out, /\bP2\b/);
@@ -606,7 +615,7 @@ test('splitLineSpans: a single unmatched backtick run is literal text, so a clai
 
 test('splitLineSpans: a single-backtick close match must not be the first backtick of a following longer run', () => {
   const text = '## A1 — claim\nSee `A1`` and A2 in prose.';
-  const out = relabelText(text, 'A', 'P');
+  const out = relabelText(text, 'A', 'P', ['A2']);
   assert.match(out, /^## P1 — claim$/m);
   // The single-backtick span closes at the FIRST lone backtick, not the first backtick of ``.
   assert.match(out, /`P1``/);
@@ -637,7 +646,7 @@ test('relabelText: two chained passes (own letter, then peer letter) fully strip
     'Action: concede, same root cause as B4.',
   ].join('\n');
   const pass1 = relabelText(text, 'A', 'X');
-  const pass2 = relabelText(pass1, 'B', 'Y');
+  const pass2 = relabelText(pass1, 'B', 'Y', ['B4']); // B4 comes from B's Phase 1 file (relabel --phase1-dir)
   assert.doesNotMatch(pass2, /\b[AB]\d+\b/);
   assert.match(pass2, /same root cause as Y4/);
   assert.match(pass2, /^## Rebuttals \(from Y\) of X claims$/m);
@@ -1011,7 +1020,8 @@ test('translateFindings: with --phase1-dir, a "---" thematic break between claim
     ],
   });
   const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
-  assert.deepEqual(result.findings[0].evidence, ['prose before\n\nfenced body\nprose after']);
+  // Evidence ends at the fence group's close, so "prose after" (commentary) is not evidence either.
+  assert.deepEqual(result.findings[0].evidence, ['prose before\n\nfenced body']);
   assert.deepEqual(result.findings[1].evidence, ['e2']);
 });
 
@@ -2451,4 +2461,445 @@ test('dogfood: scanning the real relabeled peer-views finds zero self-identifica
     assert.doesNotMatch(scanResult.stderr, /SELF-IDENTIFICATION/);
     assert.doesNotMatch(scanResult.stderr, /IDENTITY line/);
   }
+});
+
+function runCli(args) {
+  return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+}
+
+async function tempDir(t, prefix) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function claimBlock(id, severity = 'HIGH', tail = '') {
+  return `## ${id} — t\nSeverity: ${severity}\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n\`\`\`\nran it\n\`\`\`\n${tail}`;
+}
+
+test('scanText: F1 -- a git target checked out on a vendor-token branch ("codex/topic") does not exempt a third-person identity mention, since exempt names come from git ls-files, never .git/refs; a tracked codex-dispatch.mjs still exempts', async (t) => {
+  const dir = await tempDir(t, 'f1-git-branch-');
+  const git = (...a) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git('init', '-q');
+  git('checkout', '-q', '-b', 'codex/topic');
+  await fs.writeFile(path.join(dir, 'README.md'), 'plain target\n');
+  git('add', 'README.md');
+  git('commit', '-q', '-m', 'x');
+  const leak = await scanText('The Codex reviewer found this first.', dir);
+  assert.equal(leak.identityHits.length, 1, 'a branch ref under .git/ must not make "codex" target-derived');
+
+  await fs.writeFile(path.join(dir, 'codex-dispatch.mjs'), '');
+  git('add', 'codex-dispatch.mjs');
+  const exempt = await scanText('The Codex reviewer found this first.', dir);
+  assert.equal(exempt.identityHits.length, 0, 'a tracked target file name is still target-derived');
+  assert.equal(exempt.otherHits.length, 1);
+});
+
+test('scanText: F1 -- a non-git target walk skips .git/ and node_modules/, so an installed "openai" package or a stray .git/refs/heads/claude never exempts a third-person identity mention', async (t) => {
+  const dir = await tempDir(t, 'f1-walk-');
+  await fs.mkdir(path.join(dir, 'node_modules', 'openai'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'node_modules', 'openai', 'index.js'), '');
+  await fs.mkdir(path.join(dir, '.git', 'refs', 'heads', 'claude'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'app.js'), '');
+  const { identityHits } = await scanText('The OpenAI reviewer flagged it.\nThe Claude reviewer agreed.', dir);
+  assert.equal(identityHits.length, 2);
+});
+
+test('scanText: F2 -- vendor tokens match on word boundaries, so "affable", "octopus", and "fables" are not identity hits, while "Codex", "Claude\'s", "codex-dispatch.mjs", and "gpt-5" mentions still are', async () => {
+  const neg = await scanText('The author is affable.\nAn octopus appeared.\nOld fables apply.', undefined);
+  assert.equal(neg.identityHits.length + neg.selfIdHits.length + neg.otherHits.length, 0);
+  const pos = await scanText(
+    'The Codex reviewer ran.\nClaude\'s pass agreed.\nSee codex-dispatch.mjs here.\nThe gpt-5 output said so.',
+    undefined
+  );
+  assert.equal(pos.identityHits.length, 4);
+});
+
+test('scanText: F2 -- a --tokens entry matches on word boundaries too, and a target whose own SKILL.md only says "affable" does not exempt a real "Fable" mention', async (t) => {
+  const dir = await tempDir(t, 'f2-target-');
+  await fs.writeFile(path.join(dir, 'SKILL.md'), 'This skill is affable.\n');
+  const { identityHits } = await scanText('The Fable reviewer found it.\nThe mysolar panel.', dir, ['sol']);
+  assert.equal(identityHits.length, 1);
+  assert.match(identityHits[0].text, /Fable reviewer/);
+});
+
+const F3_BLOCK = [
+  '# Seat A findings',
+  '',
+  '## A1 — t',
+  'Severity: HIGH',
+  'Basis: EXECUTED',
+  'Evidence strength: REPRODUCED',
+  'Evidence:',
+  '```',
+  '$ node x.js',
+  'boom',
+  '```',
+  'Commentary prose after the fence.',
+  'Suggested fix: add a null check in x.js parse().',
+  '',
+].join('\n');
+
+test('extractClaimBlocks: F3 -- evidence stops at the Evidence fence\'s closing line, so commentary and a trailing "Suggested fix:" line never enter evidence; the fix line is captured as suggestedFix', () => {
+  const { blocks } = extractClaimBlocks(F3_BLOCK);
+  assert.equal(blocks.get('A1').evidence, '$ node x.js\nboom');
+  assert.equal(blocks.get('A1').suggestedFix, 'add a null check in x.js parse().');
+});
+
+test('extractClaimBlocks: F3 -- unfenced evidence also stops at a "Suggested fix:" line instead of swallowing it', () => {
+  const { blocks } = extractClaimBlocks(
+    '## A1 — t\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: PLAUSIBLE\nEvidence: x.js:4 returns null\nSuggested fix: guard it\n'
+  );
+  assert.equal(blocks.get('A1').evidence, 'x.js:4 returns null');
+  assert.equal(blocks.get('A1').suggestedFix, 'guard it');
+});
+
+test('extractClaimBlocks: F4 -- two back-to-back Evidence fences contribute only their contents, never the first fence\'s closer or the second\'s opener; parseFenceLines marks delimiter lines with isOpen/isClose', () => {
+  const text = '## A2 — t\nSeverity: LOW\nBasis: EXECUTED\nEvidence strength: SUPPORTED\nEvidence:\n```\na.js:1 one\n```\n```\nb.js:2 two\n```\n';
+  assert.equal(extractClaimBlocks(text).blocks.get('A2').evidence, 'a.js:1 one\nb.js:2 two');
+  const flags = parseFenceLines(text).lines.map((l) => [l.isOpen, l.isClose]);
+  assert.deepEqual(flags.slice(5, 11), [[true, false], [false, false], [false, true], [true, false], [false, false], [false, true]]);
+  const spaced = '## A3 — t\nEvidence:\n```\na\n```\n\n~~~\nb\n```\n~~~\nprose after\n';
+  assert.equal(extractClaimBlocks(spaced).blocks.get('A3').evidence, 'a\n\nb\n```', 'a blank-separated fence stays in the group; a ``` inside ~~~ is content');
+});
+
+test('translateFindings: F3/F14 -- with --phase1-dir, a post-fence "Suggested fix:" line is derived into suggested_fix ("<origin>: <text>", one per origin that has one) and never into evidence', async (t) => {
+  const dir = await tempDir(t, 'f3-translate-');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), `${F3_BLOCK}\n${claimBlock('A2')}`);
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const audit = JSON.stringify({
+    findings: [
+      validFinding({ id: 'F1', origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] }),
+      validFinding({ id: 'F2', origins: ['X2'], peer_responses: [{ claim: 'X2', response: 'conceded' }] }),
+    ],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  assert.deepEqual(result.findings[0].evidence, ['$ node x.js\nboom']);
+  assert.deepEqual(result.findings[0].suggested_fix, ['A1: add a null check in x.js parse().']);
+  assert.deepEqual(result.findings[1].suggested_fix, []);
+});
+
+test('relabelText: F5 -- only real claim IDs (## / ### headings and Claim: lines) are rewritten; product names A100/B200 and an A10 with no claim heading stay untouched', () => {
+  const text = '# Seat A findings\n\n## A1 — t\nRan on A100 and B200 GPUs; A10 is a cell ref; see A1.\n### A2\nClaim: A3\n';
+  const out = relabelText(text, 'A', 'X');
+  assert.match(out, /^## X1 — t$/m);
+  assert.match(out, /Ran on A100 and B200 GPUs; A10 is a cell ref; see X1\./);
+  assert.match(out, /^### X2$/m);
+  assert.match(out, /^Claim: X3$/m);
+  assert.deepEqual([...realClaimIds(text, 'A')].sort(), ['A1', 'A2', 'A3']);
+});
+
+test('CLI relabel: F5 -- a Phase 3 second pass with --phase1-dir rewrites a prose cross-reference to a real peer claim (B5) but leaves B200 alone; without --phase1-dir nothing real matches and the zero-target exit fires', async (t) => {
+  const dir = await tempDir(t, 'f5-cli-');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), `# Seat A findings\n\n${claimBlock('A1', 'HIGH', 'Same root cause as B5, seen on B200 hardware.\n')}`);
+  await fs.writeFile(path.join(dir, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B5')}`);
+  const pass1 = path.join(dir, 'tmp-A.md');
+  let r = runCli(['relabel', '--in', path.join(dir, 'A-findings.md'), '--out', pass1, '--from', 'A', '--to', 'X']);
+  assert.equal(r.status, 0, r.stderr);
+  const out = path.join(dir, 'out', 'X-findings.md');
+  r = runCli(['relabel', '--in', pass1, '--out', out, '--from', 'B', '--to', 'Y']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /no "B" claim IDs/);
+  r = runCli(['relabel', '--in', pass1, '--out', out, '--from', 'B', '--to', 'Y', '--phase1-dir', dir]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(await fs.readFile(out, 'utf8'), /Same root cause as Y5, seen on B200 hardware\./);
+});
+
+test('dogfood: F5 -- a full double relabel of a real run\'s Phase 1 files (rebuttal sections included) leaves zero real A/B claim IDs anywhere and leaves A100/B200-shaped non-claim tokens alone', async (t) => {
+  // Stored as *-findings.fixture.md (the skill's .gitignore drops *-findings.md); copied to real names.
+  const src = path.join(FIXTURE_DIR, 'real-run-rebuttals');
+  const dir = await tempDir(t, 'f5-real-run-');
+  const real = path.join(dir, 'phase1');
+  await fs.mkdir(real);
+  const texts = {};
+  for (const seat of ['A', 'B']) {
+    texts[seat] = await fs.readFile(path.join(src, `${seat}-findings.fixture.md`), 'utf8');
+    await fs.writeFile(path.join(real, `${seat}-findings.md`), texts[seat]);
+  }
+  const realIds = new Set([...realClaimIds(texts.A, 'A'), ...realClaimIds(texts.B, 'B')]);
+  assert.ok(realIds.size >= 50, `expected the real run's ~50 claim IDs, got ${realIds.size}`);
+  for (const [own, peer, ownTo, peerTo] of [['A', 'B', 'X', 'Y'], ['B', 'A', 'Y', 'X']]) {
+    const inPath = path.join(dir, `${own}-in.md`);
+    await fs.writeFile(inPath, `${texts[own]}\nBenchmarked on A100 and B200; also A99 (not a claim).\n`);
+    const tmp = path.join(dir, `tmp-${own}.md`);
+    const outPath = path.join(dir, `${ownTo}-findings.md`);
+    let r = runCli(['relabel', '--in', inPath, '--out', tmp, '--from', own, '--to', ownTo]);
+    assert.equal(r.status, 0, r.stderr);
+    r = runCli(['relabel', '--in', tmp, '--out', outPath, '--from', peer, '--to', peerTo, '--phase1-dir', real]);
+    assert.equal(r.status, 0, r.stderr);
+    const out = await fs.readFile(outPath, 'utf8');
+    const survivors = [...realIds].filter((id) => new RegExp(`\\b${id}\\b`).test(out));
+    assert.deepEqual(survivors, [], `real claim IDs survived in ${ownTo}-findings.md`);
+    assert.match(out, /Benchmarked on A100 and B200; also A99 \(not a claim\)\./);
+    assert.match(out, /^## Rebuttals \(from [XY]\) of [XY] claims$/m);
+    assert.deepEqual(await scanForKnownClaimIdLeaks(out, real, ['A', 'B']), []);
+  }
+});
+
+test('translateFindings: F5 -- prose fields (summary, recommended_fix, title, priority, suggested_fix) are copied verbatim, so a literal X75/X11 that is not an origin of this run stays byte-identical instead of becoming a fake A75; basis_from is still ID-translated', async () => {
+  const audit = JSON.stringify({
+    findings: [
+      validFinding({
+        title: 'X75 forwarding crash',
+        summary: 'X11 forwarding breaks',
+        recommended_fix: 'guard X11 in x.js',
+        priority: 'high',
+        suggested_fix: ['Y99-style guard'],
+        basis_from: 'Y7',
+      }),
+    ],
+  });
+  const [f] = (await translateFindings(audit, { A: 'X', B: 'Y' }, null)).findings;
+  assert.equal(f.title, 'X75 forwarding crash');
+  assert.equal(f.summary, 'X11 forwarding breaks');
+  assert.equal(f.recommended_fix, 'guard X11 in x.js');
+  assert.deepEqual(f.suggested_fix, ['Y99-style guard']);
+  assert.deepEqual(f.origins, ['A3', 'B7']);
+  assert.equal(f.basis_from, 'B7');
+});
+
+test('translateFindings: F5 -- refuses when a prose field names one of this run\'s anonymous origin IDs (X3) or a Phase 2 P<n> label, since prose is never ID-rewritten; evidence and auditor_check.evidence stay exempt', async () => {
+  const map = { A: 'X', B: 'Y' };
+  const one = (overrides) => JSON.stringify({ findings: [validFinding(overrides)] });
+  await assert.rejects(translateFindings(one({ summary: 'X3 and Y7 agree' }), map, null), /prose field "findings\.0\.summary" contains "X3"/);
+  await assert.rejects(translateFindings(one({ title: 'see P12' }), map, null), /contains "P12", a Phase 2 peer label/);
+  await assert.rejects(translateFindings(one({ notes: 'Y7 is right' }), map, null), /findings\.0\.notes/);
+  const ok = await translateFindings(
+    one({ auditor_check: { result: 'CONFIRMED', basis: 'EXECUTED', evidence: 'ran the X3 repro' } }),
+    map,
+    null
+  );
+  assert.equal(ok.findings[0].auditor_check.evidence, 'ran the X3 repro');
+});
+
+test('CLI scan: F6 -- --phase2-dir hard-stops on a surviving Phase 2 label ("identified in P12" inside an Evidence fence) when P12 is a peer-view claim, and ignores a P number no peer-view ever carried', async (t) => {
+  const dir = await tempDir(t, 'f6-scan-');
+  const p2 = path.join(dir, 'phase2');
+  await fs.mkdir(p2);
+  await fs.writeFile(path.join(p2, 'peer-view-for-A.md'), '# Peer findings\n\n## P12 — x\n');
+  await fs.writeFile(path.join(p2, 'peer-view-for-B.md'), '# Peer findings\n\n## P3 — y\n');
+  const leak = path.join(dir, 'X-findings.md');
+  await fs.writeFile(leak, '# Seat X findings\n\n## X1 — t\nEvidence:\n```\nas identified in P12, x.js:4 guards it\n```\n');
+  let r = runCli(['scan', '--in', leak, '--phase2-dir', p2]);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /PEER-LABEL LEAK line 6 \(Phase 2 "P12"/);
+  const clean = path.join(dir, 'Y-findings.md');
+  await fs.writeFile(clean, '# Seat Y findings\n\n## Y1 — t\nEvidence:\n```\nP99 is a part number\n```\n');
+  r = runCli(['scan', '--in', clean, '--phase2-dir', p2]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(scanForPeerLabelLeaks('P12 and P3 and P4', new Set(['P12', 'P3'])).map((h) => h.id), ['P12', 'P3']);
+  assert.deepEqual([...peerViewClaimIds('## P1 — a\n```\n## P9\n```\n')], ['P1']);
+});
+
+test('CLI validate: F7 -- a "## P71" or duplicate "## A1" entry heading inside "## Rebuttals (from B) of A claims" is reported against seat B (the rebutting seat that wrote it), not the file owner, and "### A1" entries validate clean', async (t) => {
+  const dir = await tempDir(t, 'f7-validate-');
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  for (const entryHeading of ['## P71', '## A1']) {
+    await fs.writeFile(
+      path.join(dir, 'A-findings.md'),
+      `# Seat A findings\n\n${claimBlock('A1')}\n## Rebuttals (from B) of A claims\n\n${entryHeading}\nClaim: A1\nAction: CONCEDE\n`
+    );
+    const r = runCli(['validate', '--phase1-dir', dir]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, new RegExp(`heading "${entryHeading}" sits inside "## Rebuttals \\(from B\\) of A claims"`));
+    assert.match(r.stderr, /return this section to seat B \(the rebutting seat that wrote it\), not to seat A/);
+    assert.match(r.stderr, /return to: seat B/);
+    assert.doesNotMatch(r.stderr, /return to: seat A/);
+  }
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    `# Seat A findings\n\n${claimBlock('A1')}\n## Rebuttals (from B) of A claims\n\n### A1\nClaim: A1\nAction: CONCEDE\n`
+  );
+  const ok = runCli(['validate', '--phase1-dir', dir]);
+  assert.equal(ok.status, 0, ok.stderr);
+});
+
+async function f8Setup(t) {
+  const dir = await tempDir(t, 'f8-append-');
+  const aText = `# Seat A findings\n\n${claimBlock('A1')}\n${claimBlock('A2')}`;
+  await fs.writeFile(path.join(dir, 'A-findings.md'), aText);
+  await fs.writeFile(path.join(dir, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B1')}`);
+  const peerView = path.join(dir, 'peer-view-for-B.md');
+  await fs.writeFile(peerView, relabelText(aText, 'A', 'P'));
+  return { dir, aText, peerView, onto: path.join(dir, 'A-findings.md') };
+}
+
+const F8_GOOD_RAW =
+  '## P1 — t\nClaim: P1\nAction: CONCEDE\nEvidence:\n```\nok\n```\n\n## P2\nClaim: P2\nAction: DISPUTE\nCounter-fact: see P1 above\n';
+
+test('CLI append-rebuttals: F8 -- normalizes "## P<n>" entry headings to "###", relabels P to the peer letter, appends a blank line + the exact rebuttal heading + the entries, and the result validates clean', async (t) => {
+  const { dir, aText, peerView, onto } = await f8Setup(t);
+  const raw = path.join(dir, 'raw.md');
+  await fs.writeFile(raw, F8_GOOD_RAW);
+  const r = runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
+  assert.equal(r.status, 0, r.stderr);
+  const out = await fs.readFile(onto, 'utf8');
+  assert.ok(out.startsWith(aText), 'the original findings are kept byte-identical');
+  assert.equal(
+    out.slice(aText.length),
+    '\n## Rebuttals (from B) of A claims\n\n### A1 — t\nClaim: A1\nAction: CONCEDE\nEvidence:\n```\nok\n```\n\n### A2\nClaim: A2\nAction: DISPUTE\nCounter-fact: see A1 above\n'
+  );
+  assert.equal(runCli(['validate', '--phase1-dir', dir]).status, 0);
+  const again = runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
+  assert.notEqual(again.status, 0);
+  assert.match(again.stderr, /already contains "## Rebuttals \(from B\) of A claims"/);
+});
+
+test('CLI append-rebuttals: F8 -- refuses, leaving --onto byte-identical, on a coverage gap, a duplicate entry, a missing Action line, a fenced P token naming a peer-view claim, or an --onto that is not the peer\'s file', async (t) => {
+  const { dir, aText, peerView, onto } = await f8Setup(t);
+  const cases = [
+    ['## P1\nClaim: P1\nAction: CONCEDE\n', /no rebuttal entry for peer-view claim\(s\) \[P2\]/],
+    ['### P1\nClaim: P1\nAction: CONCEDE\n### P1\nClaim: P1\nAction: DISPUTE\n### P2\nClaim: P2\nAction: CONCEDE\n', /claim "P1" has 2 entries/],
+    ['### P1\nClaim: P1\nAction: CONCEDE\n### P2\nClaim: P2\n', /entry "P2" has no "Action: CONCEDE" or "Action: DISPUTE" line/],
+    ['### P1\nClaim: P1\nAction: CONCEDE\nEvidence:\n```\nsee P2\n```\n### P2\nClaim: P2\nAction: CONCEDE\n', /"P2" inside a fence names a peer-view claim/],
+    ['### P1\nClaim: P1\nAction: CONCEDE, matches `P2`\n### P2\nClaim: P2\nAction: CONCEDE\n', /"P2" inside inline code names a peer-view claim/],
+  ];
+  const raw = path.join(dir, 'raw.md');
+  for (const [text, expected] of cases) {
+    await fs.writeFile(raw, text);
+    const r = runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
+    assert.equal(r.status, 1, `expected refusal for:\n${text}`);
+    assert.match(r.stderr, expected);
+    assert.equal(await fs.readFile(onto, 'utf8'), aText, '--onto must be unchanged on refusal');
+  }
+  await fs.writeFile(raw, F8_GOOD_RAW);
+  const wrong = runCli(['append-rebuttals', '--in', raw, '--onto', path.join(dir, 'B-findings.md'), '--rebutter', 'B', '--peer-view', peerView]);
+  assert.equal(wrong.status, 1);
+  assert.match(wrong.stderr, /--onto must be the peer's Phase 1 file "A-findings\.md"/);
+  assert.deepEqual((await fs.readdir(dir)).sort(), ['A-findings.md', 'B-findings.md', 'peer-view-for-B.md', 'raw.md'], 'no temp file is left behind');
+});
+
+test('CLI append-rebuttals: F8 -- on a real run\'s raw rebuttal files, seat A\'s 17 rebuttals append onto B-findings.md and validate clean, and seat B\'s are refused for the real fenced "identified in P12" leak that run had to hand-redact', async (t) => {
+  const real = path.join(FIXTURE_DIR, 'real-run-append');
+  const dir = await tempDir(t, 'f8-real-run-');
+  for (const seat of ['A', 'B']) {
+    await fs.copyFile(path.join(real, `${seat}-findings.fixture.md`), path.join(dir, `${seat}-findings.md`));
+  }
+  const aBefore = await fs.readFile(path.join(dir, 'A-findings.md'), 'utf8');
+  let r = runCli(['append-rebuttals', '--in', path.join(real, 'A-rebuttals-raw.md'), '--onto', path.join(dir, 'B-findings.md'),
+    '--rebutter', 'A', '--peer-view', path.join(real, 'peer-view-for-A.md')]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /appended 17 rebuttal\(s\) from A/);
+  const bOut = await fs.readFile(path.join(dir, 'B-findings.md'), 'utf8');
+  assert.match(bOut, /^## Rebuttals \(from A\) of B claims$/m);
+  assert.match(bOut, /^### B17\b/m);
+  r = runCli(['append-rebuttals', '--in', path.join(real, 'B-rebuttals-raw.md'), '--onto', path.join(dir, 'A-findings.md'),
+    '--rebutter', 'B', '--peer-view', path.join(real, 'peer-view-for-B.md')]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--in:58: "P12" inside a fence names a peer-view claim/);
+  assert.equal(await fs.readFile(path.join(dir, 'A-findings.md'), 'utf8'), aBefore);
+});
+
+async function f31Setup(t) {
+  const root = await tempDir(t, 'f31-audit-prep-');
+  const p1 = path.join(root, 'phase1');
+  const mapDir = path.join(root, 'phase3');
+  const target = path.join(root, 'target');
+  for (const d of [p1, mapDir, target]) await fs.mkdir(d);
+  await fs.writeFile(
+    path.join(p1, 'A-findings.md'),
+    `# Seat A findings\n\n${claimBlock('A1', 'HIGH')}\n${claimBlock('A2', 'CRITICAL')}\n${claimBlock('A3', 'LOW', 'Related to B1.\n')}\n` +
+      '## Rebuttals (from B) of A claims\n\n### A1\nClaim: A1\nAction: CONCEDE\n\n### A2\nClaim: A2\nAction: DISPUTE\nCounter-fact: x.js:9 guards it\n'
+  );
+  await fs.writeFile(path.join(p1, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B1', 'HIGH')}`);
+  const mapping = path.join(mapDir, 'mapping.json');
+  await fs.writeFile(mapping, '{"A":"Y","B":"X"}\n');
+  return { root, p1, mapDir, target, mapping };
+}
+
+test('CLI audit-prep: F31/F30 -- writes exactly <label>-findings.md for both seats from the flip mapping (zero-rebuttal second pass included) with no real A/B claim ID left, and prints a one-line falsificationBreakdown', async (t) => {
+  const { root, p1, mapDir, target, mapping } = await f31Setup(t);
+  const outDir = path.join(root, 'audit-input');
+  const r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual((await fs.readdir(outDir)).sort(), ['X-findings.md', 'Y-findings.md']);
+  const y = await fs.readFile(path.join(outDir, 'Y-findings.md'), 'utf8');
+  const x = await fs.readFile(path.join(outDir, 'X-findings.md'), 'utf8');
+  assert.match(y, /^# Seat Y findings$/m);
+  assert.match(y, /^## Rebuttals \(from X\) of Y claims$/m);
+  assert.match(y, /Related to X1\./);
+  assert.match(x, /^## X1 — t$/m);
+  for (const text of [x, y]) assert.doesNotMatch(text, /\b[AB]\d+\b/);
+  const line = r.stdout.split('\n').find((l) => l.includes('falsificationBreakdown'));
+  assert.deepEqual(JSON.parse(line), { falsificationBreakdown: { high_or_critical: 3, disputed: 1, conceded: 1, unaddressed: 1 } });
+  assert.deepEqual((await fs.readdir(p1)).sort(), ['A-findings.md', 'B-findings.md'], 'no temp file in --phase1-dir');
+  assert.deepEqual(await fs.readdir(mapDir), ['mapping.json'], 'no temp file next to the mapping');
+});
+
+test('CLI audit-prep: F31 -- refuses a non-empty --out-dir or one equal to --phase1-dir or the mapping file\'s folder, and writes nothing to --out-dir when a scan hits (a surviving Phase 2 label via --phase2-dir)', async (t) => {
+  const { root, p1, mapDir, target, mapping } = await f31Setup(t);
+  for (const bad of [p1, mapDir]) {
+    const r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', bad, '--target-dir', target]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /--out-dir must differ from --phase1-dir and from the mapping file's folder/);
+  }
+  const busy = path.join(root, 'busy');
+  await fs.mkdir(busy);
+  await fs.writeFile(path.join(busy, 'stray.txt'), '');
+  let r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', busy, '--target-dir', target]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /is not empty \(stray\.txt\)/);
+
+  const p2 = path.join(root, 'phase2');
+  await fs.mkdir(p2);
+  await fs.writeFile(path.join(p2, 'peer-view-for-A.md'), '# Peer findings\n\n## P1 — t\n');
+  await fs.writeFile(path.join(p2, 'peer-view-for-B.md'), '# Peer findings\n\n## P1 — t\n## P2 — t\n');
+  const aPath = path.join(p1, 'A-findings.md');
+  await fs.writeFile(aPath, (await fs.readFile(aPath, 'utf8')).replace('x.js:9 guards it', 'x.js:9 guards it, as P2 said'));
+  const outDir = path.join(root, 'audit-input');
+  r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--phase2-dir', p2]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /Y-findings\.md: PEER-LABEL LEAK .*"P2"/);
+  assert.match(r.stderr, /nothing written to --out-dir/);
+  await assert.rejects(fs.access(outDir), 'no --out-dir is created on a scan hit');
+});
+
+test('falsificationBreakdown: F30 -- counts HIGH/CRITICAL claims by the peer\'s rebuttal Action, reading each seat\'s rebuttals from the "## Rebuttals (from <peer>) of <seat> claims" section, with a missing entry counted as unaddressed', () => {
+  const texts = {
+    A: `# Seat A findings\n\n${claimBlock('A1', 'CRITICAL')}\n${claimBlock('A2', 'MEDIUM')}\n## Rebuttals (from B) of A claims\n\n### A1\nClaim: A1\nAction: DISPUTE\n### A2\nClaim: A2\nAction: CONCEDE\n`,
+    B: `# Seat B findings\n\n${claimBlock('B1', 'HIGH')}\n${claimBlock('B2', 'HIGH')}\n## Rebuttals (from A) of B claims\n\n### B2\nClaim: B2\nAction: CONCEDE\n`,
+  };
+  assert.deepEqual(falsificationBreakdown(texts), { high_or_critical: 3, disputed: 1, conceded: 1, unaddressed: 1 });
+  assert.deepEqual(validateProblems(texts), []);
+});
+
+test('CLI scan: F21 -- --target-urls reports every target-embedded URL (prose or fenced, matched after lowercasing scheme/host and dropping fragment and trailing slash) as a non-blocking TRUST-BOUNDARY line without changing the exit code', async (t) => {
+  const dir = await tempDir(t, 'f21-urls-');
+  const urls = path.join(dir, 'urls.txt');
+  await fs.writeFile(urls, 'https://Example.com/docs/page/\nnot a url\n');
+  const findings = path.join(dir, 'f.md');
+  await fs.writeFile(
+    findings,
+    'See HTTPS://EXAMPLE.COM/docs/page#intro for context.\n```\ncurl https://example.com/docs/page/\n```\nAlso https://example.com/docs/Other and https://example.com/docs/page2.\n'
+  );
+  const r = runCli(['scan', '--in', findings, '--target-urls', urls]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /TRUST-BOUNDARY line 1: HTTPS:\/\/EXAMPLE\.COM\/docs\/page#intro/);
+  assert.match(r.stderr, /TRUST-BOUNDARY line 3: https:\/\/example\.com\/docs\/page\//);
+  assert.doesNotMatch(r.stderr, /Other|page2/);
+  assert.match(r.stderr, /skipped unparseable entry "not a url"/);
+  assert.match(r.stdout, /2 trust-boundary URL\(s\) reported/);
+  assert.equal(normalizeUrl('HTTPS://Example.COM/a/#x'), 'https://example.com/a');
+  assert.equal(scanForTargetUrls('no urls here', new Set()).length, 0);
+});
+
+test('parseArgs: new flags are accepted only by their own subcommands (--phase2-dir: scan/audit-prep, --target-urls: scan, --onto/--rebutter/--peer-view: append-rebuttals, --out-dir: audit-prep), and relabel now accepts --phase1-dir', () => {
+  assert.throws(() => parseArgs(['validate', '--phase1-dir', 'p', '--phase2-dir', 'q']), /--phase2-dir is only accepted by scan and audit-prep/);
+  assert.throws(() => parseArgs(['relabel', '--in', 'a', '--out', 'b', '--from', 'A', '--to', 'P', '--target-urls', 'u']), /--target-urls is only accepted by scan/);
+  assert.throws(() => parseArgs(['scan', '--in', 'a', '--onto', 'b']), /--onto is only accepted by append-rebuttals/);
+  assert.throws(() => parseArgs(['append-rebuttals', '--in', 'a', '--onto', 'b', '--rebutter', 'B']), /requires --peer-view/);
+  assert.throws(() => parseArgs(['append-rebuttals', '--in', 'a', '--onto', 'b', '--rebutter', 'C', '--peer-view', 'v']), /--rebutter must be A or B/);
+  assert.throws(() => parseArgs(['audit-prep', '--phase1-dir', 'p', '--mapping', 'm', '--out-dir', 'o']), /requires --target-dir/);
+  assert.throws(() => parseArgs(['audit-prep', '--phase1-dir', 'p', '--mapping', 'm', '--out-dir', 'o', '--target-dir', 't', '--in', 'x']), /audit-prep accepts only/);
+  assert.deepEqual(
+    parseArgs(['relabel', '--in', 'a', '--out', 'b', '--from', 'B', '--to', 'Y', '--phase1-dir', 'p1']),
+    { sub: 'relabel', in: 'a', out: 'b', from: 'B', to: 'Y', phase1Dir: 'p1' }
+  );
+  assert.deepEqual(
+    parseArgs(['scan', '--in', 'a', '--phase2-dir', 'p2', '--target-urls', 'u']),
+    { sub: 'scan', in: 'a', phase2Dir: 'p2', targetUrls: 'u' }
+  );
 });

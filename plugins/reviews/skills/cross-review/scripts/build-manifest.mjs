@@ -84,10 +84,15 @@ async function hashFile(filePath) {
   return sha256(buf);
 }
 
-async function hashFileList(paths) {
+async function hashFileList(paths, flag) {
   const entries = {};
   for (const p of paths) {
-    entries[path.basename(p)] = await hashFile(p);
+    const key = path.basename(p);
+    // Entries are keyed by filename, so a second same-named file would silently replace the first hash.
+    if (Object.hasOwn(entries, key)) {
+      throw new RelayError(`${flag} was given two files named "${key}"; rename one so each hash stays verifiable`);
+    }
+    entries[key] = await hashFile(p);
   }
   return entries;
 }
@@ -95,9 +100,9 @@ async function hashFileList(paths) {
 async function buildHashes(args) {
   const hashes = {};
   if (args.taskPacket) hashes.task_packet = await hashFile(args.taskPacket);
-  if (args.phase1.length > 0) hashes.phase1 = await hashFileList(args.phase1);
-  if (args.phase2.length > 0) hashes.phase2 = await hashFileList(args.phase2);
-  if (args.verification.length > 0) hashes.verifications = await hashFileList(args.verification);
+  if (args.phase1.length > 0) hashes.phase1 = await hashFileList(args.phase1, '--phase1');
+  if (args.phase2.length > 0) hashes.phase2 = await hashFileList(args.phase2, '--phase2');
+  if (args.verification.length > 0) hashes.verifications = await hashFileList(args.verification, '--verification');
   if (args.findings) hashes.findings_json = await hashFile(args.findings);
   return hashes;
 }

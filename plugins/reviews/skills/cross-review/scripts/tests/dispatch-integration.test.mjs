@@ -67,6 +67,47 @@ text:JSON.stringify({argv:process.argv.slice(2), input})}}));
   }
 });
 
+for (const dispatcher of ['codex', 'opencode']) {
+  test(`${dispatcher}-dispatch reports files a reviewer wrote into a non-git --cd via the content-hash inventory, instead of touchedFiles null`, async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `${dispatcher} nongit touched `));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const bin = path.join(dir, 'bin');
+    const target = path.join(dir, 'target');
+    const phase1 = path.join(dir, 'phase1');
+    await Promise.all([fs.mkdir(bin), fs.mkdir(target), fs.mkdir(phase1)]);
+    await fs.writeFile(path.join(target, 'article.md'), 'original\n');
+    const events = dispatcher === 'codex'
+      ? `console.log(JSON.stringify({type:'thread.started', thread_id:'t1'}));
+console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'done'}}));`
+      : `console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text:'done'}}));`;
+    const fake = path.join(bin, 'fake.mjs');
+    await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
+let input = '';
+if (!process.stdin.isTTY) { for await (const chunk of process.stdin) input += chunk; }
+writeFileSync(${JSON.stringify(path.join(target, 'article.md'))}, 'edited by reviewer\\n');
+writeFileSync(${JSON.stringify(path.join(target, 'scratch.txt'))}, 'new\\n');
+${events}
+`);
+    const shim = path.join(bin, process.platform === 'win32' ? `${dispatcher}.cmd` : dispatcher);
+    const wrapper = process.platform === 'win32'
+      ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
+      : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
+    await fs.writeFile(shim, wrapper, { mode: 0o755 });
+    const brief = path.join(phase1, 'brief.txt');
+    await fs.writeFile(brief, 'fixture prompt');
+    const script = fileURLToPath(new URL(`../${dispatcher}-dispatch.mjs`, import.meta.url));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
+    env.PATH = bin + path.delimiter + realGitDir();
+    const result = spawnSync(process.execPath, [script, '--brief', brief, '--cd', target], { env, encoding: 'utf8', timeout: 15000 });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
+    assert.equal(output.status, 'completed');
+    assert.deepEqual(output.touchedFiles, ['article.md', 'scratch.txt']);
+    assert.ok(!('touchedFilesNote' in output), 'a successful inventory diff needs no note');
+    assertResultSchema(output);
+  });
+}
+
 test('dispatcher parses a real turn.completed.usage event into result.json\'s usage field with source "provider"', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch usage '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));

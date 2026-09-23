@@ -12,7 +12,7 @@ compatibility: >-
   an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.4.0
+  version: 1.6.0
 ---
 
 # Cross Review
@@ -30,11 +30,19 @@ Read [references/configuration.md](references/configuration.md) before dispatch.
 Run the bundled configuration helper's (`scripts/review-config.mjs`) `show` and
 `catalog` commands. Without
 saved choices, ask for each seat's provider, runtime, model, and optional effort.
-Show the catalog returned by the helper. Fable must be offered with the Claude
-choices. Codex choices must include `gpt-6-astra`, `gpt-5.6-sol`,
-`gpt-5.6-terra`, and `gpt-5.6-luna`; never offer deprecated GPT-5.1 choices.
-For an OpenCode seat, run `opencode models` and show only configured providers
-and model IDs. Do not inherit an unidentified runtime default.
+Show the catalog returned by the helper; it is the only list of curated model
+choices, so never offer a model from memory or from an older copy of these
+docs. Fable must be offered with the Claude choices when the harness exposes
+it. For a Codex seat, `codex debug models` shows what the installed CLI can
+actually run. For an OpenCode seat, run `opencode models` and show only
+configured providers and model IDs. Do not inherit an unidentified runtime
+default.
+
+**What to read.** Always read configuration.md, review-protocol.md, the phase
+file for the phase you are running, and review-profiles.md. In
+model-capabilities.md read only the section for each runtime you selected
+(skip "OpenCode seats" when no seat runs on OpenCode; it is most of the file).
+In the phase files, skip the OpenCode paragraphs for the same reason.
 
 `/cross-review setup` changes choices anytime; `/cross-review config` shows them.
 Natural-language requests to change either seat also enter setup. Setup, config,
@@ -97,6 +105,12 @@ reference for the phase being executed:
    Falsification pass independently checks a specific HIGH/CRITICAL disputed
    claim before synthesis, when the task explicitly requests it.
 
+Build every brief with [scripts/build-brief.mjs](scripts/build-brief.mjs), append
+rebuttals with `blind-relabel.mjs append-rebuttals`, and stage the auditor's
+folder with `blind-relabel.mjs audit-prep`; the phase files give the exact
+commands. Full-tool readers (the Claude seat, the auditor) write their own
+result files; the orchestrator never retypes a reviewer's or auditor's output.
+
 Dispatch a Codex seat with [scripts/codex-dispatch.mjs](scripts/codex-dispatch.mjs)
 and an OpenCode seat with [scripts/opencode-dispatch.mjs](scripts/opencode-dispatch.mjs).
 Pass the resolved `--model` on every dispatch, including resume. Pass `--effort`
@@ -117,5 +131,6 @@ This directory is independently installable. Its configuration helper, helper
 tests, configuration reference, model-capability reference, review protocol, and
 review profiles are also bundled with pair-review. Keep those copies identical
 when maintaining both packages; neither package imports files from the other.
-The phase references and dispatchers are maintained here and do not require
-updates to another skill.
+The shared scripts include `snapshot-utils.mjs`, which `preflight.mjs` imports.
+The phase references, dispatchers, and `build-brief.mjs` are maintained here
+and do not require updates to another skill.

@@ -46,18 +46,58 @@ test('parseArgs: --env-mode rejects anything but filtered/inherit', () => {
   assert.throws(() => parseArgs(['--cd', '.', '--env-mode', 'bogus']), /filtered.*inherit/);
 });
 
-test('run(): a non-git directory produces Tier 1 evidence with gitRepo:false and no snapshotHash, and refuses --exec', async (t) => {
+test('run(): a non-git directory gets a content-hash inventory snapshotHash, so its Tier 1/Tier 2 evidence is still bound to exact file contents', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'preflight-nogit-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'article.md'), 'draft\n', 'utf8');
   const result = await run({ cd: dir, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [] });
   assert.equal(result.tier1.gitRepo, false);
-  assert.equal(result.snapshotHash, null);
+  assert.equal(result.tier1.fileCount, 1);
+  assert.match(result.snapshotHash, /^[0-9a-f]{64}$/);
   assert.equal(result.tier2, null);
 
-  await assert.rejects(
-    () => run({ cd: dir, exec: ['echo hi'], timeout: 10, envMode: 'filtered', envPassthrough: [] }),
-    RelayError
-  );
+  const withExec = await run({ cd: dir, exec: ['echo hi'], timeout: 10, envMode: 'filtered', envPassthrough: [] });
+  assert.equal(withExec.tier2.results[0].exitCode, 0);
+  assert.equal(withExec.snapshotHash, result.snapshotHash);
+});
+
+test('checkStale: a non-git directory reports stale after any file content changes, and fresh when nothing changed', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'preflight-nogit-stale-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'article.md'), 'draft\n', 'utf8');
+  const hash = await computeSnapshotHash(dir);
+  assert.equal((await checkStale(dir, hash)).stale, false);
+  await writeFile(path.join(dir, 'article.md'), 'edited\n', 'utf8');
+  assert.equal((await checkStale(dir, hash)).stale, true);
+});
+
+test('parseArgs: --compact without --log-dir or --out is refused, and with --out the log dir defaults next to it', () => {
+  assert.throws(() => parseArgs(['--cd', '.', '--compact']), /--compact needs --log-dir/);
+  const args = parseArgs(['--cd', '.', '--compact', '--out', 'pf.json', '--tail', '5']);
+  assert.equal(args.logDir, 'pf.json.logs');
+  assert.equal(args.tail, 5);
+});
+
+test('run(): --compact keeps byte counts, sha256, tail and fail/error lines in the JSON and writes the full stdout to a log whose hash matches', async (t) => {
+  const dir = await makeGitRepo(t);
+  const logDir = path.join(dir, '..', `${path.basename(dir)}-logs`);
+  t.after(() => rm(logDir, { recursive: true, force: true }));
+  const cmd = `node -e "for (let i = 1; i <= 29; i++) console.log('ok ' + i); console.log('\\u2714 throws a descriptive error on bad input'); console.log('not ok 31 - broken')"`;
+  const result = await run({
+    cd: dir, exec: [cmd], timeout: 30, envMode: 'filtered', envPassthrough: [],
+    compact: true, tail: 3, logDir,
+  });
+  const out = result.tier2.results[0].stdout;
+  assert.equal(result.tier2.compact, true);
+  assert.equal(out.lineCount, 31);
+  assert.deepEqual(out.tail, ['ok 29', '✔ throws a descriptive error on bad input', 'not ok 31 - broken']);
+  assert.deepEqual(out.matches, ['not ok 31 - broken'], 'a passing test whose name says "error" is not a failure line');
+  assert.equal(typeof result.tier1.diff.sha256, 'string', 'the Tier 1 diff moves to a log in compact mode');
+  assert.equal(await readFile(result.tier1.diff.log, 'utf8'), '');
+  const full = await readFile(out.log, 'utf8');
+  assert.equal(full.split(/\r?\n/).filter(Boolean).length, 31);
+  const { createHash } = await import('node:crypto');
+  assert.equal(createHash('sha256').update(Buffer.from(full, 'utf8')).digest('hex'), out.sha256);
 });
 
 test('run(): --cd pointing at a file (not a directory) is rejected with RelayError, not a raw git ENOTDIR crash', async (t) => {

@@ -35,8 +35,9 @@ exposes it. Do not claim it is available merely because it appears in setup.
 Verify CLI help and model availability in the installed CLI. Read only relevant
 nonsecret model/provider configuration if needed; do not dump authentication files.
 When Codex is selected, the provider must be OpenAI, not merely a model name
-resembling GPT. Current curated choices are `gpt-6-astra`, `gpt-5.6-sol`,
-`gpt-5.6-terra`, and `gpt-5.6-luna`. The installed CLI and account entitlement
+resembling GPT. The curated choices are whatever `review-config.mjs catalog`
+returns; `codex debug models` shows what the installed CLI can run, with each
+model's supported effort levels. The installed CLI and account entitlement
 remain authoritative.
 
 The bundled dispatcher forwards:

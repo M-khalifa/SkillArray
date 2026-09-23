@@ -236,7 +236,8 @@ test('catalog command exposes current OpenAI tiers and Fable', () => {
   assert.equal(result.status, 0, result.stderr);
   const value = JSON.parse(result.stdout);
   assert.deepEqual(value.providers.openai.models.map((model) => model.id), [
-    'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+    'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+    'gpt-5.5',
   ]);
   assert.ok(value.providers.anthropic.models.some((model) => model.id === 'fable'));
 });

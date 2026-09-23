@@ -63,6 +63,19 @@ test('buildHashes: computes task_packet, phase1 (keyed by basename), phase2, ver
   assert.ok(!('verifications' in hashes), 'an empty --verification list must be omitted, not an empty object');
 });
 
+test('buildHashes: two --phase1 files with the same basename are refused, never silently collapsed to one hash keyed by that name', async (t) => {
+  const dir = await tmpDir(t);
+  await fs.mkdir(path.join(dir, 'original'));
+  const appended = path.join(dir, 'A-findings.md');
+  const original = path.join(dir, 'original', 'A-findings.md');
+  await fs.writeFile(appended, 'phase1 plus rebuttals');
+  await fs.writeFile(original, 'phase1 only');
+  await assert.rejects(
+    buildHashes({ taskPacket: null, phase1: [appended, original], phase2: [], verification: [], findings: null }),
+    (err) => err instanceof RelayError && /--phase1 was given two files named "A-findings\.md"/.test(err.message)
+  );
+});
+
 test('buildHashes: an artifact category with zero paths is omitted entirely, not present as null or {}', async () => {
   const hashes = await buildHashes({ taskPacket: null, phase1: [], phase2: [], verification: [], findings: null });
   assert.deepEqual(hashes, {});

@@ -1,7 +1,7 @@
 {
   "name": "reviews",
   "description": "Same-vendor and cross-vendor evidence-grounded multi-model review for code, architecture, and technical documents: execution-gated, identity-blinded, refutation-asymmetric.",
-  "version": "1.4.0",
+  "version": "1.6.0",
   "author": {
     "name": "Mahmoud Khalifa"
   }

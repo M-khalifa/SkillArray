@@ -10,9 +10,10 @@ account entitlements or dispatch a paid model call.
    Run `node "<skill-dir>/scripts/review-config.mjs" show`.
 2. For cross-review, run `catalog`. Ask for both reviewer providers, runtimes,
    models, and optional effort. For pair-review, ask for two distinct
-   Claude-harness models and optional effort. Present current curated choices,
-   then verify availability in the selected runtime. Codex must show the GPT-6
-   Astra and GPT-5.6 Luna/Sol/Terra choices; Claude must include Fable when its
+   Claude-harness models and optional effort. Present the curated choices the
+   `catalog` command returns (the only maintained list; do not copy a model
+   list from these docs), then verify availability in the selected runtime
+   (`codex debug models` for Codex). Claude must include Fable when its
    harness exposes it. For OpenCode, show only `opencode models` results.
    Examples are not defaults.
    If the user already supplied both choices, use them without asking again.

@@ -10,8 +10,29 @@ synthesis runs in a newly spawned subagent instead.
 ## Coin flip and relabel to X/Y
 
 Before spawning the auditor, run `scripts/blind-relabel.mjs flip --out
-"<run-dir>/phase3/seat-to-audit-label.json"` to decide `seat_to_audit_label`.
-Record it in the manifest now; never show it to the auditor.
+"<run-dir>/phase3-private/seat-to-audit-label.json"` to decide
+`seat_to_audit_label`. Record it in the manifest now; never show it to the
+auditor. Keep it, and any relabel temp file, in `phase3-private/`, never in a
+folder the auditor can read.
+
+Then build the auditor's folder with one command. Create a new, empty folder
+OUTSIDE the run directory (for example a sibling `audit-input-<random>`):
+
+```text
+node "<skill-dir>/scripts/blind-relabel.mjs" audit-prep --phase1-dir "<run-dir>/phase1" --mapping "<run-dir>/phase3-private/seat-to-audit-label.json" --out-dir "<audit-input-dir>" --target-dir "<target-dir>" --tokens "<seat-a-model>,<seat-b-model>" --phase2-dir "<run-dir>/phase2"
+```
+
+`audit-prep` runs both relabel passes per seat with output names taken from the
+mapping, handles a seat with zero rebuttals, runs `scan` with `--forbid-seats
+A,B` and the Phase 2 peer-label check on each result, and only if both scans
+are clean writes exactly `X-findings.md` and `Y-findings.md` into
+`<audit-input-dir>`. On any hit it writes nothing there and prints the hits; the
+redaction procedure is the one in review-protocol.md's Blind exchange. It also
+prints `falsificationBreakdown` for the manifest. Then copy the task packet and
+review-protocol.md into `<audit-input-dir>`.
+
+The manual steps below are what `audit-prep` does; follow them only when the
+command cannot run.
 
 Each findings-plus-rebuttals file contains BOTH that seat's own claims (its own
 letter) AND the peer's rebuttal OF those claims (the peer's letter, carried
@@ -35,10 +56,10 @@ seat B respectively (with `{"A":"X","B":"Y"}`, `<label-A>` is `X`; with
 `{"A":"Y","B":"X"}`, `<label-A>` is `Y`):
 
 ```text
-node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase1/A-findings.md" --out "<run-dir>/phase3/tmp-A.md" --from A --to <label-A>
-node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase3/tmp-A.md" --out "<run-dir>/phase3/<label-A>-findings.md" --from B --to <label-B>
-node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase1/B-findings.md" --out "<run-dir>/phase3/tmp-B.md" --from B --to <label-B>
-node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase3/tmp-B.md" --out "<run-dir>/phase3/<label-B>-findings.md" --from A --to <label-A>
+node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase1/A-findings.md" --out "<run-dir>/phase3-private/tmp-A.md" --from A --to <label-A> --phase1-dir "<run-dir>/phase1"
+node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase3-private/tmp-A.md" --out "<audit-input-dir>/<label-A>-findings.md" --from B --to <label-B> --phase1-dir "<run-dir>/phase1"
+node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase1/B-findings.md" --out "<run-dir>/phase3-private/tmp-B.md" --from B --to <label-B> --phase1-dir "<run-dir>/phase1"
+node "<skill-dir>/scripts/blind-relabel.mjs" relabel --in "<run-dir>/phase3-private/tmp-B.md" --out "<audit-input-dir>/<label-B>-findings.md" --from A --to <label-A> --phase1-dir "<run-dir>/phase1"
 ```
 
 (`phase1/A-findings.md` and `phase1/B-findings.md` are Phase 2's target files:
@@ -46,6 +67,9 @@ Phase 2 appends each seat's rebuttal onto the PEER'S Phase 1 file — the file
 of the seat being rebutted, not the rebutting seat's own — rather than
 writing new ones. `A-findings.md` therefore carries seat A's own claims AND
 seat B's rebuttal of them.)
+
+Pass `--phase1-dir` on every pass: relabel rewrites only real claim IDs, and a
+second pass needs the Phase 1 headings to know the peer's real IDs.
 
 MUST NOT relabel a file only once. A single pass leaves the peer's real letter
 inside that file's rebuttal-section heading and prose (see review-protocol.md's
@@ -62,7 +86,8 @@ real identity.
 MUST run `blind-relabel.mjs scan` (with the same `--tokens` model/provider
 strings used in Phase 2, AND `--phase1-dir "<run-dir>/phase1" --forbid-seats
 A,B` — both real seat letters, since a double-relabeled file must contain
-NEITHER real letter anywhere, fenced Evidence included) over each fully
+NEITHER real letter anywhere, fenced Evidence included, plus `--phase2-dir
+"<run-dir>/phase2"` for leftover peer `P` labels) over each fully
 double-relabeled file, same self-identification hard stop as Phase 2's Blind
 exchange check. Omitting `--forbid-seats` here reopens the fenced Evidence
 claim-ID leak class documented under Model identity below. Allow at most
@@ -125,9 +150,10 @@ saving it.
 Save each verdict as `<run-dir>/phase3/verification-<X|Y-id>.md` (e.g.
 `verification-X3.md`), named by the anonymous ID the verifier was given.
 
-MUST NOT save it under the real `A<n>`/`B<n>` ID — the auditor reads this same
-directory. The orchestrator saves it; the verifier is pathless like the
-auditor (see Spawn the fresh auditor below).
+MUST NOT save it under the real `A<n>`/`B<n>` ID — the auditor reads these
+files. The orchestrator saves it and copies it into `<audit-input-dir>`; the
+verifier is pathless like the auditor (see Spawn the fresh auditor below).
+`build-brief.mjs --mode verifier` builds its prompt.
 
 These files become additional auditor input. `translate --verification-dir`
 parses each file's own `Claim:`/`Verdict:` lines and refuses if either
@@ -145,19 +171,32 @@ of the orchestrator's own conversation (e.g. an `Agent` tool call with
 would hand the auditor the orchestrator's own conversation, which by Phase 3
 already contains both un-relabeled findings files, the coin-flip mapping, and
 seat identity — the exact leak the fresh-context auditor exists to prevent.
-Give it ONLY:
+Give it ONLY the staged `<audit-input-dir>` (see Coin flip above), which holds:
 
 - the original task packet;
 - the relabeled `X`/`Y` combined findings;
-- any `phase3/verification-<X|Y-id>.md` files from the Falsification pass
-  above;
-- read-only access to the exact Phase 1 target snapshot (the isolated
-  worktree path for a seat that used `--isolate`, the target directory
-  otherwise — never a later, drifted working-tree state);
-- review-protocol.md.
+- any `verification-<X|Y-id>.md` files from the Falsification pass above
+  (copied in from `phase3/`);
+- review-protocol.md;
+
+plus read-only access to the exact Phase 1 target snapshot (the isolated
+worktree path for a seat that used `--isolate`, the target directory otherwise
+— never a later, drifted working-tree state). Never point it at the run
+directory or `phase3/`.
 
 MUST NOT give it seat identity, provider/model names, dispatch transcripts, or
 this skill's own SKILL.md. The auditor MUST NOT modify the target.
+
+Build its prompt with `build-brief.mjs`, which refuses a staged folder that
+holds real-letter, mapping or temp files, and give it one output path inside
+the staged folder so it writes the JSON itself instead of returning 30-40 KB of
+text for the orchestrator to retype:
+
+```text
+node "<skill-dir>/scripts/build-brief.mjs" --mode auditor --packet "<audit-input-dir>/task-packet.md" --audit-dir "<audit-input-dir>" --target-dir "<target-dir>" --out "<run-dir>/phase3-private/auditor-brief.txt" --output-path "<audit-input-dir>/findings.audit.json"
+```
+
+Tell the auditor to read that brief file. Its instructions are the list below.
 
 Instruct it to:
 
@@ -255,11 +294,13 @@ does not eliminate self-preference risk; it is not vendor-neutral adjudication.
 
 ## Translate back and build the scorecard
 
-Save the auditor's raw returned JSON as `<run-dir>/phase3/findings.audit.json`
-(still `X`/`Y` IDs throughout — do not hand-edit or hand-translate it). Run:
+Copy the auditor's `<audit-input-dir>/findings.audit.json` to
+`<run-dir>/phase3/findings.audit.json` (still `X`/`Y` IDs throughout — do not
+hand-edit or hand-translate it). If the auditor could only return text, save
+that reply with a script, never by retyping it. Run:
 
 ```text
-node "<skill-dir>/scripts/blind-relabel.mjs" translate --in "<run-dir>/phase3/findings.audit.json" --out "<run-dir>/phase3/findings.json" --mapping "<run-dir>/phase3/seat-to-audit-label.json" --phase1-dir "<run-dir>/phase1" --verification-dir "<run-dir>/phase3"
+node "<skill-dir>/scripts/blind-relabel.mjs" translate --in "<run-dir>/phase3/findings.audit.json" --out "<run-dir>/phase3/findings.json" --mapping "<run-dir>/phase3-private/seat-to-audit-label.json" --phase1-dir "<run-dir>/phase1" --verification-dir "<run-dir>/phase3"
 ```
 
 Omit `--verification-dir` when the Falsification pass did not run this round.
@@ -278,7 +319,10 @@ as complete until it exits 0. Causes include:
   claim from either seat that is the origin of no finding at all (catches one
   the auditor silently dropped);
 - with `--verification-dir`: a cited verification file missing on disk, or a
-  verification file on disk that no finding cites.
+  verification file on disk that no finding cites;
+- a prose field (`summary`, `recommended_fix`, `title`) that contains one of the
+  run's anonymous claim IDs or a peer `P` label. Ask the auditor to reword it;
+  do not edit the JSON yourself.
 
 Build the human-readable scorecard from the translated `findings.json`, one row
 per finding, not per origin claim:
@@ -332,7 +376,10 @@ manifest and whether both seats completed. Include key findings,
 the scorecard, prominent unresolved disagreements, execution limitations, pass
 counts (reviewer passes, blind rebuttal exchanges, whether the fresh auditor
 ran, falsification verifiers run — from `manifest.json`'s `falsification`
-object — never lump these together as generic "rounds"), and the auditor
-model-family limitation stated above. Unknown actual model/effort and
+object — never lump these together as generic "rounds"), the reason behind the
+falsification count in words (from `falsification.breakdown`, e.g. "0
+qualified: all 5 HIGH claims were conceded"), each seat's web usage as
+`<n> queries, <m> page fetches`, any `TRUST-BOUNDARY` lines from `scan
+--target-urls`, and the auditor model-family limitation stated above. Unknown actual model/effort and
 source-write audit results stay explicitly unknown. Never turn an incomplete
 review into a completed verdict.

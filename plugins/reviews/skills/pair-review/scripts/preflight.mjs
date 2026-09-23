@@ -26,16 +26,26 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { stat, writeFile } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { buildChildEnv } from './env-filter.mjs';
+import { hashInventory } from './snapshot-utils.mjs';
 import { killTree } from './spawn-utils.mjs';
 
 class RelayError extends Error {}
 
 const DEFAULT_TIMEOUT_S = 1800;
+const DEFAULT_TAIL_LINES = 20;
+const MAX_MATCH_LINES = 50;
+const MATCH_RE = /\b(fail(ed|ures?)?|errors?|not ok)\b|✖/i;
+// Passing-test and zero-count summary lines, which often carry "error" or "fail" in a test name.
+const PASS_LINE_RE = /^\s*(✔|ok\b|ℹ (pass|tests|suites|cancelled|skipped|todo|duration_ms|fail 0\b))/;
+
+function isSignalLine(line) {
+  return !PASS_LINE_RE.test(line) && MATCH_RE.test(line);
+}
 
 function printUsageAndExit(code) {
   process.stdout.write(USAGE);
@@ -48,6 +58,7 @@ Usage:
   node preflight.mjs --cd <path> [--exec "<command>"]... [--timeout <seconds>]
                  [--env-mode filtered|inherit] [--env-passthrough NAME,NAME]
                  [--out <path>] [--check-stale <snapshotHash>]
+                 [--compact [--tail <lines>] [--log-dir <dir>]]
 
 --cd <path>          Target directory. Required.
 --exec "<command>"   Opt in to Tier 2: run this shell command against --cd. May
@@ -69,17 +80,29 @@ Usage:
 --check-stale <hash>  Recompute --cd's CURRENT snapshot hash and report whether
                      it matches <hash> (typically a snapshotHash from a prior
                      preflight run's output). Prints {stale, currentSnapshotHash}
-                     and exits 0 if it matches, 1 if it does not (or if --cd is
-                     not a git repo) -- use this before citing old Tier 2
-                     evidence as EXECUTED basis for a live review. When given,
-                     no other tier runs; this flag is standalone.
+                     and exits 0 if it matches, 1 if it does not -- use this
+                     before citing old Tier 2 evidence as EXECUTED basis for a
+                     live review. When given, no other tier runs; this flag is
+                     standalone.
+--compact            Keep the result small enough to inline in a task packet:
+                     each command's full stdout/stderr, and the Tier 1 git diff,
+                     go to files under --log-dir, and the JSON keeps byte counts,
+                     sha256, the last --tail lines, and every line matching
+                     fail/error/not ok that is not a passing-test line (capped at
+                     ${MAX_MATCH_LINES}). The log files are the raw evidence to cite; the
+                     sha256 proves a log was not edited.
+--tail <lines>       Lines of each stream kept in the JSON with --compact.
+                     Default: ${DEFAULT_TAIL_LINES}.
+--log-dir <dir>      Where --compact writes the full logs. Default: "<--out>.logs"
+                     when --out is given; required otherwise.
 -h, --help           Print this message and exit 0.
 
 Output (normal run, no --check-stale): { tier1: {...}, tier2: {...} | null,
-snapshotHash: string | null }. snapshotHash is null only when --cd is not a
-git repository (Tier 2 then also refuses, since it needs a git HEAD to bind
-evidence against). No interpretive text is ever generated -- only raw
-command/exit/output facts.
+snapshotHash: string }. For a git repository the hash covers HEAD, the binary
+diff against HEAD, and untracked file contents. For a plain directory it is a
+content-hash inventory of every file (skipping .git/ and node_modules/), and
+tier1 reports gitRepo:false with the file count. No interpretive text is ever
+generated -- only raw command/exit/output facts.
 `;
 
 function parseArgs(argv) {
@@ -91,6 +114,9 @@ function parseArgs(argv) {
     envPassthrough: [],
     out: null,
     checkStale: null,
+    compact: false,
+    tail: DEFAULT_TAIL_LINES,
+    logDir: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -109,10 +135,20 @@ function parseArgs(argv) {
     else if (tok === '--env-passthrough') args.envPassthrough = takeValue().split(',').map((s) => s.trim()).filter(Boolean);
     else if (tok === '--out') args.out = takeValue();
     else if (tok === '--check-stale') args.checkStale = takeValue();
+    else if (tok === '--compact') args.compact = true;
+    else if (tok === '--tail') {
+      const v = takeValue();
+      if (!/^[0-9]+$/.test(v)) throw new RelayError('--tail must be a whole number of lines');
+      args.tail = Number(v);
+    } else if (tok === '--log-dir') args.logDir = takeValue();
     else if (tok === '-h' || tok === '--help') printUsageAndExit(0);
     else throw new RelayError(`unrecognized argument: ${tok}`);
   }
   if (!args.cd) throw new RelayError('--cd <path> is required');
+  if (args.compact && !args.logDir) {
+    if (!args.out) throw new RelayError('--compact needs --log-dir (or --out, which defaults it to "<--out>.logs")');
+    args.logDir = `${args.out}.logs`;
+  }
   if (args.envMode !== 'filtered' && args.envMode !== 'inherit') {
     throw new RelayError('--env-mode must be "filtered" or "inherit"');
   }
@@ -150,9 +186,11 @@ async function isGitRepo(cwd) {
 async function runTier1(cd) {
   const gitTracked = await isGitRepo(cd);
   if (!gitTracked) {
+    const inventory = await hashInventory(cd);
     return {
       gitRepo: false,
-      note: `"${cd}" is not a git repository; diff/status/changed-file evidence is unavailable`,
+      fileCount: Object.keys(inventory.files).length,
+      note: `"${cd}" is not a git repository; diff/status evidence is unavailable, and snapshotHash is a content-hash inventory of every file (skipping .git/ and node_modules/)`,
     };
   }
   // git diff HEAD (not bare `git diff`, working-tree-vs-index only) so
@@ -217,6 +255,7 @@ function sha256OfFile(filePath) {
 // computeSnapshotFingerprint (not exported there), but deliberately matches
 // its exact input coverage.
 async function computeSnapshotHash(cd) {
+  if (!(await isGitRepo(cd))) return (await hashInventory(cd)).snapshotHash;
   const headRes = await runCapture('git', ['rev-parse', 'HEAD'], cd);
   if (headRes.code !== 0) {
     throw new RelayError(`could not resolve HEAD in "${cd}" (not a git repo, or no commits yet)`);
@@ -345,18 +384,9 @@ async function run(args) {
 
   const tier1 = await runTier1(cdAbs);
 
-  let snapshotHash = null;
+  let snapshotHash = await computeSnapshotHash(cdAbs);
   let tier2 = null;
-  if (tier1.gitRepo) {
-    snapshotHash = await computeSnapshotHash(cdAbs);
-  }
   if (args.exec.length > 0) {
-    if (!tier1.gitRepo) {
-      throw new RelayError(
-        `--exec was given but "${cdAbs}" is not a git repository -- Tier 2 evidence requires a ` +
-          `snapshot hash to bind against, which needs a git HEAD to compute`
-      );
-    }
     tier2 = await runTier2({
       cd: cdAbs,
       commands: args.exec,
@@ -369,9 +399,58 @@ async function run(args) {
     // captured immediately before its first --exec command) -- both must
     // agree, since nothing in this process mutates the target between them.
     snapshotHash = tier2.snapshotHash;
+    if (args.compact) tier2 = await compactTier2(tier2, args);
   }
 
-  return { tier1, tier2, snapshotHash };
+  return { tier1: args.compact ? await compactTier1(tier1, args) : tier1, tier2, snapshotHash };
+}
+
+// The Tier 1 diff can be as large as the whole change under review; seats read it from the log or git.
+async function compactTier1(tier1, { logDir }) {
+  if (!tier1.gitRepo) return tier1;
+  const dir = path.resolve(logDir);
+  await mkdir(dir, { recursive: true });
+  const diffLog = path.join(dir, 'tier1.diff');
+  await writeFile(diffLog, tier1.diff, 'utf8');
+  const { diff, ...rest } = tier1;
+  return {
+    ...rest,
+    diff: { bytes: Buffer.byteLength(diff, 'utf8'), sha256: sha256(Buffer.from(diff, 'utf8')), log: diffLog },
+  };
+}
+
+function streamSummary(text, tailLines) {
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const matches = lines.filter(isSignalLine);
+  return {
+    bytes: Buffer.byteLength(text, 'utf8'),
+    sha256: sha256(Buffer.from(text, 'utf8')),
+    lineCount: lines.length,
+    tail: tailLines > 0 ? lines.slice(-tailLines) : [],
+    matches: matches.slice(0, MAX_MATCH_LINES),
+    matchesTruncated: matches.length > MAX_MATCH_LINES,
+  };
+}
+
+// Full streams go to --log-dir; the JSON keeps only what a reader needs to judge and verify them.
+async function compactTier2(tier2, { logDir, tail }) {
+  const dir = path.resolve(logDir);
+  await mkdir(dir, { recursive: true });
+  const results = [];
+  for (const [i, r] of tier2.results.entries()) {
+    const stdoutLog = path.join(dir, `command-${i + 1}.stdout.log`);
+    const stderrLog = path.join(dir, `command-${i + 1}.stderr.log`);
+    await writeFile(stdoutLog, r.stdout, 'utf8');
+    await writeFile(stderrLog, r.stderr, 'utf8');
+    const { stdout, stderr, ...rest } = r;
+    results.push({
+      ...rest,
+      stdout: { ...streamSummary(stdout, tail), log: stdoutLog },
+      stderr: { ...streamSummary(stderr, tail), log: stderrLog },
+    });
+  }
+  return { snapshotHash: tier2.snapshotHash, compact: true, results };
 }
 
 async function main() {
@@ -420,4 +499,4 @@ if (isDirectRun) {
   });
 }
 
-export { parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, runCapture, isGitRepo };
+export { parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo };

@@ -1,5 +1,68 @@
 # Changelog
 
+## 1.6.0 - 2026-09-22
+
+Fixes from a cross-review of the skill itself, plus field feedback from
+three live runs.
+
+- Fixed blinding leaks:
+  - A vendor name in the target repo's branch name or an ignored folder
+    exempted that name everywhere, so a real identity leak scanned clean.
+  - The docs pointed the auditor at a folder that also held the seat
+    mapping. The auditor now reads only a staged folder that
+    `audit-prep` builds.
+  - Peer labels such as "P12" survived into the auditor's files. A new
+    scan check stops them.
+- Fixed corrupted findings.json fields:
+  - "Suggested fix:" lines, and the fence lines of back-to-back evidence
+    blocks, leaked into `evidence`.
+  - Relabel and translate rewrote any letter-plus-digits token, so a
+    product name like "A100" became "P100". They now rewrite only real
+    claim IDs, and translate refuses a claim ID in the auditor's prose
+    fields.
+- Fixed false hard stops: vendor names now match whole words only, so
+  "affable" no longer matches "fable".
+- New commands:
+  - `append-rebuttals` checks Phase 2 coverage and appends translated
+    rebuttals.
+  - `audit-prep` runs the whole Phase 3 double relabel and scan.
+  - `build-brief.mjs` builds every brief from the protocol's own text.
+  - `scan --target-urls` reports when a reviewer cited a URL taken from
+    the reviewed document.
+- Lower token use without lower quality:
+  - The Claude seat and the auditor now write their own result files.
+    This removes about 70 KB of retyped text per run.
+  - `preflight --compact` keeps full test logs and the git diff on disk
+    instead of pasting them into every brief. On this repo that cuts the
+    pre-flight JSON from 66 KB to 21 KB.
+  - Redaction rounds now send only the flagged lines.
+  - Trade-off, on purpose: a `build-brief.mjs` Phase 1 brief is about 5 KB
+    larger than a typical hand-written one, because it always carries the
+    full rule text.
+- Targets that are not git repositories now get a content-hash snapshot:
+  pre-flight can prove the target did not change, and dispatchers report
+  which files a reviewer touched instead of "unknown".
+- Protocol additions:
+  - A severity rubric, with acceptance risk rated separately from code
+    risk.
+  - A data-exposure lens for serial numbers, WWN/NAA IDs and hostnames in
+    captures.
+  - Freezing an extracted copy of a .docx/.pdf target.
+  - A web-usage counting unit.
+  - The reason behind a zero falsification count.
+  - Pristine Phase 1 copies for the manifest hashes.
+  - A documented resume call for the Claude seat.
+  - Unverified orchestrator hypotheses (`H1`, `H2`, ...) for seats to
+    test.
+- `build-manifest` refuses two files with the same name instead of
+  silently keeping one hash.
+- The docs now say that dispatchers stop a seat after 30 minutes unless
+  `--timeout` says otherwise.
+- The model list lives only in the catalog, and GPT-6 Sol and GPT-6 Luna
+  were added to it.
+- This release also carries the version bump 1.5.0 missed: plugin.json
+  and both SKILL.md files still said 1.4.0.
+
 ## 1.5.0 - 2026-09-20
 
 - Fixed a real identity-blinding bug: on a CRLF (Windows-line-ending) Phase 1

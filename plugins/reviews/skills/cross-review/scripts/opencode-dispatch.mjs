@@ -43,6 +43,7 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { buildChildEnv } from './env-filter.mjs';
+import { hashInventory, diffInventories } from './snapshot-utils.mjs';
 import {
   assertWin32Safe,
   winQuote,
@@ -166,8 +167,9 @@ Output:
   result.json fields:
     sessionId     string|null   OpenCode session id, if one was observed.
     finalMessage  string        Last "text" event's part.text seen in the event stream.
-    touchedFiles  string[]|null Same git-porcelain-diff mechanism as codex-dispatch.mjs.
-                                 null (not []) when --cd is not a git repo. Under --isolate,
+    touchedFiles  string[]|null Same mechanism as codex-dispatch.mjs: git porcelain diff,
+                                 or a before/after content-hash inventory for a non-git
+                                 --cd. null (not []) when either probe fails. Under --isolate,
                                  this is measured against the worktree, so a nonempty value
                                  means OpenCode wrote into its own disposable copy, not --cd.
     touchedFilesNote string     Present only when touchedFiles is null; explains why.
@@ -1060,18 +1062,19 @@ async function main() {
 
   let gitTracked = false;
   let beforeStatus = null;
+  let beforeInventory = null;
   let touchedFilesNote;
   try {
     gitTracked = await isGitRepo(cdAbs);
     if (gitTracked) {
       beforeStatus = await gitStatusPorcelain(cdAbs);
     } else {
-      touchedFilesNote = `--cd "${cdAbs}" is not a git repository; file changes cannot be tracked`;
-      log(touchedFilesNote);
+      beforeInventory = (await hashInventory(cdAbs)).files;
     }
   } catch (err) {
     gitTracked = false;
-    touchedFilesNote = `git baseline capture failed, touchedFiles tracking disabled: ${err.message}`;
+    beforeInventory = null;
+    touchedFilesNote = `baseline capture failed, touchedFiles tracking disabled: ${err.message}`;
     log(touchedFilesNote);
   }
 
@@ -1108,6 +1111,14 @@ async function main() {
       touchedFiles = diffTouchedFiles(beforeStatus, afterStatus);
     } catch (err) {
       touchedFilesNote = `git after-run status failed, touchedFiles will be null: ${err.message}`;
+      log(touchedFilesNote);
+      touchedFiles = null;
+    }
+  } else if (beforeInventory) {
+    try {
+      touchedFiles = diffInventories(beforeInventory, (await hashInventory(cdAbs)).files);
+    } catch (err) {
+      touchedFilesNote = `after-run file inventory failed, touchedFiles will be null: ${err.message}`;
       log(touchedFilesNote);
       touchedFiles = null;
     }
