@@ -188,105 +188,21 @@ MUST NOT give it seat identity, provider/model names, dispatch transcripts, or
 this skill's own SKILL.md. The auditor MUST NOT modify the target.
 
 Build its prompt with `build-brief.mjs`, which refuses a staged folder that
-holds real-letter, mapping or temp files, and give it one output path inside
+holds real-letter, mapping or temp files, a staged folder inside the run
+directory, or a task packet that mentions the run directory (for example a
+pre-flight log path), and give it one output path inside
 the staged folder so it writes the JSON itself instead of returning 30-40 KB of
 text for the orchestrator to retype:
 
 ```text
-node "<skill-dir>/scripts/build-brief.mjs" --mode auditor --packet "<audit-input-dir>/task-packet.md" --audit-dir "<audit-input-dir>" --target-dir "<target-dir>" --out "<run-dir>/phase3-private/auditor-brief.txt" --output-path "<audit-input-dir>/findings.audit.json"
+node "<skill-dir>/scripts/build-brief.mjs" --mode auditor --packet "<audit-input-dir>/task-packet.md" --audit-dir "<audit-input-dir>" --target-dir "<target-dir>" --run-dir "<run-dir>" --out "<run-dir>/phase3-private/auditor-brief.txt" --output-path "<audit-input-dir>/findings.audit.json"
 ```
 
 Tell the auditor to read that brief file. Its instructions are the list below.
 
-Instruct it to:
-
-1. Spot-check the highest-impact or most-contested claims itself, using its
-   own read-only target access — this is what makes "Verification: the
-   auditor's own independent check" a real check and not just re-weighing the
-   two reviewers' own arguments.
-2. For every surviving claim, apply review-protocol.md's rebuttal-overturn rule
-   (a rebuttal only overturns a claim with a specific checkable counter-fact,
-   never bare disagreement) and its SPECULATIVE-claim-drop rule, then produce
-   the adjudication-added fields (Peer response, Verification, Final state)
-   defined in review-protocol.md's Synthesis section. A claim whose `Basis:
-   SOURCE_CITATION` includes a URL and quoted text per review-protocol.md's Web
-   verification section is a checkable counter-fact like any other citation —
-   weigh it against a peer's text-only rebuttal the same way any cited source
-   outweighs bare disagreement, never specially discounted or specially
-   trusted merely for being web-sourced. The auditor has no web access itself
-   (see Not built by this feature in review-protocol.md's Web verification
-   section) and does not re-fetch a cited URL to confirm it; it is not
-   spot-checking the citation's accuracy, only weighing it as evidence the
-   same way it weighs an executed repro it also cannot independently re-run
-   from a text transcript alone.
-3. Group surviving claims (including a dropped-SPECULATIVE one — grouping is
-   not filtering) into canonical findings per review-protocol.md's Canonical
-   findings section. MUST only merge claims asserting the SAME underlying
-   defect, never merely the same file or area; when in doubt, keep them
-   separate.
-
-   The `Verification` field from step 2 has its structured `findings.json`
-   home HERE, recorded once per canonical finding (not once per origin claim
-   — per-origin granularity is deferred) as an `auditor_check: {result,
-   basis, evidence}` object:
-
-   - `result` MUST be one of `CONFIRMED`/`REFUTED`/`INCONCLUSIVE`/`NOT_CHECKED`
-     (`NOT_CHECKED` when none of this finding's origin claims were
-     spot-checked in step 1).
-   - `evidence` MUST be a non-empty string, and `basis` MUST be one of
-     `EXECUTED`/`STATIC_TRACE`/`SOURCE_CITATION`/`INFERENCE` (the same enum a
-     verifier's own `Basis:` line uses) — UNLESS `result` is `NOT_CHECKED`, in
-     which case both MUST be `null`.
-
-   Instruct the auditor: never record `settled-agree` on a finding with a
-   `disputed-with-counter-fact` peer response unless a `CONFIRMED`
-   `verifications[]` entry exists for it — its own `auditor_check.result:
-   CONFIRMED` alone does not qualify. `translate` refuses:
-
-   - any finding missing the `auditor_check` object;
-   - `settled-refuted` when `result` is `CONFIRMED`, and `settled-agree` when
-     `result` is `REFUTED` — the auditor cannot both independently settle a
-     claim one way and record the opposite `final_state`;
-   - `settled-agree` UNLESS at least one of `independently_discovered`, a
-     `conceded` peer response, or a `CONFIRMED` verification actually exists.
-     Exception does not apply the other way: `result: CONFIRMED` alone is NOT
-     enough, unlike `settled-refuted`'s `REFUTED` route — review-protocol.md's
-     `settled-agree` definition has no equivalent auditor-alone clause;
-   - `settled-agree` when any peer response is `disputed-with-counter-fact`,
-     UNLESS a `verifications[]` entry for that finding is `CONFIRMED` — the
-     falsification verifier's CONFIRMED verdict is the protocol's own
-     designated mechanism for settling a disputed claim in its favor;
-   - `dropped-speculative` UNLESS the finding is genuinely SPECULATIVE, not
-     independently discovered by both seats, unattacked by any peer response,
-     `result` is not `CONFIRMED` or `REFUTED`, and it has no `verifications`
-     entry — a falsification verifier having checked it at all, any verdict,
-     means it is no longer merely an untouched speculative claim;
-   - any finding whose `verifications[]` has a `CONFIRMED` verdict alongside
-     `settled-refuted`, or a `REFUTED` verdict alongside `settled-agree`, for
-     any origin — one origin's verdict speaks for the whole canonical
-     finding.
-
-   Emit one `F<n>` JSON object per finding with `origins` listing every
-   `X`/`Y` claim ID it covers, per the `findings.json` schema in
-   review-protocol.md. IDs are sequential integers only (`F1`, `F2`, `F3`,
-   ...), never sub-lettered (`F8a`/`F8b`) — an origin claim describing two
-   independent sub-defects is one over-broad claim, not two findings; put
-   both under the one `F` instead. The auditor returns this shape under `X`/`Y` IDs as its
-   own output; it never computes or sees `independently_discovered` — that
-   field is derived mechanically after translate-back, not the auditor's job.
-   State this explicitly in the auditor's own task prompt, since the auditor
-   has no other way to know it: the returned JSON MUST be a top-level object
-   with a `findings` array, e.g. `{"findings": [...]}`, never a bare array of
-   finding objects — `translate` refuses a bare array outright (any other
-   top-level keys, including `protocol`, are ignored on input and overwritten
-   on output, so the auditor does not need to supply one).
-
-   If any of a finding's origins has a `phase3/verification-<claim-id>.md`
-   file, record it as a `verifications` entry `{ claim, verdict }` on that
-   finding. `basis` and `evidence` are NOT the auditor's to supply —
-   `translate` reads the verifier file itself and populates both from its own
-   `Basis:`/`Evidence:` lines, refusing if the file's `Verdict:` disagrees
-   with what's recorded here.
+Its instructions are review-protocol.md's Auditor instructions (under
+Fresh-context auditor), which `build-brief.mjs --mode auditor` copies into the
+brief verbatim; both skills use that one list.
 
 State this limitation explicitly in the eventual report: the auditor is still
 the same model family as one or both reviewers (Claude), so this bounds but

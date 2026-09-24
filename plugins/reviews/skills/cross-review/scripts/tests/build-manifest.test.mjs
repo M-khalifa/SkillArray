@@ -175,4 +175,6 @@ test('CLI end-to-end: node build-manifest.mjs writes a valid stamped manifest to
   const output = JSON.parse(await fs.readFile(outPath, 'utf8'));
   assert.ok(output.run_id);
   assert.equal(output.hashes.task_packet, sha256(Buffer.from('cli test content')));
+  assert.match(result.stdout, new RegExp(`build-manifest: wrote .*\\(run_id ${output.run_id}\\)`),
+    'success must print a line, so a wrapper can tell success from silence');
 });

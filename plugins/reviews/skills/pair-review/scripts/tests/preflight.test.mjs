@@ -71,6 +71,48 @@ test('checkStale: a non-git directory reports stale after any file content chang
   assert.equal((await checkStale(dir, hash)).stale, true);
 });
 
+test('computeSnapshotHash: in a monorepo, a commit or edit in a sibling folder does not make the --cd folder stale, but an edit inside it does', async (t) => {
+  const dir = await makeGitRepo(t);
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(path.join(dir, 'apps', 'unity'), { recursive: true });
+  await mkdir(path.join(dir, 'apps', 'pure'), { recursive: true });
+  await writeFile(path.join(dir, 'apps', 'unity', 'api.py'), 'v1\n', 'utf8');
+  await writeFile(path.join(dir, 'apps', 'pure', 'api.py'), 'v1\n', 'utf8');
+  git(['add', '.'], dir);
+  git(['commit', '-q', '-m', 'apps'], dir);
+  const target = path.join(dir, 'apps', 'unity');
+  const hash = await computeSnapshotHash(target);
+  await writeFile(path.join(dir, 'apps', 'pure', 'api.py'), 'v2\n', 'utf8');
+  assert.equal((await checkStale(target, hash)).stale, false, 'an uncommitted sibling edit');
+  git(['commit', '-q', '-am', 'pure fix'], dir);
+  assert.equal((await checkStale(target, hash)).stale, false, 'a sibling commit moves HEAD but not this tree');
+  await writeFile(path.join(target, 'api.py'), 'v2\n', 'utf8');
+  assert.equal((await checkStale(target, hash)).stale, true, 'an edit inside the target');
+});
+
+test('run(): a Tier 2 command that writes into the target is reported in touchedFiles and targetChanged, including a re-edit of an already-dirty file', async (t) => {
+  const dir = await makeGitRepo(t);
+  await writeFile(path.join(dir, 'a.txt'), 'dirty before preflight\n', 'utf8');
+  const cmd = `node -e "require('fs').writeFileSync('dump.bin','x'); require('fs').appendFileSync('a.txt','more\\n')"`;
+  const result = await run({ cd: dir, exec: [cmd], timeout: 30, envMode: 'filtered', envPassthrough: [] });
+  assert.deepEqual(result.tier2.results[0].touchedFiles, ['a.txt', 'dump.bin']);
+  assert.equal(result.tier2.targetChanged, true);
+  const clean = await run({ cd: dir, exec: ['echo hi'], timeout: 30, envMode: 'filtered', envPassthrough: [] });
+  assert.deepEqual(clean.tier2.results[0].touchedFiles, []);
+  assert.equal(clean.tier2.targetChanged, false);
+});
+
+test('run(): --compact keeps the test-runner total line in summary even when warnings push it out of --tail', async (t) => {
+  const dir = await makeGitRepo(t);
+  const logDir = path.join(dir, '..', `${path.basename(dir)}-sumlogs`);
+  t.after(() => rm(logDir, { recursive: true, force: true }));
+  const cmd = `node -e "console.log('===== 212 passed, 3 warnings in 9.1s ====='); for (let i = 0; i < 10; i++) console.log('warning ' + i)"`;
+  const result = await run({ cd: dir, exec: [cmd], timeout: 30, envMode: 'filtered', envPassthrough: [], compact: true, tail: 3, logDir });
+  const out = result.tier2.results[0].stdout;
+  assert.ok(!out.tail.some((l) => l.includes('212 passed')));
+  assert.deepEqual(out.summary, ['===== 212 passed, 3 warnings in 9.1s =====']);
+});
+
 test('parseArgs: --compact without --log-dir or --out is refused, and with --out the log dir defaults next to it', () => {
   assert.throws(() => parseArgs(['--cd', '.', '--compact']), /--compact needs --log-dir/);
   const args = parseArgs(['--cd', '.', '--compact', '--out', 'pf.json', '--tail', '5']);
@@ -361,7 +403,7 @@ test('run(): this is a thin executor, never an analyzer -- the output carries on
   const tier2ResultKeys = new Set(Object.keys(result.tier2.results[0]));
   for (const k of tier2ResultKeys) {
     assert.ok(
-      ['command', 'startedAt', 'finishedAt', 'durationMs', 'exitCode', 'timedOut', 'stdout', 'stderr'].includes(k),
+      ['command', 'startedAt', 'finishedAt', 'durationMs', 'exitCode', 'timedOut', 'touchedFiles', 'stdout', 'stderr'].includes(k),
       `unexpected key on a tier2 result: "${k}"`
     );
   }

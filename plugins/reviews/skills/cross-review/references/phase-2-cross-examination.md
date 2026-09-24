@@ -84,8 +84,15 @@ delta brief that the seat already has.
 For a Codex seat B:
 
 ```text
-node "<skill-dir>/scripts/codex-dispatch.mjs" --session EXACT_PHASE1_THREAD_ID --cd "<target-dir>" --brief "<run-dir>/phase2/B/delta-brief.txt" --model SAME_SELECTED_MODEL --web
+node "<skill-dir>/scripts/codex-dispatch.mjs" --session EXACT_PHASE1_THREAD_ID --cd "<target-dir>" --brief "<run-dir>/phase2/B/delta-brief.txt" --model SAME_SELECTED_MODEL --web --previous-result "<run-dir>/phase1/B/result.json"
 ```
+
+Codex reports `usage` cumulatively for the whole thread, so a resumed call's
+`usage` includes Phase 1. `--previous-result` makes the dispatcher also write
+`usage_delta`, this call's own tokens; report `usage_delta` per phase. For a
+later redaction resume, pass the most recent `result.json` of the same thread.
+For the input/cached/output columns use `input_tokens`, `cached_input_tokens`
+and `output_tokens`; `reasoning_tokens` is a separate count.
 
 Append the same non-default `--effort`, if selected. Do not pass `--sandbox`
 on resume: the dispatcher omits it and `--cd` from Codex's resume arguments.
@@ -130,8 +137,8 @@ append each seat's rebuttals to the PEER's findings file with one command
 per direction:
 
 ```text
-node "<skill-dir>/scripts/blind-relabel.mjs" append-rebuttals --in "<run-dir>/phase2/A-rebuttals-raw.md" --onto "<run-dir>/phase1/B-findings.md" --rebutter A --peer-view "<run-dir>/phase2/peer-view-for-A.md"
-node "<skill-dir>/scripts/blind-relabel.mjs" append-rebuttals --in "<run-dir>/phase2/B-rebuttals-raw.md" --onto "<run-dir>/phase1/A-findings.md" --rebutter B --peer-view "<run-dir>/phase2/peer-view-for-B.md"
+node "<skill-dir>/scripts/blind-relabel.mjs" append-rebuttals --in "<run-dir>/phase2/A-rebuttals-raw.md" --onto "<run-dir>/phase1/B-findings.md" --rebutter A --peer-view "<run-dir>/phase2/peer-view-for-A.md" --target-dir "<target-dir>"
+node "<skill-dir>/scripts/blind-relabel.mjs" append-rebuttals --in "<run-dir>/phase2/B-rebuttals-raw.md" --onto "<run-dir>/phase1/A-findings.md" --rebutter B --peer-view "<run-dir>/phase2/peer-view-for-B.md" --target-dir "<target-dir>"
 ```
 
 `append-rebuttals` checks that every peer claim got exactly one entry,

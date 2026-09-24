@@ -149,7 +149,8 @@ async function main() {
     throw err;
   }
   try {
-    await run(args);
+    const stamped = await run(args);
+    process.stdout.write(`build-manifest: wrote ${args.out} (run_id ${stamped.run_id})\n`);
   } catch (err) {
     if (err instanceof RelayError) {
       process.stderr.write(`build-manifest.mjs: ${err.message}\n`);

@@ -69,7 +69,7 @@ Usage:
   node codex-dispatch.mjs --brief <path> --cd <path> [--session <threadId>]
                  [--sandbox <mode>] [--skip-git-repo-check] [--model <id>] [--effort <level>]
                  [--timeout <seconds>] [--env-mode filtered|inherit] [--env-passthrough NAME,NAME]
-                 [--web]
+                 [--web] [--previous-result <result.json>]
 
 Required:
   --brief <path>         Path to a text file containing the prompt/brief to send to Codex.
@@ -117,6 +117,9 @@ Optional:
   --env-passthrough <names>  Comma-separated extra environment variable names to allow through
                          under --env-mode filtered (e.g. a provider auth var this allowlist
                          doesn't already cover). Ignored under --env-mode inherit.
+  --previous-result <path>  On a --session resume, the result.json of the previous call on
+                         the same thread; used only to compute usage_delta (this call's own
+                         tokens). It never changes what codex runs.
   --web                  Enable Codex's native live web search (the Responses API's
                          web_search tool) by passing --search to "codex". This flag is
                          GLOBAL on the codex CLI and must precede the "exec" subcommand
@@ -177,6 +180,13 @@ Output:
                                  estimated_cost_usd is always null: no price table is embedded
                                  in this dispatcher, cost is computed downstream from an
                                  explicit, versioned price file.
+                                 usage is CUMULATIVE for the whole codex thread: a resumed
+                                 call reports everything the thread has used so far.
+    usage_delta   object        This call's own cost. A fresh thread: the same numbers as usage
+                                 (source "fresh-thread"). A resume given --previous-result
+                                 <that thread's last result.json>: usage minus that file's
+                                 usage (source "delta-from-previous-result"). Otherwise
+                                 {source: "unavailable", reason}.
 
   Session identity: on --session, the resumed run must emit a thread.started event whose
   thread_id equals the requested session. If it does not, the run fails closed with status
@@ -211,6 +221,7 @@ function parseArgs(argv) {
     envMode: 'filtered',
     envPassthrough: [],
     web: false,
+    previousResult: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -228,6 +239,9 @@ function parseArgs(argv) {
         break;
       case '--brief':
         args.brief = takeValue();
+        break;
+      case '--previous-result':
+        args.previousResult = takeValue();
         break;
       case '--cd':
         args.cd = takeValue();
@@ -555,6 +569,27 @@ function buildUsageField(rawUsage) {
   };
 }
 
+const USAGE_DELTA_KEYS = ['input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_tokens'];
+
+// Codex reports usage cumulatively for a thread, so a resumed call's own cost is its total minus
+// the previous call's total on the same thread; a fresh thread's total is already its own cost.
+function buildUsageDelta(usage, { session, threadId, previous }) {
+  if (usage.source !== 'provider') return { source: 'unavailable', reason: 'no usage reported for this call' };
+  const pick = (u) => Object.fromEntries(USAGE_DELTA_KEYS.map((k) => [k, u[k] ?? null]));
+  if (!session) return { ...pick(usage), source: 'fresh-thread' };
+  if (!previous) return { source: 'unavailable', reason: 'resumed thread: pass --previous-result <the last result.json of this thread>' };
+  if (previous.threadId !== threadId || previous.usage?.source !== 'provider') {
+    return { source: 'unavailable', reason: '--previous-result is not a completed result for this thread' };
+  }
+  const delta = {};
+  for (const k of USAGE_DELTA_KEYS) {
+    const now = usage[k];
+    const before = previous.usage[k];
+    delta[k] = Number.isFinite(now) && Number.isFinite(before) ? now - before : null;
+  }
+  return { ...delta, source: 'delta-from-previous-result' };
+}
+
 // Fails closed rather than trusting whatever thread_id the child emits: a
 // resume must echo back the exact requested id, or a caller can silently get
 // a fresh, context-free session instead of the one it asked to resume.
@@ -750,6 +785,17 @@ async function main() {
   if (touchedFiles === null && touchedFilesNote) {
     baseFields.touchedFilesNote = touchedFilesNote;
   }
+  let previous = null;
+  if (args.previousResult) {
+    try {
+      previous = JSON.parse(await fs.readFile(args.previousResult, 'utf8'));
+    } catch (err) {
+      log(`--previous-result unreadable, usage_delta will be unavailable: ${err.message}`);
+    }
+  }
+  baseFields.usage_delta = buildUsageDelta(baseFields.usage, {
+    session: args.session, threadId: codexResult.threadId, previous,
+  });
 
   if (codexResult.timedOut) {
     const msg = `codex exec killed after exceeding --timeout ${args.timeout}s`;
@@ -843,5 +889,6 @@ export {
   spawnCli,
   buildChildEnv,
   buildUsageField,
+  buildUsageDelta,
   killTree,
 };

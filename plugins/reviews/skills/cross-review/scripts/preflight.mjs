@@ -31,7 +31,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { buildChildEnv } from './env-filter.mjs';
-import { hashInventory } from './snapshot-utils.mjs';
+import { diffInventories, hashInventory } from './snapshot-utils.mjs';
 import { killTree } from './spawn-utils.mjs';
 
 class RelayError extends Error {}
@@ -42,6 +42,8 @@ const MAX_MATCH_LINES = 50;
 const MATCH_RE = /\b(fail(ed|ures?)?|errors?|not ok)\b|✖/i;
 // Passing-test and zero-count summary lines, which often carry "error" or "fail" in a test name.
 const PASS_LINE_RE = /^\s*(✔|ok\b|ℹ (pass|tests|suites|cancelled|skipped|todo|duration_ms|fail 0\b))/;
+// Test-runner totals (node:test, pytest, mocha/jest, TAP), kept even when they fall outside --tail.
+const SUMMARY_RE = /^\s*(ℹ (tests|pass|fail) \d+|=+ .*\b\d+ (passed|failed|errors?)\b.*=+|\d+ (passing|failing|pending)\b|Tests?:\s+.*\d+ (passed|failed|total)|# (tests|pass|fail) \d+)/i;
 
 function isSignalLine(line) {
   return !PASS_LINE_RE.test(line) && MATCH_RE.test(line);
@@ -98,11 +100,16 @@ Usage:
 -h, --help           Print this message and exit 0.
 
 Output (normal run, no --check-stale): { tier1: {...}, tier2: {...} | null,
-snapshotHash: string }. For a git repository the hash covers HEAD, the binary
-diff against HEAD, and untracked file contents. For a plain directory it is a
-content-hash inventory of every file (skipping .git/ and node_modules/), and
-tier1 reports gitRepo:false with the file count. No interpretive text is ever
-generated -- only raw command/exit/output facts.
+snapshotHash: string }. For a git repository the hash covers only the --cd
+folder: its committed tree, its binary diff against HEAD, and its untracked
+file contents, so changes elsewhere in a monorepo do not make it stale. For a
+plain directory it is a content-hash inventory of every file (skipping .git/
+and node_modules/), and tier1 reports gitRepo:false with the file count.
+tier2 also reports snapshotHashAfter and targetChanged, and each command's
+touchedFiles: files under --cd it created, changed, or deleted (gitignored
+output is not covered). A test suite that writes into the target before the
+seats start shows up here. No interpretive text is ever generated -- only raw
+command/exit/output facts.
 `;
 
 function parseArgs(argv) {
@@ -246,27 +253,26 @@ function sha256OfFile(filePath) {
   });
 }
 
-// Matches opencode-dispatch.mjs's computeSnapshotFingerprint coverage: HEAD +
-// `git diff HEAD --binary` (so a binary file change is distinguishable, not
-// collapsed to the same "Binary files differ" text every time) + a content
-// hash per untracked file (so a Phase 1 seat CREATING a new file, not just
-// editing a tracked one, is also detected as a state change). This is a
-// separate implementation from opencode-dispatch.mjs's private
-// computeSnapshotFingerprint (not exported there), but deliberately matches
-// its exact input coverage.
+// Scoped to --cd: the committed tree of that folder, its binary diff against HEAD (so a binary
+// change is distinguishable), and a content hash per untracked file (so a created file counts).
+// A commit or edit elsewhere in a monorepo does not make this target's evidence stale.
 async function computeSnapshotHash(cd) {
   if (!(await isGitRepo(cd))) return (await hashInventory(cd)).snapshotHash;
   const headRes = await runCapture('git', ['rev-parse', 'HEAD'], cd);
   if (headRes.code !== 0) {
     throw new RelayError(`could not resolve HEAD in "${cd}" (not a git repo, or no commits yet)`);
   }
-  const diffRes = await runCapture('git', ['diff', 'HEAD', '--binary'], cd);
+  const prefix = (await runCapture('git', ['rev-parse', '--show-prefix'], cd)).stdout.toString('utf8').trim();
+  const treeRes = await runCapture('git', ['rev-parse', `HEAD:${prefix}`], cd);
+  // A folder that exists only in the working tree has no committed tree yet.
+  const treeId = treeRes.code === 0 ? treeRes.stdout.toString('utf8').trim() : 'no-committed-tree';
+  const diffRes = await runCapture('git', ['diff', 'HEAD', '--binary', '--relative', '--', '.'], cd);
   const untrackedRes = await runCapture('git', ['ls-files', '--others', '--exclude-standard', '-z'], cd);
   const rawUntracked = untrackedRes.stdout.toString('utf8').split('\0').filter((p) => p.length > 0);
   const untrackedPaths = rawUntracked.filter((p) => !p.endsWith('/')).sort();
 
   const hash = createHash('sha256');
-  hash.update(headRes.stdout.toString('utf8').trim());
+  hash.update(treeId);
   hash.update('\n');
   hash.update(diffRes.stdout);
   for (const rel of untrackedPaths) {
@@ -345,7 +351,9 @@ async function runTier2({ cd, commands, timeout, envMode, envPassthrough }, spaw
   for (const command of commands) {
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
+    const before = await contentState(cd);
     const result = await runWithTimeout(command, { cd, env, timeout }, spawnOpts);
+    const after = await contentState(cd);
     results.push({
       command,
       startedAt,
@@ -353,11 +361,37 @@ async function runTier2({ cd, commands, timeout, envMode, envPassthrough }, spaw
       durationMs: Date.now() - startedAtMs,
       exitCode: result.code,
       timedOut: result.timedOut,
+      touchedFiles: diffInventories(before, after),
       stdout: result.stdout,
       stderr: result.stderr,
     });
   }
-  return { snapshotHash, results };
+  const snapshotHashAfter = await computeSnapshotHash(cd);
+  return { snapshotHash, snapshotHashAfter, targetChanged: snapshotHashAfter !== snapshotHash, results };
+}
+
+// Content hash of every file that differs from HEAD or is untracked under cd (git), or of every
+// file (plain folder). Comparing two of these shows what a command wrote, including re-edits of
+// an already-dirty file. Gitignored output is not covered.
+async function contentState(cd) {
+  if (!(await isGitRepo(cd))) return (await hashInventory(cd)).files;
+  const [changed, untracked] = await Promise.all([
+    runCapture('git', ['diff', 'HEAD', '--name-only', '--relative', '-z', '--', '.'], cd),
+    runCapture('git', ['ls-files', '--others', '--exclude-standard', '-z'], cd),
+  ]);
+  const paths = new Set([
+    ...changed.stdout.toString('utf8').split('\0'),
+    ...untracked.stdout.toString('utf8').split('\0'),
+  ].filter((p) => p.length > 0 && !p.endsWith('/')));
+  const state = {};
+  for (const rel of [...paths].sort()) {
+    try {
+      state[rel] = await sha256OfFile(path.join(cd, rel));
+    } catch (err) {
+      state[rel] = err.code === 'ENOENT' ? 'deleted' : `unreadable: ${err.code || err.message}`;
+    }
+  }
+  return state;
 }
 
 // Re-checks whether a previously-captured snapshotHash still matches the
@@ -428,6 +462,7 @@ function streamSummary(text, tailLines) {
     sha256: sha256(Buffer.from(text, 'utf8')),
     lineCount: lines.length,
     tail: tailLines > 0 ? lines.slice(-tailLines) : [],
+    summary: lines.filter((l) => SUMMARY_RE.test(l)).slice(-MAX_MATCH_LINES),
     matches: matches.slice(0, MAX_MATCH_LINES),
     matchesTruncated: matches.length > MAX_MATCH_LINES,
   };
@@ -450,7 +485,7 @@ async function compactTier2(tier2, { logDir, tail }) {
       stderr: { ...streamSummary(stderr, tail), log: stderrLog },
     });
   }
-  return { snapshotHash: tier2.snapshotHash, compact: true, results };
+  return { snapshotHash: tier2.snapshotHash, snapshotHashAfter: tier2.snapshotHashAfter, targetChanged: tier2.targetChanged, compact: true, results };
 }
 
 async function main() {

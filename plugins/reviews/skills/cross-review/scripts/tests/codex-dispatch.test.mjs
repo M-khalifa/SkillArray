@@ -19,6 +19,7 @@ import {
   spawnCli,
   buildChildEnv,
   buildUsageField,
+  buildUsageDelta,
 } from '../codex-dispatch.mjs';
 
 // assertWin32Safe only throws on win32; skip the throwing tests elsewhere.
@@ -526,4 +527,22 @@ test('buildUsageField: never assumes a relationship between cached_input_tokens 
 test('estimated_cost_usd is always null from buildUsageField: no price table is embedded in this dispatcher', () => {
   assert.equal(buildUsageField({ input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 }).estimated_cost_usd, null);
   assert.equal(buildUsageField(null).estimated_cost_usd, undefined, '{source: "unavailable"} carries no numeric fields at all, not even a null cost');
+});
+
+test('buildUsageDelta: a fresh thread reports its own usage, a resume with --previous-result reports only this call, and a resume without it says why it cannot', () => {
+  const usage = (input, cached, output) => ({ input_tokens: input, cached_input_tokens: cached, cache_write_input_tokens: 0, output_tokens: output, reasoning_tokens: 10, source: 'provider' });
+  const fresh = buildUsageDelta(usage(1821943, 1700000, 9000), { session: null, threadId: 't1', previous: null });
+  assert.equal(fresh.source, 'fresh-thread');
+  assert.equal(fresh.input_tokens, 1821943);
+  const resumed = buildUsageDelta(usage(3196564, 3000000, 15000), {
+    session: 't1', threadId: 't1', previous: { threadId: 't1', usage: usage(1821943, 1700000, 9000) },
+  });
+  assert.equal(resumed.source, 'delta-from-previous-result');
+  assert.equal(resumed.input_tokens, 1374621);
+  assert.equal(resumed.output_tokens, 6000);
+  assert.equal(resumed.reasoning_tokens, 0);
+  assert.equal(buildUsageDelta(usage(1, 1, 1), { session: 't1', threadId: 't1', previous: null }).source, 'unavailable');
+  assert.equal(buildUsageDelta(usage(1, 1, 1), {
+    session: 't1', threadId: 't1', previous: { threadId: 'other', usage: usage(0, 0, 0) },
+  }).source, 'unavailable', 'a result from a different thread is never subtracted');
 });

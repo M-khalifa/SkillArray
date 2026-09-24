@@ -23,8 +23,13 @@ Run pre-flight evidence per [review-protocol.md](review-protocol.md)'s
 Scope and independence section
 ([scripts/preflight.mjs](../scripts/preflight.mjs)) before dispatching either
 seat, and include its output in the task packet. When Tier 2 runs a test
-suite, pass `--compact --out <run-dir>/preflight.json` and inline the compact
-JSON; the full logs stay on disk for EXECUTED citations. For a target that is
+suite, pass `--compact --out <evidence-dir>/preflight.json` with
+`<evidence-dir>` next to the run directory, not inside it (the auditor gets
+the packet and its log paths), and inline the compact JSON; the full logs and
+any GUI captures stay in `<evidence-dir>` for EXECUTED citations. Check each
+command's `touchedFiles`: files a test suite wrote into the target must be
+cleaned or recorded before dispatch. With `--cd` on a monorepo subfolder, the
+snapshot and `touchedFiles` cover only that folder. For a target that is
 not a git repository, pre-flight's `snapshotHash` is a content-hash inventory
 of every file; record it, and re-run `--check-stale` at the end of the review
 to prove the target did not change.
@@ -154,8 +159,17 @@ for OpenCode) in the run manifest; later dispatches must use this exact ID.
 When `--isolate` was used, also preserve `worktreePath` from seat B's
 result.json — Phase 2's resume dispatch reuses it, and Phase 3 removes it.
 
+Run `validate` with `--target-dir "<target-dir>"`: it also rejects a claim ID
+written inside an Evidence fence (a reviewer cross-referencing its own claim),
+which would otherwise surface only later as a scan hard stop, and it skips
+identifiers that come from the target itself (a WWN such as
+`20:00:00:25:B5:00:00:0A`, `df -B1`, project phase names like "P1").
+
 After `validate` passes, copy both findings files to `phase1/original/` and
-never touch those copies again. Phase 2 appends rebuttals to the working files
+never touch those copies again. A redaction made BEFORE the exchange is still
+part of the independent pass (no peer has seen the file), so after it
+re-validate and replace the `original/` copy; a redaction after the exchange
+leaves `original/` alone, and the manifest notes it. Phase 2 appends rebuttals to the working files
 in `phase1/`, so only the copies still hold what each seat wrote before it saw
 its peer; `build-manifest.mjs --phase1` hashes the copies.
 

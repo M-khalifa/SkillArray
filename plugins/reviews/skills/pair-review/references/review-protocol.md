@@ -58,13 +58,27 @@ output is raw fact only (command text, exit status, stdout/stderr verbatim) —
 never interpretive text.
 
 When Tier 2 runs a command with a large output (a full test suite), run
-preflight with `--compact --out <run-dir>/preflight.json`: the full stdout and
-stderr of each command go to log files next to it, and the JSON keeps each
-stream's byte count, sha256, last lines, and every fail/error/not-ok line.
+preflight with `--compact --out <evidence-dir>/preflight.json`, where
+`<evidence-dir>` is a folder NEXT TO the run directory, never inside it: the
+task packet cites these log paths and the auditor receives the packet, so a
+path inside the run directory would point the auditor at real-ID files
+(`build-brief.mjs --mode auditor --run-dir` refuses such a packet). The full
+stdout and stderr of each command and the Tier 1 diff go to log files, and the
+JSON keeps each stream's byte count, sha256, last lines, the test-runner total
+line (`summary`), and every fail/error/not-ok line that is not a passing test.
 Inline that compact JSON in the task packet and give seats the log paths to
 cite for `Basis: EXECUTED`; the sha256 proves a log was not edited. Pasting
 full test output into every brief costs roughly 12k-17k tokens per seat per
 phase for lines that say "pass".
+
+Scope: with `--cd` pointing at a subfolder of a repository (one app in a
+monorepo), `snapshotHash` covers only that folder, so work elsewhere in the
+repo does not make the evidence stale. Each Tier 2 command also reports
+`touchedFiles` (files under `--cd` it created, changed, or deleted), and tier2
+reports `targetChanged`. A test suite that writes into the target (dumps,
+caches) is visible there before any seat starts; clean it up or record it in
+the packet, or a seat can be blamed for a file the tests wrote. Gitignored
+output is not covered.
 
 **Context Builder (experimental, opt-in).** `scripts/context-builder.mjs` can
 assemble a scoped starting packet — a diff against an explicit `--base`, the
@@ -247,6 +261,11 @@ this field mechanically.
 
 ## Web verification
 
+Reviewer briefs carry only the first subsection below; the orchestrator notes
+stay out of briefs, since a reviewer does not need dispatch mechanics.
+
+### Web verification: reviewer rules
+
 Web verification is default-ON for both seats, gated by the CLAIM, not by
 review profile or an opt-in phrase: use a web fetch only when a specific
 claim is externally verifiable AND the target/repo cannot settle it on its
@@ -261,16 +280,11 @@ turns it off; there is no per-profile default and no separate opt-in phrase.
 **Repo first, web last.** Check the target and any pre-flight evidence before
 reaching for a fetch. A claim the repo already settles never needs one.
 
-**Cap: 5 fetches per seat per phase.** Measured cost is roughly 13,000 tokens
-per fetch including session overhead (verified directly: a single trivial
-web-search turn under `codex exec --search` cost 12,758–13,454 tokens across
-repeated tests) — five per seat per phase bounds this to a known, reportable
-amount rather than leaving it open-ended. The unit is each individual search
+**Cap: 5 fetches per seat per phase**, unless the task packet states another
+cap. Each costs roughly 13,000 tokens. The unit is each individual search
 query or page fetch, however the tool batches them: one request carrying three
 queries counts as three. Each seat reports `web: <n> queries, <m> page
-fetches`, and the report states both counts per seat. A fact-checking task (a
-document whose main claims are external facts) may raise the cap in the task
-packet; state the new cap there so both seats get the same one.
+fetches`.
 
 **Citation is mandatory, not optional, for any web-backed claim.** Use
 `Basis: SOURCE_CITATION` (already in the Evidence and findings schema above;
@@ -299,6 +313,15 @@ finding. When the target contradicts fetched content, that is a question,
 not a finding — the web source itself can be wrong, outdated, or
 inapplicable to the target's actual constraints, and asserting a defect
 from that asymmetry alone overstates the evidence.
+
+### Web verification: orchestrator notes
+
+**Cap cost.** The per-fetch cost was measured directly: a single trivial
+web-search turn under `codex exec --search` cost 12,758–13,454 tokens across
+repeated tests, so five per seat per phase bounds web use to a known,
+reportable amount. The report states both counts per seat. A fact-checking
+task (a document whose main claims are external facts) may raise the cap in
+the task packet; state the new cap there so both seats get the same one.
 
 **Dispatch.** A Codex seat gets `codex-dispatch.mjs --web`, which prepends
 Codex's global `--search` flag ahead of the `exec` subcommand (confirmed:
@@ -385,7 +408,20 @@ in the auditor's namespace. With `--phase2-dir`, any `P<n>` whose number is a
 claim in that run's peer-view files is a hard stop, fences included.
 `blind-relabel.mjs audit-prep` runs this check for you.
 
-This check is necessary but not sufficient. Four residual limitations:
+**Target-derived exemption for claim-ID and peer-label hits.** Give `scan`,
+`audit-prep`, `append-rebuttals` and `validate` the `--target-dir`. A hit is
+then non-blocking (reported as `target-derived`) when every occurrence of the
+token on that line either sits inside a larger chunk that appears verbatim in
+the target (a WWN `20:00:00:25:B5:00:00:0A`, `df -B1`, "P0-P4"), or the whole
+line (20+ characters) appears verbatim in the target (a quoted docstring "P1
+scope ... is P2"). A bare "see A2" or "as P7 says" in a reviewer's own words
+still hard-stops. In one 14-target run, 11 of 13 hard-stop hits were exactly
+these target identifiers and cost 5 redaction rounds.
+
+This check is necessary but not sufficient. Five residual limitations:
+
+- A real leak whose exact chunk, or whose whole 20+ character line, also
+  appears in the target passes as target-derived.
 
 - A token shaped like a claim ID that is not a real claim of this run (a
   hallucinated `A99`) is not rewritten by `relabel`, and `--forbid-seats` does
@@ -414,7 +450,7 @@ This check is necessary but not sufficient. Four residual limitations:
   cross a blank line or a block-interrupting line), deferred to a later
   release.
 
-Document all four as residual limitations rather than claiming perfect
+Document all five as residual limitations rather than claiming perfect
 blinding.
 
 **Redaction scope.** A redaction round sends the reviewer only the flagged
@@ -862,6 +898,99 @@ seat's own file). Relabel each file to `X`/`Y` TWICE, once per letter, chaining
 the second pass's input from the first pass's output — a single pass leaves the
 untouched letter exposed in that file's rebuttal-section heading and prose,
 handing the auditor a direct `A`/`B` cross-reference.
+
+### Auditor instructions
+
+Every auditor brief carries this list verbatim (`build-brief.mjs --mode auditor`
+copies it). Instruct the auditor to:
+
+1. Spot-check the highest-impact or most-contested claims itself, using its
+   own read-only target access — this is what makes "Verification: the
+   auditor's own independent check" a real check and not just re-weighing the
+   two reviewers' own arguments.
+2. For every surviving claim, apply review-protocol.md's rebuttal-overturn rule
+   (a rebuttal only overturns a claim with a specific checkable counter-fact,
+   never bare disagreement) and its SPECULATIVE-claim-drop rule, then produce
+   the adjudication-added fields (Peer response, Verification, Final state)
+   defined in review-protocol.md's Synthesis section. A claim whose `Basis:
+   SOURCE_CITATION` includes a URL and quoted text per review-protocol.md's Web
+   verification section is a checkable counter-fact like any other citation —
+   weigh it against a peer's text-only rebuttal the same way any cited source
+   outweighs bare disagreement, never specially discounted or specially
+   trusted merely for being web-sourced. The auditor has no web access itself
+   (see Not built by this feature in review-protocol.md's Web verification
+   section) and does not re-fetch a cited URL to confirm it; it is not
+   spot-checking the citation's accuracy, only weighing it as evidence the
+   same way it weighs an executed repro it also cannot independently re-run
+   from a text transcript alone.
+3. Group surviving claims (including a dropped-SPECULATIVE one — grouping is
+   not filtering) into canonical findings per review-protocol.md's Canonical
+   findings section. MUST only merge claims asserting the SAME underlying
+   defect, never merely the same file or area; when in doubt, keep them
+   separate.
+
+   The `Verification` field from step 2 has its structured `findings.json`
+   home HERE, recorded once per canonical finding (not once per origin claim
+   — per-origin granularity is deferred) as an `auditor_check: {result,
+   basis, evidence}` object:
+
+   - `result` MUST be one of `CONFIRMED`/`REFUTED`/`INCONCLUSIVE`/`NOT_CHECKED`
+     (`NOT_CHECKED` when none of this finding's origin claims were
+     spot-checked in step 1).
+   - `evidence` MUST be a non-empty string, and `basis` MUST be one of
+     `EXECUTED`/`STATIC_TRACE`/`SOURCE_CITATION`/`INFERENCE` (the same enum a
+     verifier's own `Basis:` line uses) — UNLESS `result` is `NOT_CHECKED`, in
+     which case both MUST be `null`.
+
+   Instruct the auditor: never record `settled-agree` on a finding with a
+   `disputed-with-counter-fact` peer response unless a `CONFIRMED`
+   `verifications[]` entry exists for it — its own `auditor_check.result:
+   CONFIRMED` alone does not qualify. `translate` refuses:
+
+   - any finding missing the `auditor_check` object;
+   - `settled-refuted` when `result` is `CONFIRMED`, and `settled-agree` when
+     `result` is `REFUTED` — the auditor cannot both independently settle a
+     claim one way and record the opposite `final_state`;
+   - `settled-agree` UNLESS at least one of `independently_discovered`, a
+     `conceded` peer response, or a `CONFIRMED` verification actually exists.
+     Exception does not apply the other way: `result: CONFIRMED` alone is NOT
+     enough, unlike `settled-refuted`'s `REFUTED` route — review-protocol.md's
+     `settled-agree` definition has no equivalent auditor-alone clause;
+   - `settled-agree` when any peer response is `disputed-with-counter-fact`,
+     UNLESS a `verifications[]` entry for that finding is `CONFIRMED` — the
+     falsification verifier's CONFIRMED verdict is the protocol's own
+     designated mechanism for settling a disputed claim in its favor;
+   - `dropped-speculative` UNLESS the finding is genuinely SPECULATIVE, not
+     independently discovered by both seats, unattacked by any peer response,
+     `result` is not `CONFIRMED` or `REFUTED`, and it has no `verifications`
+     entry — a falsification verifier having checked it at all, any verdict,
+     means it is no longer merely an untouched speculative claim;
+   - any finding whose `verifications[]` has a `CONFIRMED` verdict alongside
+     `settled-refuted`, or a `REFUTED` verdict alongside `settled-agree`, for
+     any origin — one origin's verdict speaks for the whole canonical
+     finding.
+
+   Emit one `F<n>` JSON object per finding with `origins` listing every
+   `X`/`Y` claim ID it covers, per the `findings.json` schema in
+   review-protocol.md. IDs are sequential integers only (`F1`, `F2`, `F3`,
+   ...), never sub-lettered (`F8a`/`F8b`) — an origin claim describing two
+   independent sub-defects is one over-broad claim, not two findings; put
+   both under the one `F` instead. The auditor returns this shape under `X`/`Y` IDs as its
+   own output; it never computes or sees `independently_discovered` — that
+   field is derived mechanically after translate-back, not the auditor's job.
+   State this explicitly in the auditor's own task prompt, since the auditor
+   has no other way to know it: the returned JSON MUST be a top-level object
+   with a `findings` array, e.g. `{"findings": [...]}`, never a bare array of
+   finding objects — `translate` refuses a bare array outright (any other
+   top-level keys, including `protocol`, are ignored on input and overwritten
+   on output, so the auditor does not need to supply one).
+
+   If any of a finding's origins has a `phase3/verification-<claim-id>.md`
+   file, record it as a `verifications` entry `{ claim, verdict }` on that
+   finding. `basis` and `evidence` are NOT the auditor's to supply —
+   `translate` reads the verifier file itself and populates both from its own
+   `Basis:`/`Evidence:` lines, refusing if the file's `Verdict:` disagrees
+   with what's recorded here.
 
 ## Manifest and final output
 

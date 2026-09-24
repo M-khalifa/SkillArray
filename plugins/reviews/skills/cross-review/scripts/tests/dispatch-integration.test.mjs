@@ -108,6 +108,48 @@ ${events}
   });
 }
 
+test('codex-dispatch writes usage_delta: the fresh call\'s own usage, then only the resumed call\'s share when --previous-result is passed', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch delta '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const fake = path.join(bin, 'fake.mjs');
+  // Cumulative like the real CLI: the resumed turn reports the thread's running total.
+  await fs.writeFile(fake, `let input = '';
+for await (const chunk of process.stdin) input += chunk;
+const resumed = process.argv.includes('resume');
+console.log(JSON.stringify({type:'thread.started', thread_id:'delta-thread'}));
+console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'ok'}}));
+console.log(JSON.stringify({type:'turn.completed', usage: resumed
+  ? {input_tokens:3196564,cached_input_tokens:3000000,cache_write_input_tokens:0,output_tokens:15000,reasoning_output_tokens:40}
+  : {input_tokens:1821943,cached_input_tokens:1700000,cache_write_input_tokens:0,output_tokens:9000,reasoning_output_tokens:25}}));
+`);
+  const shim = path.join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex');
+  await fs.writeFile(shim, process.platform === 'win32'
+    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
+    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n', { mode: 0o755 });
+  const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
+  env.PATH = bin;
+  const phase1 = path.join(dir, 'phase1'); const phase2 = path.join(dir, 'phase2');
+  await fs.mkdir(phase1); await fs.mkdir(phase2);
+  await fs.writeFile(path.join(phase1, 'brief.txt'), 'p1');
+  await fs.writeFile(path.join(phase2, 'brief.txt'), 'p2');
+  let r = spawnSync(process.execPath, [script, '--brief', path.join(phase1, 'brief.txt'), '--cd', dir], { env, encoding: 'utf8', timeout: 15000 });
+  assert.equal(r.status, 0, r.stderr);
+  const first = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
+  assert.equal(first.usage_delta.source, 'fresh-thread');
+  assert.equal(first.usage_delta.input_tokens, 1821943);
+  r = spawnSync(process.execPath, [script, '--brief', path.join(phase2, 'brief.txt'), '--cd', dir, '--session', 'delta-thread',
+    '--previous-result', path.join(phase1, 'result.json')], { env, encoding: 'utf8', timeout: 15000 });
+  assert.equal(r.status, 0, r.stderr);
+  const second = JSON.parse(await fs.readFile(path.join(phase2, 'result.json'), 'utf8'));
+  assert.equal(second.usage.input_tokens, 3196564, 'usage stays the cumulative number codex reported');
+  assert.equal(second.usage_delta.source, 'delta-from-previous-result');
+  assert.equal(second.usage_delta.input_tokens, 1374621);
+  assert.equal(second.usage_delta.output_tokens, 6000);
+});
+
 test('dispatcher parses a real turn.completed.usage event into result.json\'s usage field with source "provider"', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch usage '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));

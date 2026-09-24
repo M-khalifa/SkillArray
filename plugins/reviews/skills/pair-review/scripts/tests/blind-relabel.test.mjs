@@ -2772,15 +2772,23 @@ test('CLI append-rebuttals: F8 -- refuses, leaving --onto byte-identical, on a c
   assert.deepEqual((await fs.readdir(dir)).sort(), ['A-findings.md', 'B-findings.md', 'peer-view-for-B.md', 'raw.md'], 'no temp file is left behind');
 });
 
-test('CLI append-rebuttals: F8 -- on a real run\'s raw rebuttal files, seat A\'s 17 rebuttals append onto B-findings.md and validate clean, and seat B\'s are refused for the real fenced "identified in P12" leak that run had to hand-redact', async (t) => {
+test('CLI append-rebuttals: F8 -- on a real run\'s raw rebuttal files, seat A\'s 17 rebuttals are refused while B1\'s Evidence fence quotes real claim ID A1, then append onto B-findings.md and validate clean once B redacts it, and seat B\'s are refused for the real fenced "identified in P12" leak that run had to hand-redact', async (t) => {
   const real = path.join(FIXTURE_DIR, 'real-run-append');
   const dir = await tempDir(t, 'f8-real-run-');
   for (const seat of ['A', 'B']) {
     await fs.copyFile(path.join(real, `${seat}-findings.fixture.md`), path.join(dir, `${seat}-findings.md`));
   }
   const aBefore = await fs.readFile(path.join(dir, 'A-findings.md'), 'utf8');
-  let r = runCli(['append-rebuttals', '--in', path.join(real, 'A-rebuttals-raw.md'), '--onto', path.join(dir, 'B-findings.md'),
+  const appendA = () => runCli(['append-rebuttals', '--in', path.join(real, 'A-rebuttals-raw.md'), '--onto', path.join(dir, 'B-findings.md'),
     '--rebutter', 'A', '--peer-view', path.join(real, 'peer-view-for-A.md')]);
+  // That run's B1 Evidence fence quotes the real claim ID A1, which validate refuses until B redacts it.
+  let r = appendA();
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /B-findings\.md:11: claim ID "A1" inside a fence .*return to seat B/);
+  const bFile = path.join(dir, 'B-findings.md');
+  const bRedacted = (await fs.readFile(bFile, 'utf8')).replace('"A1 follows P12" after translating X1 to A1', '"<id> follows P12" after translating X1 to <id>');
+  await fs.writeFile(bFile, bRedacted);
+  r = appendA();
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /appended 17 rebuttal\(s\) from A/);
   const bOut = await fs.readFile(path.join(dir, 'B-findings.md'), 'utf8');
@@ -2902,4 +2910,131 @@ test('parseArgs: new flags are accepted only by their own subcommands (--phase2-
     parseArgs(['scan', '--in', 'a', '--phase2-dir', 'p2', '--target-urls', 'u']),
     { sub: 'scan', in: 'a', phase2Dir: 'p2', targetUrls: 'u' }
   );
+});
+
+const PHASE_TARGET = path.join(FIXTURE_DIR, 'target-phase-names');
+
+// Phase 1 (A1-A3, B1-B5) and Phase 2 (P1-P4) dirs plus the scan input file.
+async function targetExemptSetup(t, fence) {
+  const root = await tempDir(t, 'target-exempt-');
+  const p1 = path.join(root, 'phase1');
+  const p2 = path.join(root, 'phase2');
+  await fs.mkdir(p1);
+  await fs.mkdir(p2);
+  await fs.writeFile(path.join(p1, 'A-findings.md'), `# Seat A findings\n\n${['A1', 'A2', 'A3'].map((id) => claimBlock(id)).join('\n')}`);
+  await fs.writeFile(path.join(p1, 'B-findings.md'), `# Seat B findings\n\n${['B1', 'B2', 'B3', 'B4', 'B5'].map((id) => claimBlock(id)).join('\n')}`);
+  await fs.writeFile(path.join(p2, 'peer-view-for-A.md'), '# Peer findings\n\n## P1 — a\n\n## P2 — b\n\n## P3 — c\n\n## P4 — d\n');
+  await fs.writeFile(path.join(p2, 'peer-view-for-B.md'), '# Peer findings\n\n## P1 — a\n');
+  const input = path.join(root, 'X-findings.md');
+  await fs.writeFile(input, `# Seat X findings\n\n## X1 — t\nEvidence:\n\`\`\`\n${fence}\n\`\`\`\n`);
+  return { p1, p2, input };
+}
+
+function scanIds(s, withTarget = true) {
+  const args = ['scan', '--in', s.input, '--phase1-dir', s.p1, '--forbid-seats', 'A,B', '--phase2-dir', s.p2];
+  return runCli(withTarget ? [...args, '--target-dir', PHASE_TARGET] : args);
+}
+
+test('CLI scan target-derived: WWN chunk "20:00:00:25:B5:00:00:0A" found in the target does not hard-stop on B5', async (t) => {
+  const r = scanIds(await targetExemptSetup(t, 'port wwn 20:00:00:25:B5:00:00:0A online'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /target-derived "B5"/);
+  assert.match(r.stdout, /scan clean/);
+});
+
+test('CLI scan target-derived: `df -B1` chunk found in the target does not hard-stop on B1', async (t) => {
+  const r = scanIds(await targetExemptSetup(t, '$ df -B1 /data'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /target-derived "B1"/);
+});
+
+test('CLI scan target-derived: quoted docstring line "P1 scope ... is P2" that occurs verbatim in the target does not hard-stop on P1/P2', async (t) => {
+  const r = scanIds(await targetExemptSetup(t, '> P1 scope covers LUN creation only; host mapping is P2.'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /target-derived "P1"/);
+  assert.match(r.stderr, /target-derived "P2"/);
+});
+
+test('CLI scan target-derived: "P0-P4 complete" (P4 embedded in a target chunk) does not hard-stop', async (t) => {
+  const r = scanIds(await targetExemptSetup(t, 'status: P0-P4 complete'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /target-derived "P4"/);
+});
+
+test('CLI scan target-derived: bare "see A2" in a fence still hard-stops even though the target has a standalone "A2"', async (t) => {
+  const r = scanIds(await targetExemptSetup(t, 'see A2 for the root cause'));
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /CLAIM-ID LEAK line \d+ \(real "A2" survives relabel\)/);
+});
+
+test('CLI scan target-derived: "A2/A3" cross-reference absent from the target still hard-stops', async (t) => {
+  const r = scanIds(await targetExemptSetup(t, 'same defect as A2/A3'));
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /real "A2" survives/);
+  assert.match(r.stderr, /real "A3" survives/);
+});
+
+test('CLI scan target-derived: an exempt WWN plus a bare B5 on the same line still hard-stops', async (t) => {
+  const r = scanIds(await targetExemptSetup(t, 'wwn 20:00:00:25:B5:00:00:0A, see B5'));
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /real "B5" survives/);
+});
+
+test('CLI scan target-derived: without --target-dir the WWN and phase-name hits still hard-stop', async (t) => {
+  for (const fence of ['port wwn 20:00:00:25:B5:00:00:0A online', 'status: P0-P4 complete']) {
+    const r = scanIds(await targetExemptSetup(t, fence), false);
+    assert.equal(r.status, 1, `expected a hard stop for: ${fence}`);
+  }
+});
+
+test('CLI append-rebuttals target-derived: a fenced "P0-P4" chunk from --target-dir is reported, not refused; without --target-dir it is refused', async (t) => {
+  const { dir, peerView, onto } = await f8Setup(t);
+  const raw = path.join(dir, 'raw.md');
+  await fs.writeFile(peerView, '# Peer findings\n\n## P1 — t\n\n## P2 — t\n\n## P4 — t\n');
+  await fs.writeFile(raw, '### P1\nClaim: P1\nAction: CONCEDE\nEvidence:\n```\nstatus: P0-P4 complete\n```\n### P2\nClaim: P2\nAction: CONCEDE\n### P4\nClaim: P4\nAction: CONCEDE\n');
+  const base = ['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView];
+  const refused = runCli(base);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /"P4" inside a fence names a peer-view claim/);
+  const ok = runCli([...base, '--target-dir', PHASE_TARGET]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stderr, /report \(target-derived "P4" inside a fence/);
+});
+
+async function validateCrossRefSetup(t, fence) {
+  const dir = await tempDir(t, 'validate-crossref-');
+  const a1 = `## A1 — t\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n\`\`\`\n${fence}\n\`\`\`\n`;
+  await fs.writeFile(path.join(dir, 'A-findings.md'), `# Seat A findings\n\n${a1}\n${claimBlock('A2')}`);
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  return dir;
+}
+
+test('CLI validate cross-ref: an Evidence fence "see A2" in A-findings fails validate before the freeze, returned to seat A', async (t) => {
+  const dir = await validateCrossRefSetup(t, 'see A2 for the same root cause');
+  const r = runCli(['validate', '--phase1-dir', dir]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /A-findings\.md:\d+: claim ID "A2" inside a fence .*return to seat A/);
+  const withTarget = runCli(['validate', '--phase1-dir', dir, '--target-dir', PHASE_TARGET]);
+  assert.equal(withTarget.status, 1, 'a bare "A2" stays a problem even when the target has a standalone "A2"');
+});
+
+test('CLI validate cross-ref: a WWN embedding "A2" whose chunk exists in --target-dir passes validate', async (t) => {
+  const dir = await validateCrossRefSetup(t, 'port wwn 20:00:00:25:A2:00:00:0B online');
+  const r = runCli(['validate', '--phase1-dir', dir, '--target-dir', PHASE_TARGET]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(runCli(['validate', '--phase1-dir', dir]).status, 1, 'without --target-dir the same WWN is still flagged');
+});
+
+test('CLI validate cross-ref: a fenced claim ID inside "## Rebuttals (from B) of A claims" is returned to rebutting seat B', async (t) => {
+  const dir = await tempDir(t, 'validate-crossref-rebuttal-');
+  await fs.writeFile(
+    path.join(dir, 'A-findings.md'),
+    `# Seat A findings\n\n${claimBlock('A1')}\n## Rebuttals (from B) of A claims\n\n### A1\nClaim: A1\nAction: DISPUTE\nEvidence:\n\`\`\`\ncontradicted by B1\n\`\`\`\n`
+  );
+  await fs.writeFile(path.join(dir, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B1')}`);
+  const r = runCli(['validate', '--phase1-dir', dir]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /claim ID "B1" inside a fence .*return to seat B/);
+  assert.match(r.stderr, /return to: seat B/);
+  assert.doesNotMatch(r.stderr, /return to: seat A/);
 });

@@ -24,9 +24,9 @@ Usage:
     [--phase1-dir <path> --forbid-seats <A|B|A,B>] [--phase2-dir <path>] [--target-urls <file>]
   node blind-relabel.mjs flip --out <path>
   node blind-relabel.mjs translate --in <path> --out <path> --mapping <path> [--phase1-dir <path>] [--verification-dir <path>]
-  node blind-relabel.mjs validate --phase1-dir <path>
+  node blind-relabel.mjs validate --phase1-dir <path> [--target-dir <path>]
   node blind-relabel.mjs append-rebuttals --in <raw rebuttals, P ids> --onto <peer's phase1 file>
-    --rebutter <A|B> --peer-view <phase2 peer-view the rebutter saw>
+    --rebutter <A|B> --peer-view <phase2 peer-view the rebutter saw> [--target-dir <path>]
   node blind-relabel.mjs audit-prep --phase1-dir <path> --mapping <flip json> --out-dir <path>
     --target-dir <path> [--tokens t1,t2,...] [--phase2-dir <path>]
   node blind-relabel.mjs -h | --help
@@ -147,6 +147,23 @@ scan:
   fence content included, whose number is a claim ("## P<n>" heading) in that
   run's peer-view-for-A.md / peer-view-for-B.md -- a stale Phase 2 label
   points at the other letter's claim. Run it on every Phase 3 file.
+  Target-derived claim-ID exemption (--forbid-seats and --phase2-dir hits, and
+  the same checks in validate, append-rebuttals, and audit-prep): with
+  --target-dir, a hit on token T in line L is reported as a non-blocking
+  "target-derived" line instead of a hard stop when EVERY occurrence of T on L
+  either (a) sits inside a larger CHUNK (the non-whitespace run around T, with
+  quote/backtick/bracket/paren/comma/period characters trimmed from both ends)
+  that occurs verbatim in the target, e.g. a WWN "20:00:00:25:B5:00:00:0A",
+  "df -B1", or "P0-P4"; or (b) L itself, with leading ">" quote markers and
+  surrounding backticks stripped, is at least 20 characters and occurs verbatim
+  in the target (a quoted docstring line "P1 scope ... is P2"). The target text
+  is every file in the same file set as above (git-listed, or walked skipping
+  .git/ and node_modules/), skipping files over 2 MB or containing NUL; it is
+  read once per run. A bare token in reviewer prose ("see A2", "as P7 says",
+  "A2/A3" when that chunk is not in the target) still hard-stops, and without
+  --target-dir nothing is exempt. Residual: a real leak whose exact chunk or
+  20+ character line happens to also occur in the target passes as
+  target-derived.
   (With --target-urls <file>, one URL per line) Every URL in the scanned text,
   fences included, that matches a listed URL after normalization (lowercase
   scheme/host, fragment dropped, trailing slash dropped) is reported as a
@@ -332,6 +349,11 @@ validate:
   reported against the REBUTTING seat <S>, which wrote it -- return that
   section to <S>, not to the file's owner. The section runs to the next "##"
   heading that is neither claim-shaped nor another rebuttal heading.
+  Also rejects any of the run's real claim IDs (both seats' "## A<n>"/"## B<n>"
+  headings) inside a fence or inline code span, since relabel never rewrites
+  code and the ID would leak through the blind. Each is returned to the file's
+  own seat, or to the rebutting seat inside a rebuttal section. With
+  --target-dir, the target-derived exemption described under scan applies.
 
 append-rebuttals:
   Persists one seat's Phase 2 rebuttals onto the peer's Phase 1 file. --in is
@@ -344,7 +366,8 @@ append-rebuttals:
   Also refuses: an entry for a P id not in --peer-view; a heading and Claim
   line naming different ids; a P token inside a fence or inline code span
   whose number is a peer-view claim (relabel never rewrites code, so it would
-  leak into Phase 3); a "## Rebuttals" line in --in; an --onto that already has this
+  leak into Phase 3, unless target-derived per scan's rule when --target-dir
+  is given); a "## Rebuttals" line in --in; an --onto that already has this
   section. Relabels P -> the peer letter (real-ID rule above, widened with the
   peer-view's claims), appends a blank line, the exact
   "## Rebuttals (from <rebutter>) of <peer> claims" heading, a blank line and
@@ -426,8 +449,8 @@ function parseArgs(argv) {
       if (!args[key]) throw new RelayError(`append-rebuttals requires ${flag}`);
     }
     if (args.rebutter !== 'A' && args.rebutter !== 'B') throw new RelayError('--rebutter must be A or B');
-    for (const key of ['out', 'from', 'to', 'targetDir', 'tokens', 'mapping', 'phase1Dir', 'verificationDir', 'forbidSeats']) {
-      if (args[key] !== undefined) throw new RelayError('append-rebuttals accepts only --in, --onto, --rebutter, --peer-view');
+    for (const key of ['out', 'from', 'to', 'tokens', 'mapping', 'phase1Dir', 'verificationDir', 'forbidSeats']) {
+      if (args[key] !== undefined) throw new RelayError('append-rebuttals accepts only --in, --onto, --rebutter, --peer-view, --target-dir');
     }
     return args;
   }
@@ -489,10 +512,10 @@ function parseArgs(argv) {
     if (!args.phase1Dir) throw new RelayError('validate requires --phase1-dir');
     if (
       args.in !== undefined || args.out !== undefined || args.from !== undefined ||
-      args.to !== undefined || args.targetDir !== undefined || args.tokens !== undefined ||
+      args.to !== undefined || args.tokens !== undefined ||
       args.mapping !== undefined || args.verificationDir !== undefined || args.forbidSeats !== undefined
     ) {
-      throw new RelayError('validate accepts only --phase1-dir');
+      throw new RelayError('validate accepts only --phase1-dir and --target-dir');
     }
   }
   return args;
@@ -797,6 +820,63 @@ async function targetDerivedTokens(targetDir, extraTokens = []) {
   return { tokens: found, seatVocabulary };
 }
 
+const TARGET_TEXT_MAX_BYTES = 2 * 1024 * 1024;
+
+// Every text file in the target (same file set as targetDerivedTokens), joined; null without --target-dir.
+async function readTargetText(targetDir) {
+  if (!targetDir) return null;
+  let entries;
+  try {
+    entries = gitListedNames(targetDir) ?? (await walkNames(targetDir));
+  } catch (err) {
+    if (err instanceof RelayError) throw err;
+    log(`--target-dir: could not list ${targetDir} (${err.message}); no claim-ID hit is target-derived`);
+    return '';
+  }
+  const parts = [];
+  for (const rel of entries) {
+    const full = path.join(targetDir, rel);
+    try {
+      const st = await fs.stat(full);
+      if (!st.isFile() || st.size > TARGET_TEXT_MAX_BYTES) continue;
+      const content = await fs.readFile(full, 'utf8');
+      if (!content.includes('\0')) parts.push(content);
+    } catch (err) {
+      log(`--target-dir: skipped unreadable ${rel}: ${err.message}`);
+    }
+  }
+  return parts.join('\n');
+}
+
+const CHUNK_TRIM_RE = /^[>`*_[\](){}"',.;:!?]+|[>`*_[\](){}"',.;:!?]+$/g;
+
+// True when the token at [index, index+len) is embedded in a larger chunk the target contains
+// verbatim, or its whole line (20+ chars, quote markers/backticks stripped) is target text.
+function targetDerivedOccurrence(line, index, len, targetText) {
+  if (!targetText) return false;
+  let start = index;
+  let end = index + len;
+  while (start > 0 && !/\s/.test(line[start - 1])) start--;
+  while (end < line.length && !/\s/.test(line[end])) end++;
+  const chunk = line.slice(start, end).replace(CHUNK_TRIM_RE, '');
+  if (chunk.length > len && targetText.includes(chunk)) return true;
+  const stripped = line.replace(/^[\s>]+/, '').replace(/^`+|`+$/g, '').trim();
+  return stripped.length >= 20 && targetText.includes(stripped);
+}
+
+// A hit on `id` in `line` is target-derived only when EVERY occurrence of it on that line is.
+function targetDerivedHit(line, id, targetText) {
+  if (!targetText) return false;
+  const re = new RegExp(`\\b${escapeRegExp(id)}\\b`, 'g');
+  let m;
+  let any = false;
+  while ((m = re.exec(line)) !== null) {
+    any = true;
+    if (!targetDerivedOccurrence(line, m.index, id.length, targetText)) return false;
+  }
+  return any;
+}
+
 // Unlike the vendor/seat scan below (which blanks fenced lines -- a fence is real Evidence
 // content, exempt from THAT check by design), a real claim-ID leak is exactly as dangerous inside
 // a fence as outside it: "my A4" inside an Evidence block tells the auditor which anonymous label
@@ -808,7 +888,7 @@ async function targetDerivedTokens(targetDir, extraTokens = []) {
 // built from the actual enumerable set in that seat's real Phase 1 file via extractClaimHeadings
 // -- never a generic \b[A-Z]\d+\b, which would false-positive on a legitimate target-code
 // identifier, a hex digest, or a cell reference that happens to look like a claim ID.
-async function scanForKnownClaimIdLeaks(text, phase1Dir, forbidSeats) {
+async function scanForKnownClaimIdLeaks(text, phase1Dir, forbidSeats, targetText = null) {
   const { lines, unterminated } = parseFenceLines(text);
   if (unterminated) {
     throw new RelayError('unterminated fenced code block: cannot safely scan past it, fix the file and re-run');
@@ -821,7 +901,7 @@ async function scanForKnownClaimIdLeaks(text, phase1Dir, forbidSeats) {
   lines.forEach(({ text: line }, i) => {
     for (const id of forbiddenIds) {
       if (new RegExp(`\\b${id}\\b`).test(line)) {
-        hits.push({ line: i + 1, text: line.trim(), id });
+        hits.push({ line: i + 1, text: line.trim(), id, targetDerived: targetDerivedHit(line, id, targetText) });
       }
     }
   });
@@ -859,7 +939,7 @@ async function readPhase2PeerIds(phase2Dir) {
 
 // A surviving Phase 2 label (e.g. "identified in P12") points at the other letter's claim 12,
 // so it is a leak even inside a fence. Only P numbers that were real peer-view claims count.
-function scanForPeerLabelLeaks(text, peerIds) {
+function scanForPeerLabelLeaks(text, peerIds, targetText = null) {
   const { lines, unterminated } = parseFenceLines(text);
   if (unterminated) {
     throw new RelayError('unterminated fenced code block: cannot safely scan past it, fix the file and re-run');
@@ -867,7 +947,9 @@ function scanForPeerLabelLeaks(text, peerIds) {
   const hits = [];
   lines.forEach(({ text: line }, i) => {
     for (const tok of line.match(/\bP\d+\b/g) || []) {
-      if (peerIds.has(tok)) hits.push({ line: i + 1, text: line.trim(), id: tok });
+      if (peerIds.has(tok)) {
+        hits.push({ line: i + 1, text: line.trim(), id: tok, targetDerived: targetDerivedHit(line, tok, targetText) });
+      }
     }
   });
   return hits;
@@ -1882,19 +1964,27 @@ async function runRelabel(args) {
 // Library half of scan: every hit class for one text, no printing, no exit.
 async function collectScanHits(text, opts) {
   const { selfIdHits, identityHits, otherHits } = await scanText(text, opts.targetDir, opts.tokens ?? []);
-  const claimIdHits = opts.forbidSeats
-    ? await scanForKnownClaimIdLeaks(text, opts.phase1Dir, opts.forbidSeats)
+  const needTarget = (opts.forbidSeats || opts.peerIds) && opts.targetText === undefined;
+  const targetText = needTarget ? await readTargetText(opts.targetDir) : opts.targetText ?? null;
+  const allClaimIdHits = opts.forbidSeats
+    ? await scanForKnownClaimIdLeaks(text, opts.phase1Dir, opts.forbidSeats, targetText)
     : [];
-  const peerLabelHits = opts.peerIds ? scanForPeerLabelLeaks(text, opts.peerIds) : [];
+  const allPeerLabelHits = opts.peerIds ? scanForPeerLabelLeaks(text, opts.peerIds, targetText) : [];
+  const claimIdHits = allClaimIdHits.filter((h) => !h.targetDerived);
+  const peerLabelHits = allPeerLabelHits.filter((h) => !h.targetDerived);
+  const derivedIdHits = [...allClaimIdHits, ...allPeerLabelHits].filter((h) => h.targetDerived);
   const trustHits = opts.targetUrls ? scanForTargetUrls(text, opts.targetUrls) : [];
   const blocking = selfIdHits.length + identityHits.length + claimIdHits.length + peerLabelHits.length;
-  return { selfIdHits, identityHits, otherHits, claimIdHits, peerLabelHits, trustHits, blocking };
+  return { selfIdHits, identityHits, otherHits, claimIdHits, peerLabelHits, derivedIdHits, trustHits, blocking };
 }
 
 function logScanHits(hits, label = '') {
   const pre = label ? `${label}: ` : '';
   for (const h of hits.otherHits) {
     log(`${pre}report line ${h.line}${h.targetDerived ? ' (target-derived)' : ''}: ${h.text}`);
+  }
+  for (const h of hits.derivedIdHits) {
+    log(`${pre}report line ${h.line} (target-derived "${h.id}", chunk or line occurs in the target): ${h.text}`);
   }
   for (const h of hits.trustHits) {
     log(`${pre}TRUST-BOUNDARY line ${h.line}: ${h.url} is a URL embedded in the target; confirm it was not fetched`);
@@ -1930,7 +2020,7 @@ async function runScan(args) {
     process.exit(1);
   }
   process.stdout.write(
-    `scan clean: 0 identity matches, ${hits.otherHits.length} target-derived reported, ` +
+    `scan clean: 0 identity matches, ${hits.otherHits.length + hits.derivedIdHits.length} target-derived reported, ` +
       `${hits.trustHits.length} trust-boundary URL(s) reported\n`
   );
 }
@@ -1998,8 +2088,10 @@ function rebuttalSections(fenceLines) {
 }
 
 // Every validate problem for both seats' texts; each problem names the seat to return it to.
-function validateProblems(textsBySeat) {
+function validateProblems(textsBySeat, targetText = null) {
   const problems = [];
+  const runIds = new Set(['A', 'B'].flatMap((s) => [...extractClaimHeadings(textsBySeat[s])]));
+  const runIdRe = buildClaimIdRe(runIds);
   for (const seat of ['A', 'B']) {
     const text = textsBySeat[seat];
     const { blocks, malformedHeadings, duplicateIds, noFindingsMarker } = extractClaimBlocks(text);
@@ -2049,6 +2141,25 @@ function validateProblems(textsBySeat) {
           'with zero rebuttals, so a malformed heading here would be silently indistinguishable ' +
           'from that case instead of being caught as a formatting defect'
       );
+    });
+    // relabel never rewrites code, so a real claim ID in a fence or inline code survives into the blind.
+    fenceLines.forEach(({ text: line, inFence }, i) => {
+      if (runIdRe === null) return;
+      const codeText = splitLineSpans(line, inFence).filter((s) => s.code).map((s) => s.text).join(' ');
+      const ids = new Set(codeText.match(runIdRe) || []);
+      for (const id of ids) {
+        if (targetDerivedHit(line, id, targetText)) continue;
+        const s = sectionAt(i + 1);
+        const returnTo = s ? s.rebutter ?? 'rebutter' : seat;
+        const who = returnTo === 'rebutter' ? 'the rebutting seat' : `seat ${returnTo}`;
+        problems.push({
+          text:
+            `${seat}-findings.md:${i + 1}: claim ID "${id}" inside ${inFence ? 'a fence' : 'inline code'} -- ` +
+            `relabel never rewrites code, so it would leak through the blind; return to ${who} to move ` +
+            `the reference out of the code: ${line.trim()}`,
+          returnTo,
+        });
+      }
     });
     for (const [id, block] of blocks) {
       const inRebuttal = rebuttalEntryProblem(block.line, `## ${id}`);
@@ -2111,7 +2222,7 @@ function logValidateProblems(problems) {
 async function runValidate(args) {
   const texts = {};
   for (const seat of ['A', 'B']) texts[seat] = await readPhase1Seat(seat, args.phase1Dir);
-  const problems = validateProblems(texts);
+  const problems = validateProblems(texts, await readTargetText(args.targetDir));
   if (problems.length > 0) {
     logValidateProblems(problems);
     process.exit(1);
@@ -2192,10 +2303,15 @@ async function runAppendRebuttals(args) {
   const { lines: rawLines, unterminated } = parseFenceLines(raw);
   if (unterminated) throw new RelayError('--in: unterminated fenced code block, fix the file and re-run');
   const problems = [];
+  const targetText = await readTargetText(args.targetDir);
   // relabel never rewrites fences or inline code, so a peer-view P id there would leak into Phase 3.
-  const checkCode = (codeText, lineNo, where) => {
+  const checkCode = (codeText, lineNo, where, line) => {
     for (const tok of codeText.match(/\bP\d+\b/g) || []) {
       if (peerIds.has(tok)) {
+        if (targetDerivedHit(line, tok, targetText)) {
+          log(`--in:${lineNo}: report (target-derived "${tok}" inside ${where}, chunk or line occurs in the target): ${line.trim()}`);
+          continue;
+        }
         problems.push(`--in:${lineNo}: "${tok}" inside ${where} names a peer-view claim; relabel never rewrites it, so it would leak into Phase 3 -- move the reference out of the code`);
       }
     }
@@ -2203,10 +2319,10 @@ async function runAppendRebuttals(args) {
   const normalized = rawLines
     .map(({ text: line, inFence, eol }, i) => {
       if (inFence) {
-        checkCode(line, i + 1, 'a fence');
+        checkCode(line, i + 1, 'a fence', line);
         return line + eol;
       }
-      for (const span of splitLineSpans(line, false)) if (span.code) checkCode(span.text, i + 1, 'inline code');
+      for (const span of splitLineSpans(line, false)) if (span.code) checkCode(span.text, i + 1, 'inline code', line);
       if (REBUTTAL_HEADING_LIKE_RE.test(line.trim())) {
         problems.push(`--in:${i + 1}: "${line.trim()}" -- the raw file must hold only the entries; append-rebuttals writes the section heading itself`);
       }
@@ -2241,7 +2357,7 @@ async function runAppendRebuttals(args) {
   const newOnto = `${base}\n${heading}\n\n${body.endsWith('\n') ? body : `${body}\n`}`;
   const sibling = path.join(path.dirname(args.onto), `${rebutter}-findings.md`);
   const texts = { [peer]: newOnto, [rebutter]: await readRequired(sibling, '--onto sibling') };
-  const validation = validateProblems(texts);
+  const validation = validateProblems(texts, targetText);
   if (validation.length > 0) {
     logValidateProblems(validation);
     throw new RelayError('validate failed on the appended result; --onto left unchanged');
@@ -2302,7 +2418,8 @@ async function runAuditPrep(args) {
     throw new RelayError(`--out-dir ${args.outDir} is not empty (${existing.join(', ')}); it must hold only the two audit files`);
   }
   const texts = { A: await readPhase1Seat('A', args.phase1Dir), B: await readPhase1Seat('B', args.phase1Dir) };
-  const problems = validateProblems(texts);
+  const targetText = await readTargetText(args.targetDir);
+  const problems = validateProblems(texts, targetText);
   if (problems.length > 0) {
     logValidateProblems(problems);
     throw new RelayError('--phase1-dir does not validate; nothing written to --out-dir');
@@ -2322,6 +2439,7 @@ async function runAuditPrep(args) {
       phase1Dir: args.phase1Dir,
       forbidSeats: ['A', 'B'],
       peerIds,
+      targetText,
     });
     logScanHits(hits, name);
     blocked += hits.blocking;

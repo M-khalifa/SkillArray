@@ -12,7 +12,7 @@ compatibility: >-
   an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.6.0
+  version: 1.6.1
 ---
 
 # Cross Review
@@ -131,6 +131,7 @@ This directory is independently installable. Its configuration helper, helper
 tests, configuration reference, model-capability reference, review protocol, and
 review profiles are also bundled with pair-review. Keep those copies identical
 when maintaining both packages; neither package imports files from the other.
-The shared scripts include `snapshot-utils.mjs`, which `preflight.mjs` imports.
-The phase references, dispatchers, and `build-brief.mjs` are maintained here
+The shared scripts include `snapshot-utils.mjs` (imported by `preflight.mjs`) and
+`build-brief.mjs`, which reads only the shared review-protocol.md.
+The phase references and dispatchers are maintained here
 and do not require updates to another skill.

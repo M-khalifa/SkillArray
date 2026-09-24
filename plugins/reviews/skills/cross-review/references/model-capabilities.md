@@ -37,7 +37,8 @@ nonsecret model/provider configuration if needed; do not dump authentication fil
 When Codex is selected, the provider must be OpenAI, not merely a model name
 resembling GPT. The curated choices are whatever `review-config.mjs catalog`
 returns; `codex debug models` shows what the installed CLI can run, with each
-model's supported effort levels. The installed CLI and account entitlement
+model's supported effort levels. It prints one very long JSON line, so parse
+it rather than grep it, e.g. `codex debug models | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{for(const m of JSON.parse(d).models)console.log(m.slug,m.visibility)})"`. The installed CLI and account entitlement
 remain authoritative.
 
 The bundled dispatcher forwards:

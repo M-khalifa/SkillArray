@@ -11,7 +11,7 @@ compatibility: >-
   reviewers with explicit model selection and resume or relay their findings.
   Claude Code is the primary target. Model access depends on the user's account.
 metadata:
-  version: 1.6.0
+  version: 1.6.1
 ---
 
 # Pair Review
@@ -71,7 +71,8 @@ request; falsification never runs without it.
 2. Read the target and [references/review-protocol.md](references/review-protocol.md).
    Run [scripts/preflight.mjs](scripts/preflight.mjs) against the target
    directory per that doc's Pre-flight evidence paragraph and include its
-   output in the task packet. Give both seats the same task packet: scope,
+   output in the task packet; write its output and logs to a folder next to
+   the run directory, never inside it (the auditor receives the packet). Give both seats the same task packet: scope,
    current source snapshot, actual test commands, constraints, and expected
    output. Pick a lens from
    [references/review-profiles.md](references/review-profiles.md) (Code,
@@ -83,11 +84,14 @@ request; falsification never runs without it.
    source. Include a run ID in both agent names.
 4. Start both isolated reviewers concurrently using this harness's supported
    model/effort mechanism. Pass the protocol and task explicitly; do not
-   assume subagents inherit this conversation. Each brief carries
-   review-protocol.md's Standard seat instructions, Model identity, and
-   findings-schema sections verbatim, and tells the seat to write its
-   complete findings to its own assigned file and reply only with counts;
-   the orchestrator never retypes a seat's findings from a reply. In Phase 1, neither seat may
+   assume subagents inherit this conversation. Build each brief with
+   `node "<skill-dir>/scripts/build-brief.mjs" --mode phase1 --packet
+   <task-packet> --seat A|B --out <brief file> --output-path
+   <run-dir>/phase1/<seat>-findings.md`: it copies review-protocol.md's
+   seat rules, Model identity, findings schema, and web reviewer rules
+   verbatim, and tells the seat to write its findings to its own file and
+   reply only with counts; the orchestrator never retypes a seat's findings
+   from a reply. Tell each seat to read its brief from the file. In Phase 1, neither seat may
    read the peer's file. Review only; no source edits or commits. Each seat
    is a harness subagent, not a spawned process, so no script here can
    enforce a wall-clock bound the way `cross-review`'s dispatchers do; if
@@ -99,13 +103,15 @@ request; falsification never runs without it.
    type — this is what gives each seat WebFetch/WebSearch for
    review-protocol.md's Web verification rules; naming a more restricted spawn
    type for either seat silently loses that capability with no error to catch
-   it. Include the Web verification rules from review-protocol.md verbatim in
-   both seats' briefs — pair-review is Claude-and-Claude, so this capability
+   it. Both briefs carry review-protocol.md's "Web verification: reviewer
+   rules" subsection (build-brief adds it unless the task says "repo-only
+   review") — pair-review is Claude-and-Claude, so this capability
    is symmetric between seats by construction, unlike cross-review's
    Codex/OpenCode asymmetry.
 5. Wait for both independent passes to complete, AND
-   `scripts/blind-relabel.mjs validate --phase1-dir <run-dir>/phase1` exits
-   zero, then copy both files to `<run-dir>/phase1/original/` (the manifest
+   `scripts/blind-relabel.mjs validate --phase1-dir <run-dir>/phase1
+   --target-dir <target-dir>` exits zero (with `--target-dir` it also rejects a
+   claim ID a seat wrote inside an Evidence fence), then copy both files to `<run-dir>/phase1/original/` (the manifest
    hashes these untouched copies; step 6 appends to the working files). A
    nonzero `validate` exit means at least one claim block is missing a
    recognized `Severity:`, `Basis:`, `Evidence strength:`, or non-empty
@@ -124,7 +130,28 @@ request; falsification never runs without it.
    own conversation): by the exchange step that conversation already
    contains the peer's real findings and identity, so a fork handed to either
    seat is a blinding breach by construction, not a resume. Resume the exact
-   Phase 1 agent/session ID only.
+   Phase 1 agent/session ID only: in Claude Code, send a message to that
+   agent ID or name with the SendMessage tool, never a new Agent spawn. If a
+   seat can no longer be resumed, that seat's exchange is incomplete; a new
+   agent is not the same reviewer.
+
+   Both seats are Claude subagents with file-writing tools, so no sandbox
+   stops a source edit. After each phase (Phase 1, the exchange, and the
+   auditor), run `scripts/preflight.mjs --cd <target-dir> --check-stale
+   <snapshotHash>` with the hash from step 2. `stale: true` means something
+   changed the target during the review: stop, find the changed files, and
+   report the run as incomplete; never continue on a changed target.
+
+   A pass can complete and still be too shallow to exchange (few claims, and
+   its own `Checks performed` says most checks were not run). Before the
+   exchange, you may resume that SAME seat once with a coverage brief naming
+   the unchecked scope; the peer's findings are not shown, so it is still the
+   independent pass. Record it in the manifest as `coverage_rounds: 1`.
+
+   A redaction made before the exchange (no peer has seen the file yet) is
+   still part of the independent pass: re-run `validate`, then replace the
+   `phase1/original/` copy. A redaction after the exchange leaves
+   `original/` alone, and the manifest notes it.
 6. Unless mode is `none`, use `scripts/blind-relabel.mjs relabel` to relabel
    each seat's findings per the protocol's Three label layers before sending to
    the other reviewer (seat A's claims become `P1..Pn` in seat B's brief, seat
@@ -142,12 +169,15 @@ request; falsification never runs without it.
    report). Even with both seats on Claude, this keeps a reviewer from
    tailoring its rebuttal to which specific model it believes wrote a claim.
    Use file-ready messages when
-   supported; otherwise relay via the orchestrator. Send each seat the
-   scanned peer-view verbatim plus review-protocol.md's Rebuttal instruction,
-   and have it write its `### P<n>` entries to `<run-dir>/phase2/<seat>-rebuttals-raw.md`.
+   supported; otherwise relay via the orchestrator. Build each seat's
+   exchange brief with `build-brief.mjs --mode delta --peer-view <the
+   scanned peer-view for that seat> --out <brief file> --output-path
+   <run-dir>/phase2/<seat>-rebuttals-raw.md`; it carries the peer-view
+   verbatim plus review-protocol.md's Rebuttal instruction, and the seat
+   writes its `### P<n>` entries to that file.
    Append them with `scripts/blind-relabel.mjs append-rebuttals --in
    <raw file> --onto <the PEER's findings file> --rebutter <seat> --peer-view
-   <the peer-view that seat saw>`, which checks coverage, translates `P` back
+   <the peer-view that seat saw> --target-dir <target-dir>`, which checks coverage, translates `P` back
    to real IDs, and writes the heading below. Done by hand instead, append rebuttals
    (translated back to real `A`/`B` IDs) without overwriting original claims,
    under a section heading of the exact literal form `## Rebuttals (from
@@ -246,7 +276,13 @@ request; falsification never runs without it.
       (the task packet, the relabeled findings, any verification files from
       step c, review-protocol.md), read-only access to the exact Phase 1
       target snapshot, and one output path inside `<audit-input-dir>` for
-      its JSON; never point it at the run directory.
+      its JSON; never point it at the run directory. Build its prompt with
+      `build-brief.mjs --mode auditor --packet <audit-input-dir>/task-packet.md
+      --audit-dir <audit-input-dir> --target-dir <target-dir> --run-dir
+      <run-dir> --out <brief file> --output-path
+      <audit-input-dir>/findings.audit.json`; it copies review-protocol.md's
+      Auditor instructions and refuses a staged folder inside the run
+      directory, or a task packet that mentions the run directory.
       No seat identity or model names. The target snapshot is the isolated
       worktree path if `--isolate` was used, the target directory otherwise;
       the auditor must never modify it.

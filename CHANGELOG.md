@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.6.1 - 2026-09-23
+
+Fixes from the first live 1.6.0 run (14 StorageTwin emulator targets, 545
+findings, all completed).
+
+- Fewer false hard stops: claim-ID and peer-label hits are no longer blocking
+  when the text comes from the reviewed target itself, for example a WWN such
+  as `20:00:00:25:B5:00:00:0A`, `df -B1`, or project phases named "P1". In
+  that run, 11 of 13 hard-stop hits were such identifiers and cost 5
+  redaction rounds. A reviewer writing "see A2" still hard-stops.
+- `validate --target-dir` now catches a reviewer's own claim ID written
+  inside an evidence block before the Phase 1 freeze, instead of later at
+  the scan step. All 5 real leaks in that run were this pattern.
+- Pre-flight:
+  - The snapshot covers only the `--cd` folder, so work elsewhere in a
+    monorepo no longer makes the evidence stale.
+  - Each command now reports the files it wrote into the target.
+  - The test total line ("212 passed") is always kept.
+- The auditor brief refuses a task packet that names the run directory, and
+  a staged folder inside it. Pre-flight logs now go next to the run
+  directory, never inside it.
+- The Codex dispatcher reports `usage_delta`: the tokens of this call, not
+  the running total of the whole thread. With `--previous-result`, Phase 2
+  and redaction costs are correct without subtraction.
+- `build-manifest` prints a success line.
+- pair-review now gets the same protections:
+  - `build-brief.mjs` is shared, so pair-review builds its seat, exchange
+    and auditor briefs the same way, including the run-directory check. The
+    auditor instructions moved into the shared protocol, so both skills use
+    one list.
+  - Because both pair-review seats can write files, the orchestrator now
+    runs `preflight --check-stale` after each phase and stops if the target
+    changed.
+  - The docs now cover the seat resume call, the coverage round for a
+    shallow pass, and redaction before the freeze.
+- Reviewer briefs carry only the reviewer web rules, not dispatch mechanics.
+  This saves about 2 KB per brief and removes runtime names from briefs.
+- Docs:
+  - A redaction before the exchange replaces the frozen Phase 1 copy.
+  - What `--cd <subfolder>` covers.
+  - Which usage fields to report.
+  - How to read `codex debug models`.
+
 ## 1.6.0 - 2026-09-22
 
 Fixes from a cross-review of the skill itself, plus field feedback from
