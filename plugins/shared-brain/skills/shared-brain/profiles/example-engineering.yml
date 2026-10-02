@@ -1,0 +1,36 @@
+# Worked example: a project profile for an imaginary billing service.
+#
+# This file is an EXAMPLE of how to write a project profile. It is not
+# loaded by default. Copy it next to your project config and replace the
+# allowlist with your own project's domain nouns, keeping the shape.
+
+project: example-engineering
+
+allowlist:
+  - "the billing service's code or its data behavior"
+  - "a supported payment provider or partner API"
+  - "the service's integration framework and its conventions"
+  - "build and test tooling only where it is required to build or test the
+    service's code: a gate that blocks a release, a contract a ticket must
+    satisfy"
+
+blocklist:
+  - "model selection"
+  - "prompting technique"
+  - "agent delegation and orchestration"
+  - "commit and git workflow"
+  - "communication style"
+  - "agent-reliability observations (\"a model over-infers on bug hunts\" reads
+    like an engineering finding and is a working-style instruction; it does
+    not publish)"
+
+tiebreaker: >-
+  Publish if the lesson names a specific check, contract, or partner
+  behavior that constrains real code, even when it also observes agent
+  behavior. Block if the observation about the agent is the whole content,
+  with no named artifact a future ticket must satisfy. "Two gates were
+  added: check_partner_auth_field, check_snapshot_separation" names
+  artifacts; "agents ignore rules under pressure" names nothing.
+
+notes: >-
+  Follow the shape of this file, not its content.

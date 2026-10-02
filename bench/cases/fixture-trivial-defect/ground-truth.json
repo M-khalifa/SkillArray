@@ -1,0 +1,10 @@
+{
+  "defects": [
+    {
+      "id": "D1",
+      "description": "fixture seeded defect, for plumbing tests only",
+      "severity": "LOW",
+      "matches": ["fixture-defect-marker"]
+    }
+  ]
+}

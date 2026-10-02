@@ -1,0 +1,7 @@
+{
+  "id": "fixture-trivial-defect",
+  "description": "Tiny fixture case for run-comparison.mjs's own plumbing tests -- proves the runner works, not that any arm finds real defects.",
+  "target_note": "This case has no real target directory; it exists only to exercise case-loading and artifact-writing against the fake adapter.",
+  "target": null,
+  "scope": null
+}

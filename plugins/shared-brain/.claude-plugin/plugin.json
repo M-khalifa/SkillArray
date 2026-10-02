@@ -1,0 +1,8 @@
+{
+  "name": "shared-brain",
+  "description": "A shared, cross-project engineering knowledge store: search existing knowledge, capture durable session lessons, and migrate filtered local memory into a shared backend. Requires an MCP backend; opt-in separately from the review skills since it has a distinct data-sensitivity profile.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Mahmoud Khalifa"
+  }
+}
