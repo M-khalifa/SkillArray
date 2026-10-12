@@ -1,0 +1,17 @@
+# Dropped base rule items, one per line: <item text exactly as compare-baseline prints it><TAB><reason>
+"selection_source": "saved",	manifest example JSON in review-protocol.md was rewritten for the new manifest fields: lines reformatted or given new values
+"qualified_claims": 2,	manifest example JSON in review-protocol.md was rewritten for the new manifest fields: lines reformatted or given new values
+"breakdown": { "high_or_critical": 5, "disputed": 2, "conceded": 3, "unaddressed": 0 }	manifest example JSON in review-protocol.md was rewritten for the new manifest fields: lines reformatted or given new values
+"phase1": { "A.md": "...", "B.md": "..." },	manifest example JSON in review-protocol.md was rewritten for the new manifest fields: lines reformatted or given new values
+"phase2": { "A.md": "...", "B.md": "..." },	manifest example JSON in review-protocol.md was rewritten for the new manifest fields: lines reformatted or given new values
+Seat A always runs on this harness (Claude); seat B runs through Codex CLI or OpenCode's configured provider bridge, nev	false under Codex, where seat A is a claude-dispatch session; the opening now says seat A runs as a Claude reviewer on either host and seat B never does
+Claude seats use the harness's explicit model/effort mechanism.	reworded for both transports in the same paragraph: native seats use the host mechanism, CLI seats take --model and --effort on claude-dispatch
+[Phase 2](references/phase-2-cross-examination.md): exchange.mjs prepare; seat A's delta brief by SendMessage, seat B's	checklist step reworded host-neutral: SendMessage is Claude Code only and now lives in references/hosts/claude-code.md; a CLI seat resumes on its session
+Keep the orchestrator's context small. Run Phase 1 and Phase 2 in one session (a Claude seat resumes only from the sessi	narrowed: only a native seat must resume from the session that started it; a CLI seat resumes by session ID (host files)
+[Phase 2](references/phase-2-cross-examination.md), unless mode is none: exchange.mjs prepare --seat-b-harness, each sea	checklist step reworded host-neutral: SendMessage is Claude Code only and now lives in references/hosts/claude-code.md; a CLI seat resumes on its session
+Keep the orchestrator's context small. Run Phase 1 and Phase 2 in one session (both seats resume only from the session t	narrowed: only a native seat must resume from the session that started it; a CLI seat resumes by session ID (host files)
+Spawn it as a general-purpose agent (Tools: ), not a restricted-toolset subagent type — this is what gives it WebFetch/W	moved to references/hosts/claude-code.md; only the relative link to review-protocol.md changed for the new folder
+Claude Code is the primary target. metadata: version: 1.0.0 ---	frontmatter line that carries the skill version; the release bump to 1.1.0 changes it
+Model access depends on the user's account. metadata: version: 1.0.0 ---	frontmatter line that carries the skill version; the release bump to 1.1.0 changes it
+Every finding uses this schema (cross-review labels claims A1, A2, ... for seat A and B1, B2, ... for seat B; see Three	the seat schema sentence no longer points at the Three label layers section, which a seat brief does not carry
+Once you confirm a defect pattern at one location, grep or search the rest of the target for the same pattern and report	removed: it contradicted the Class sweep rule (one claim lists every site); review-profiles.md points at that rule

@@ -20,6 +20,38 @@ export function configPath(skill, env = process.env, home = os.homedir()) {
   return path.join(root, `${skill}.json`);
 }
 
+// A user's own bug checklists live next to the saved choices, never in the repository: <config dir>/checklists/<NAME>.md, one "- item" per line.
+export function checklistDir(env = process.env, home = os.homedir()) {
+  return path.join(path.dirname(configPath(SKILLS[0], env, home)), 'checklists');
+}
+
+const CHECKLIST_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
+
+export async function listChecklists(dir) {
+  let names = [];
+  try {
+    names = (await fs.readdir(dir)).filter((f) => f.endsWith('.md') && CHECKLIST_FILE_RE.test(f.slice(0, -3))).map((f) => f.slice(0, -3)).sort();
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  const out = [];
+  for (const name of names) out.push({ name, items: (await readChecklist(dir, name)).items.length });
+  return out;
+}
+
+export async function readChecklist(dir, name) {
+  if (!CHECKLIST_FILE_RE.test(name)) throw new Error('A checklist name is letters, digits, "-" or "_" (up to 40 characters)');
+  let text;
+  try {
+    text = await fs.readFile(path.join(dir, `${name}.md`), 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') throw new Error(`No checklist "${name}" in ${dir}`);
+    throw err;
+  }
+  const items = text.replace(/^﻿/, '').split(/\r?\n/).map((l) => /^\s*[-*]\s+(.+?)\s*$/.exec(l)?.[1]).filter(Boolean);
+  return { name, items };
+}
+
 function defaultRuntime(provider) {
   if (Object.hasOwn(PROVIDERS, provider)) return PROVIDERS[provider].runtimes[0];
   // opencode is the only runtime that accepts an uncatalogued provider.
@@ -69,8 +101,9 @@ export function validateConfig(config, skill) {
   for (const role of ['A', 'B']) validateSeat(normalized.reviewers?.[role], role);
   const { A, B } = normalized.reviewers;
   if (skill === 'pair-review') {
-    if (A.provider !== 'anthropic' || B.provider !== 'anthropic' || A.runtime !== 'claude' || B.runtime !== 'claude') {
-      throw new Error('Pair review requires two Claude-harness reviewers');
+    const vendors = { anthropic: 'claude', openai: 'codex' };
+    if (A.provider !== B.provider || vendors[A.provider] === undefined || A.runtime !== vendors[A.provider] || B.runtime !== vendors[B.provider]) {
+      throw new Error('Pair review requires two reviewers from one vendor: both anthropic/claude or both openai/codex');
     }
     if (A.model === B.model) throw new Error('Pair review requires two distinct models');
   } else {
@@ -138,6 +171,30 @@ export function resolveConfig(saved, skill, options = {}) {
   return validateConfig(config, skill);
 }
 
+const NATIVE_RUNTIME_OF_HOST = { 'claude-code': 'claude', codex: 'codex' };
+
+// The seats file preflight --host reads, built from a resolved configuration: an actor whose runtime is the host's own
+// is a native agent unless transport says cli; every other runtime runs through its CLI. The auditor repeats seat A unless --auditor names another model of the same provider.
+export function buildSeats(config, host, { transport = null, repoOnly = false, auditDepth = null, falsification = false, auditorModel = null, auditorEffort = null } = {}) {
+  if (auditDepth !== null && !['light', 'full'].includes(auditDepth)) throw new Error('--audit-depth must be light or full');
+  const nativeRuntime = NATIVE_RUNTIME_OF_HOST[host];
+  if (!nativeRuntime) throw new Error('--host must be claude-code or codex');
+  if (transport !== null && !['native', 'cli'].includes(transport)) throw new Error('--transport must be native or cli');
+  if (auditorModel !== null && !/^[^\s]+$/.test(auditorModel)) throw new Error('--auditor must be one model id with no spaces');
+  if (auditorEffort !== null && auditorModel === null) throw new Error('--auditor-effort needs --auditor');
+  const actor = (seat) => ({
+    provider: seat.provider, runtime: seat.runtime, model: seat.model,
+    effort: seat.effort === 'default' ? null : seat.effort,
+    transport: seat.runtime === nativeRuntime ? (transport ?? 'native') : 'cli',
+  });
+  const { A, B } = config.reviewers;
+  return {
+    seatA: actor(A), seatB: actor(B),
+    auditor: auditorModel === null ? actor(A) : { ...actor(A), model: auditorModel, effort: auditorEffort },
+    flags: { auditDepth: auditDepth ?? 'light', falsification, mode: config.mode, ...(repoOnly ? { repoOnly: true } : {}) },
+  };
+}
+
 export async function writeConfig(file, config) {
   const normalized = validateConfig(config, config.skill);
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -152,17 +209,27 @@ export async function writeConfig(file, config) {
 
 export function parseOptions(argv) {
   const [command = 'show', ...rest] = argv;
-  if (!['show', 'setup', 'resolve', 'reset', 'catalog', '--help'].includes(command)) throw new Error('Unknown command');
+  if (!['show', 'setup', 'resolve', 'reset', 'catalog', 'seats', 'checklists', '--help'].includes(command)) throw new Error('Unknown command');
   const options = {};
   const allowed = ['a', 'b', 'a-effort', 'b-effort', 'a-provider', 'b-provider', 'a-runtime', 'b-runtime', 'mode'];
+  if (command === 'checklists') allowed.push('name');
+  if (command === 'seats') allowed.push('host', 'transport', 'out', 'audit-depth', 'auditor', 'auditor-effort');
+  if (rest.includes('--help') || rest.includes('-h')) return { command: '--help', options: {} };
   for (let i = 0; i < rest.length; i += 2) {
+    if (command === 'seats' && (rest[i] === '--repo-only' || rest[i] === '--falsification')) {
+      const flag = rest[i].slice(2);
+      if (options[flag]) throw new Error(`Duplicate option: ${rest[i]}`);
+      options[flag] = true;
+      i -= 1;
+      continue;
+    }
     const key = rest[i].replace(/^--/, '');
     if (!rest[i].startsWith('--') || !allowed.includes(key)) throw new Error(`Unknown option: ${rest[i]}`);
     if (options[key] !== undefined) throw new Error(`Duplicate option: ${rest[i]}`);
     if (!rest[i + 1] || rest[i + 1].startsWith('--')) throw new Error(`${rest[i]} requires a value`);
     options[key] = rest[i + 1];
   }
-  if (!['setup', 'resolve'].includes(command) && rest.length) throw new Error(`${command} takes no options`);
+  if (!['setup', 'resolve', 'seats', 'checklists'].includes(command) && rest.length) throw new Error(`${command} takes no options`);
   return { command, options };
 }
 
@@ -170,9 +237,21 @@ async function main() {
   const skill = path.basename(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
   const { command, options } = parseOptions(process.argv.slice(2));
   if (command === '--help') {
-    process.stdout.write('review-config.mjs show|catalog|setup|resolve|reset\n' +
+    process.stdout.write('review-config.mjs show|catalog|setup|resolve|seats|checklists|reset\n' +
+      'checklists [--name NAME]: lists your own bug checklists (<config dir>/checklists/NAME.md, one "- item" per line, never in the repository), or prints one so its items can go into the task packet as hypotheses.\n' +
+      'seats: --host claude-code|codex [--transport native|cli] [--repo-only] [--falsification] [--audit-depth light|full] [--auditor MODEL [--auditor-effort LEVEL]] [--out FILE] [--a MODEL --b MODEL --mode MODE, and the other resolve overrides, for this run only]: prints (or writes) the seats file preflight --host reads, built from the saved choices.\n' +
       'setup/resolve: --a-provider PROVIDER --a-runtime RUNTIME --a MODEL [--a-effort LEVEL] (same for B) [--mode MODE]\n' +
       'setup saves; resolve overrides for one run without saving; reset removes only this skill config.\n');
+    return;
+  }
+  if (command === 'checklists') {
+    const dir = checklistDir();
+    if (options.name) {
+      const { items } = await readChecklist(dir, options.name);
+      process.stdout.write(items.map((item) => `- ${item}`).join('\n') + '\n');
+    } else {
+      process.stdout.write(JSON.stringify({ dir, checklists: await listChecklists(dir) }, null, 2) + '\n');
+    }
     return;
   }
   if (command === 'catalog') { process.stdout.write(JSON.stringify(catalog(), null, 2) + '\n'); return; }
@@ -188,6 +267,23 @@ async function main() {
     return;
   }
   const config = resolveConfig(saved, skill, options);
+  if (command === 'seats') {
+    if (!options.host) throw new Error('seats needs --host claude-code or --host codex');
+    const seats = buildSeats(config, options.host, { transport: options.transport ?? null, repoOnly: options['repo-only'] === true, auditDepth: options['audit-depth'] ?? null, falsification: options.falsification === true, auditorModel: options.auditor ?? null, auditorEffort: options['auditor-effort'] ?? null });
+    const text = JSON.stringify(seats, null, 2) + '\n';
+    if (options.out) {
+      try {
+        await fs.writeFile(path.resolve(options.out), text, { flag: 'wx' });
+      } catch (err) {
+        if (err.code === 'EEXIST') throw new Error(`${path.resolve(options.out)} already exists and is never overwritten: choose a new --out path`);
+        throw err;
+      }
+      process.stdout.write(JSON.stringify({ seatsFile: path.resolve(options.out) }) + '\n');
+    } else {
+      process.stdout.write(text);
+    }
+    return;
+  }
   if (command === 'setup') await writeConfig(file, config);
   process.stdout.write(JSON.stringify({ path: file, saved: command === 'setup', config }, null, 2) + '\n');
 }

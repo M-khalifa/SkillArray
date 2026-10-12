@@ -1,5 +1,8 @@
 # Phase 2 — Cross-examination
 
+> **With `review-run` you do not need this file for the normal path.** SKILL.md's Quickstart lists the commands in order. Read it when a
+> step fails, a seat must be replaced or resumed by hand, a scan or validation stops the run, or you dispatch without the sequencer.
+
 ## Contents
 
 - Resuming each seat
@@ -12,30 +15,24 @@ two independent findings sets without rebuttal data (SKILL.md, Invocation).
 
 ## Resuming each seat
 
-**Never resume by forking** (e.g. an `Agent` tool call with
-`subagent_type: "fork"`, or any equivalent that inherits the orchestrator's
-own conversation): by the exchange step that conversation already
-contains the peer's real findings and identity, so a fork handed to either
-seat is a blinding breach by construction, not a resume. Resume the exact
-Phase 1 agent/session ID only: in Claude Code, send a message to that
-agent ID or name with the SendMessage tool, never a new Agent spawn. Both
-seats can be resumed only from the orchestrator session that started them
-(from another session SendMessage reports "No transcript found for agent
-ID"), so run the exchange in that session. If it ended, resume it first,
-from the working directory it ran in (`claude --resume <session id>`, or
-headless `claude -p --resume <session id> "<prompt>"`; the resumed session
-reaches the seat with its context, tested headless only; the id is the folder name in the seat's
-`~/.claude/projects/<project>/<session id>/subagents/agent-<agentId>.jsonl`
-path). Only one process may resume it: first check that no
-`claude ... --resume <session id>` is already running. If a seat still cannot be resumed, that seat's exchange is
-incomplete; a new agent is not the same reviewer.
+**Never resume by forking** the orchestrator's own conversation: by the exchange step that
+conversation already contains the peer's real findings and identity, so a fork handed to either
+seat is a blinding breach by construction, not a resume. Resume the exact Phase 1 seat identity
+only: a CLI seat by its session ID, a native seat by its agent ID (the host file gives the
+mechanics, and the recovery when the session that started a native seat has ended). If a seat
+still cannot be resumed, that seat's exchange is incomplete; a new agent is not the same reviewer.
 
 ## Exchange
 
+`node "<skill-dir>/scripts/review-run.mjs" phase2 --run-dir "<run-dir>" --start` runs `exchange.mjs
+prepare` and resumes every CLI seat on its Phase 1 session with its delta brief; `--wait` waits and
+runs `exchange.mjs finish`. It prints the brief path of each native seat, which you resume with the
+host's action. In mode `none` it says so and does nothing.
+
 Unless mode is `none`, run these steps as one command:
 `node "<skill-dir>/scripts/exchange.mjs" prepare --run-dir "<run-dir>"
---target-dir "<target-dir>" --tokens "<seat-a-model>,<seat-b-model>"
---seat-b-harness` (plus the run's `--source-dir`/`--checklist` flags). It
+--target-dir "<target-dir>" --tokens "<seat-a-model>,<seat-b-model>"`
+(plus the run's `--source-dir`/`--checklist` flags; add `--seat-b-harness` only for a manual run without `run.json` where seat B writes its own file, never when seat B is a Codex final-message seat). It
 validates, copies both files to `phase1/original/`, relabels and scans one
 direction at a time, and builds both delta briefs (`phase2/delta-brief-A.txt`,
 `phase2/delta-brief-B.txt`). A validate failure or scan hit names the seat
@@ -139,7 +136,8 @@ branch name, never `node_modules/`). `scan` distinguishes three tiers:
 Tiers 1 and 2 behave identically: return the file to the reviewer's own
 context for redaction. Never silently forward or hand-edit prose on the
 reviewer's behalf. Allow at most one redaction round per file; if the second
-scan still hits, stop and report to the user rather than looping.
+scan names the same token again, stop and report to the user rather than looping. A different
+token means the first round worked: allow one more round for it. Each scan hit lists its matched token.
 
 **Every `scan` in this run MUST also pass `--phase1-dir <run-dir>/phase1
 --forbid-seats <the real seat letter(s) that must not survive in THIS
@@ -244,7 +242,7 @@ file to change two lines costs a full seat turn for no quality gain. Put the
 reply back with `blind-relabel.mjs splice --file <seat file> --match-heading
 "## A3" --with-result <result.json>` (a Codex/OpenCode seat) or `--with
 <file>` (a seat that wrote its reply to a file); `--match-line "<exact line>"`
-replaces one line, such as a leaked Evidence line. `--file` can also be a seat's
+replaces one line, such as a leaked Evidence line. On Windows PowerShell 5.1 use `--match-line-file <file>` (the exact line in a UTF-8 file) for a line that contains double quotes. `--file` can also be a seat's
 raw rebuttal file (`phase2/<seat>-rebuttals-raw.md`) before `finish`. The block ends at the next
 heading or `---` break, which stays in place. `splice` refuses, leaving the
 file unchanged: a match that is not unique, text before the heading, a reply

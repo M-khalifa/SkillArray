@@ -36,14 +36,14 @@
 // already works, same as codex-dispatch.mjs assumes `codex login` already
 // succeeded).
 
-import { promises as fs, createReadStream } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
-import { createHash } from 'node:crypto';
 import { buildChildEnv } from './env-filter.mjs';
-import { hashInventory, diffInventories } from './snapshot-utils.mjs';
+import { hashWriteInventory, diffInventories, DEPENDENCIES_NOTE } from './snapshot-utils.mjs';
+import { setupIsolatedWorktree, runCaptureBuffer } from './worktree-utils.mjs';
 import {
   assertWin32Safe,
   winQuote,
@@ -359,341 +359,6 @@ function runCapture(cmd, args, cwd) {
 async function isGitRepo(cwd) {
   const res = await runCapture('git', ['rev-parse', '--git-dir'], cwd);
   return res.code === 0;
-}
-
-// Buffer-based capture for binary-safe git output (a tracked-file diff can
-// contain non-UTF8 bytes); runCapture above decodes as utf8 and would corrupt it.
-function runCaptureBuffer(cmd, args, cwd, inputBuffer) {
-  return new Promise((resolve) => {
-    const child = spawnCli(cmd, args, { cwd });
-    const chunks = [];
-    let stderr = '';
-    child.stdout.on('data', (d) => chunks.push(d));
-    child.stderr.on('data', (d) => (stderr += d.toString('utf8')));
-    child.on('error', (err) => resolve({ code: -1, stdout: Buffer.alloc(0), stderr: String(err) }));
-    child.on('close', (code) => resolve({ code, stdout: Buffer.concat(chunks), stderr }));
-    if (inputBuffer !== undefined) {
-      // Without this, a process dying before it reads a large buffer (e.g. git apply
-      // rejecting a malformed patch) crashes the whole script via an unhandled stdin error.
-      child.stdin.on('error', (err) => { log(`stdin write failed: ${err.message}`); });
-      child.stdin.write(inputBuffer);
-      child.stdin.end();
-    }
-  });
-}
-
-// Sibling of worktreeDir, not inside it: proves the snapshot copy finished, and never appears as an untracked file to the reviewer.
-function snapshotMarkerPath(worktreeDir) {
-  return `${worktreeDir}.snapshot-complete`;
-}
-
-function sha256(buf) {
-  return createHash('sha256').update(buf).digest('hex');
-}
-
-function normalizePath(p) {
-  const abs = path.resolve(p);
-  return process.platform === 'win32' ? abs.toLowerCase() : abs;
-}
-
-// Streamed so a large untracked file doesn't load whole into memory just to fingerprint it.
-function sha256OfFile(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('sha256');
-    const stream = createReadStream(filePath);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('error', reject);
-    stream.on('end', () => resolve(hash.digest('hex')));
-  });
-}
-
-// Every field must match for reuse; untracked entries carry content hashes, and trailing-slash
-// entries are nested repos (ls-files reports the directory, not its contents) that get skipped.
-async function computeSnapshotFingerprint(targetDir) {
-  const toplevelRes = await runCapture('git', ['rev-parse', '--show-toplevel'], targetDir);
-  if (toplevelRes.code !== 0) {
-    throw new Error(`git rev-parse --show-toplevel failed: ${toplevelRes.stderr.trim()}`);
-  }
-  const toplevel = toplevelRes.stdout.toString('utf8').trim();
-
-  const headRes = await runCapture('git', ['rev-parse', 'HEAD'], targetDir);
-  if (headRes.code !== 0) {
-    throw new Error(`git rev-parse HEAD failed: ${headRes.stderr.trim()}`);
-  }
-  const head = headRes.stdout.toString('utf8').trim();
-
-  const diffRes = await runCaptureBuffer('git', ['diff', 'HEAD', '--binary'], targetDir);
-  if (diffRes.code !== 0) {
-    throw new Error(`git diff HEAD --binary failed: ${diffRes.stderr.trim()}`);
-  }
-
-  const untrackedRes = await runCapture(
-    'git', ['ls-files', '--others', '--exclude-standard', '-z'], targetDir
-  );
-  if (untrackedRes.code !== 0) {
-    throw new Error(`git ls-files --others failed: ${untrackedRes.stderr.trim()}`);
-  }
-  const rawUntracked = untrackedRes.stdout.split('\0').filter((p) => p.length > 0);
-  const skippedDirs = rawUntracked.filter((p) => p.endsWith('/'));
-  const untrackedPaths = rawUntracked.filter((p) => !p.endsWith('/'));
-
-  const untracked = [];
-  for (const rel of untrackedPaths.sort()) {
-    const sha = await sha256OfFile(path.join(targetDir, rel));
-    untracked.push({ path: rel, sha });
-  }
-
-  return {
-    toplevel: process.platform === 'win32' ? toplevel.toLowerCase() : toplevel,
-    head,
-    diffSha: sha256(diffRes.stdout),
-    diffBuffer: diffRes.stdout,
-    untracked,
-    skippedDirs: skippedDirs.sort(),
-  };
-}
-
-// A marker of unexpected shape (hand-edited, future schema) must read as a mismatch, not throw
-// past setupIsolatedWorktree's never-throws contract.
-function fingerprintsMatch(a, b) {
-  try {
-    if (a.toplevel !== b.toplevel || a.head !== b.head || a.diffSha !== b.diffSha) return false;
-    if (a.skippedDirs.length !== b.skippedDirs.length) return false;
-    if (a.skippedDirs.some((d, i) => d !== b.skippedDirs[i])) return false;
-    if (a.untracked.length !== b.untracked.length) return false;
-    for (let i = 0; i < a.untracked.length; i++) {
-      if (a.untracked[i].path !== b.untracked[i].path || a.untracked[i].sha !== b.untracked[i].sha) {
-        return false;
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Mismatch fails closed without cleanup: on a cross-repo mismatch, cleanup would
-// run `git worktree remove` against the wrong repo.
-async function setupIsolatedWorktree(targetDir, worktreeDir) {
-  const markerPath = snapshotMarkerPath(worktreeDir);
-
-  let currentFingerprint;
-  try {
-    currentFingerprint = await computeSnapshotFingerprint(targetDir);
-  } catch (err) {
-    return { ok: false, reason: `snapshot fingerprint failed: ${err.message}` };
-  }
-
-  // git ls-files/diff run cwd-relative, so a targetDir below the repo root produces untracked
-  // paths relative to targetDir while the worktree is built at the repo root -- silently wrong.
-  if (normalizePath(currentFingerprint.toplevel) !== normalizePath(targetDir)) {
-    return {
-      ok: false,
-      reason:
-        `--cd "${targetDir}" is not the repository root (root is "${currentFingerprint.toplevel}"); ` +
-        '--isolate requires --cd to be the repository root, subdirectories are not supported',
-    };
-  }
-
-  // git worktree add links a submodule's gitlink but leaves its working tree empty
-  // until a separate `submodule update` runs.
-  const submoduleRes = await runCapture('git', ['submodule', 'status'], targetDir);
-  if (submoduleRes.code === 0 && submoduleRes.stdout.trim().length > 0) {
-    return {
-      ok: false,
-      reason:
-        `"${targetDir}" has one or more git submodules; --isolate does not populate submodule ` +
-        'working trees inside the worktree copy, so an isolated seat would see empty submodule ' +
-        'directories instead of their real content -- not currently supported',
-    };
-  }
-
-  let markerText = null;
-  try {
-    markerText = await fs.readFile(markerPath, 'utf8');
-    await fs.access(path.join(worktreeDir, '.git'));
-  } catch {
-    markerText = null;
-  }
-
-  // A marker file is present (even if unparseable) but the worktree's .git is gone: the marker
-  // is stale bookkeeping for a worktree that no longer exists, safe to clean up and rebuild.
-  // A marker present AND the worktree still exists but the marker can't be parsed is different:
-  // fail closed rather than silently rebuilding over content that might belong to another target.
-  if (markerText !== null) {
-    let existingMarker;
-    try {
-      existingMarker = JSON.parse(markerText);
-    } catch {
-      return {
-        ok: false,
-        reason:
-          'the worktree at this path has an unreadable snapshot marker; refusing to guess ' +
-          'whether it is safe to reuse or rebuild — remove it manually and restart the ' +
-          'affected review passes per review-protocol.md',
-      };
-    }
-    if (!fingerprintsMatch(existingMarker, currentFingerprint)) {
-      return {
-        ok: false,
-        reason:
-          'snapshot fingerprint mismatch: the worktree at this path was built from a different ' +
-          'target or the target has drifted since (toplevel/head/diff/untracked-files changed); ' +
-          'refusing to reuse or silently rebuild it — remove the stale worktree and restart the ' +
-          'affected review passes per review-protocol.md',
-      };
-    }
-    // Source fingerprint matching is not enough: OpenCode has no CLI-enforced read-only sandbox,
-    // so the worktree ITSELF may have been directly mutated after it was built, independent of
-    // any change to the source repo the worktree was built from. Recompute and compare the
-    // worktree's own fingerprint too; a marker missing this field (old shape) fails closed via
-    // fingerprintsMatch's try/catch, same as any other malformed marker.
-    let currentWorktreeFingerprint;
-    try {
-      currentWorktreeFingerprint = await computeSnapshotFingerprint(worktreeDir);
-    } catch (err) {
-      return { ok: false, reason: `worktree snapshot fingerprint failed: ${err.message}` };
-    }
-    if (!fingerprintsMatch(existingMarker.worktree, currentWorktreeFingerprint)) {
-      return {
-        ok: false,
-        reason:
-          'worktree snapshot mismatch: the isolated worktree itself was modified after it was ' +
-          'built (its source-repo fingerprint still matches, but its own tracked/untracked ' +
-          'content does not) — refusing to reuse or silently rebuild it; remove the stale ' +
-          'worktree and restart the affected review passes per review-protocol.md',
-      };
-    }
-    return { ok: true, reused: true, skippedDirs: currentFingerprint.skippedDirs };
-  }
-
-  // No marker: only an orphaned worktree of targetDir itself (a deleted marker) is safe to
-  // rebuild over. Anything else here -- unrelated content, another repo's worktree -- must refuse.
-  let worktreeDirEntries = null;
-  try {
-    worktreeDirEntries = await fs.readdir(worktreeDir);
-  } catch (err) {
-    if (err.code !== 'ENOENT') {
-      return {
-        ok: false,
-        reason: `the path "${worktreeDir}" exists but is not a directory (${err.code}); refusing to delete it — remove it manually if it is safe to reuse`,
-      };
-    }
-    worktreeDirEntries = null; // doesn't exist: nothing to protect, proceed to build
-  }
-  if (worktreeDirEntries !== null && worktreeDirEntries.length > 0) {
-    let gitdirTarget;
-    try {
-      gitdirTarget = await fs.readFile(path.join(worktreeDir, '.git'), 'utf8');
-    } catch {
-      return {
-        ok: false,
-        reason:
-          `the path "${worktreeDir}" already contains content this dispatcher did not create ` +
-          '(no marker, no worktree .git file) — refusing to delete it; remove it manually if it ' +
-          'is safe to reuse',
-      };
-    }
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(gitdirTarget);
-    if (!m) {
-      return {
-        ok: false,
-        reason:
-          `the path "${worktreeDir}" has a ".git" file that is not a recognizable worktree ` +
-          'gitdir pointer; refusing to delete it — remove it manually if it is safe to reuse',
-      };
-    }
-    const commonDirRes = await runCapture(
-      'git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], targetDir
-    );
-    const gitdirResolved = normalizePath(m[1]);
-    const targetCommonDir = commonDirRes.code === 0 ? normalizePath(commonDirRes.stdout.trim()) : null;
-    const belongsToTarget =
-      targetCommonDir !== null &&
-      (gitdirResolved === targetCommonDir || gitdirResolved.startsWith(targetCommonDir + path.sep));
-    if (!belongsToTarget) {
-      return {
-        ok: false,
-        reason:
-          `the path "${worktreeDir}" is a git worktree of a DIFFERENT repository than the ` +
-          'current target; refusing to delete it — this would destroy that repository\'s ' +
-          'working copy and orphan its own .git/worktrees/ registration',
-      };
-    }
-    // Belongs to targetDir itself: an orphaned worktree with a deleted marker, the legitimate
-    // crash-recovery case. Falls through to cleanup() + rebuild below.
-  }
-
-  const cleanup = async () => {
-    await runCapture('git', ['worktree', 'remove', '--force', worktreeDir], targetDir).catch(() => {});
-    await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
-    await fs.rm(markerPath, { force: true }).catch(() => {});
-  };
-  const fail = async (reason) => {
-    await cleanup();
-    return { ok: false, reason };
-  };
-
-  try {
-    await cleanup();
-    await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
-    const addRes = await runCapture(
-      'git', ['worktree', 'add', '--detach', worktreeDir, currentFingerprint.head], targetDir
-    );
-    if (addRes.code !== 0) {
-      return fail(`git worktree add failed: ${addRes.stderr.trim()}`);
-    }
-
-    // Tracked modifications: the SAME diff buffer just fingerprinted, applied inside the worktree,
-    // so the marker records exactly what was applied, not a value recomputed moments later.
-    if (currentFingerprint.diffBuffer.length > 0) {
-      const applyRes = await runCaptureBuffer(
-        'git', ['apply', '--binary'], worktreeDir, currentFingerprint.diffBuffer
-      );
-      if (applyRes.code !== 0) {
-        return fail(`git apply --binary failed in worktree: ${applyRes.stderr.trim()}`);
-      }
-    }
-
-    // Untracked files: git diff never sees these, so copy each one by hand. Directories that are
-    // themselves git repos (currentFingerprint.skippedDirs) cannot be copied via copyFile and are
-    // deliberately left out of the worktree; the caller sees them in the returned skippedDirs.
-    for (const { path: rel } of currentFingerprint.untracked) {
-      const src = path.join(targetDir, rel);
-      const dest = path.join(worktreeDir, rel);
-      await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.copyFile(src, dest);
-    }
-
-    // Fingerprint the WORKTREE itself, not just its source, after it is fully built (tracked
-    // diff applied, untracked files copied) so a direct mutation inside the worktree afterward
-    // (OpenCode has no CLI-enforced read-only sandbox) is detectable on the next reuse attempt,
-    // not just a change to the original source repository the worktree was built from.
-    let worktreeFingerprint;
-    try {
-      worktreeFingerprint = await computeSnapshotFingerprint(worktreeDir);
-    } catch (err) {
-      return fail(`worktree snapshot fingerprint failed: ${err.message}`);
-    }
-
-    await fs.writeFile(markerPath, JSON.stringify({
-      toplevel: currentFingerprint.toplevel,
-      head: currentFingerprint.head,
-      diffSha: currentFingerprint.diffSha,
-      untracked: currentFingerprint.untracked,
-      skippedDirs: currentFingerprint.skippedDirs,
-      worktree: {
-        toplevel: worktreeFingerprint.toplevel,
-        head: worktreeFingerprint.head,
-        diffSha: worktreeFingerprint.diffSha,
-        untracked: worktreeFingerprint.untracked,
-        skippedDirs: worktreeFingerprint.skippedDirs,
-      },
-    }));
-    return { ok: true, reused: false, skippedDirs: currentFingerprint.skippedDirs };
-  } catch (err) {
-    return fail(`worktree setup failed: ${err.message}`);
-  }
 }
 
 async function gitStatusPorcelain(cwd) {
@@ -1019,6 +684,9 @@ async function main() {
       startedAt, finishedAt, durationMs: Date.now() - startedAtMs,
       timeoutS: args.timeout,
       usage: buildUsageField(tokensObserved),
+      // One dispatch is one opencode run, so the manifest adds the calls of a seat. Whether the tokens of a
+      // multi-step run are cumulative is still unverified (see runOpencode).
+      usageSemantics: 'per-call',
       envMode: args.envMode,
     };
   };
@@ -1098,13 +766,17 @@ async function main() {
   let gitTracked = false;
   let beforeStatus = null;
   let beforeInventory = null;
+  let dependenciesCovered = true;
   let touchedFilesNote;
   try {
     gitTracked = await isGitRepo(cdAbs);
     if (gitTracked) {
       beforeStatus = await gitStatusPorcelain(cdAbs);
     } else {
-      beforeInventory = (await hashInventory(cdAbs)).files;
+      const baseline = await hashWriteInventory(cdAbs);
+      beforeInventory = baseline.files;
+      dependenciesCovered = baseline.dependenciesCovered;
+      if (!dependenciesCovered) log(DEPENDENCIES_NOTE);
     }
   } catch (err) {
     gitTracked = false;
@@ -1151,7 +823,7 @@ async function main() {
     }
   } else if (beforeInventory) {
     try {
-      touchedFiles = diffInventories(beforeInventory, (await hashInventory(cdAbs)).files);
+      touchedFiles = diffInventories(beforeInventory, (await hashWriteInventory(cdAbs, { includeDependencies: dependenciesCovered })).files);
     } catch (err) {
       touchedFilesNote = `after-run file inventory failed, touchedFiles will be null: ${err.message}`;
       log(touchedFilesNote);
@@ -1170,6 +842,8 @@ async function main() {
   };
   if (touchedFiles === null && touchedFilesNote) {
     baseFields.touchedFilesNote = touchedFilesNote;
+  } else if (!dependenciesCovered) {
+    baseFields.touchedFilesNote = DEPENDENCIES_NOTE;
   }
 
   if (opencodeResult.timedOut) {

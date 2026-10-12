@@ -1,5 +1,8 @@
 # Phase 1 — Independent passes
 
+> **With `review-run` you do not need this file for the normal path.** SKILL.md's Quickstart lists the commands in order. Read it when a
+> step fails, a seat must be replaced or resumed by hand, a scan or validation stops the run, or you dispatch without the sequencer.
+
 ## Contents
 
 - Run directory and task packet
@@ -25,7 +28,8 @@ directory; for a run that may last more than a day, put it and any source
 snapshot outside the temporary directory, since a temp cleaner such as
 Windows Storage Sense can delete files older than a day. Assign `<run-dir>/phase1/A-findings.md` and
 `<run-dir>/phase1/B-findings.md`; keep artifacts outside the reviewed
-source. Include a run ID in both agent names.
+source, and outside its git repository unless they sit in a git-ignored folder (preflight refuses that
+layout with a Claude CLI seat). Include a run ID in both agent names.
 
 When the target is your own change against a ticket, list in the packet the
 known deviations from its acceptance criteria, or write "none": an undisclosed
@@ -100,6 +104,16 @@ caches) is visible there before any seat starts; clean it up or record it in
 the packet, or a seat can be blamed for a file the tests wrote. Gitignored
 output is not covered.
 
+With `--out`, pre-flight writes the JSON to the file and prints one summary line (hash, per-command exit codes,
+`targetChanged`). The commands are under `tier2.results[]` (`command`, `exitCode`, `timedOut`, `touchedFiles`, and
+`stdout`/`stderr` with `log`, `sha256`, `tail`, `summary`, `matches` under `--compact`), next to `tier2.snapshotHash`.
+
+**Tests in a second repository.** `--exec-in <path> "<command>"` (repeatable) runs a Tier 2 command with `<path>` as
+the working directory. Results for each path are listed under `tier2Repos`, with that repository's own
+`snapshotHash`, `snapshotHashAfter`, `targetChanged` and per-command `touchedFiles`. Check each repository for
+staleness with its own `preflight.mjs --cd <path> --check-stale <snapshotHash>`; `--exec` results stay bound to `--cd`.
+With `--compact`, the command logs continue the `command-N` numbering after `--exec`'s.
+
 **Repository freshness.** A local clone can be far behind its remote: in one
 live run a HIGH security finding described code already fixed upstream, and
 the clones were 72, 143 and 244 commits behind. Run pre-flight with
@@ -171,7 +185,7 @@ assume subagents inherit this conversation. Build each brief with
 `node "<skill-dir>/scripts/build-brief.mjs" --mode phase1 --packet
 <task-packet> --seat A|B --out <brief file> --output-path
 <run-dir>/phase1/<seat>-findings.md`: it copies review-protocol.md's
-seat rules, Model identity, findings schema, and web reviewer rules
+seat rules, findings schema, and web reviewer rules
 verbatim, and tells the seat to write its findings to its own file and
 reply only with counts; the orchestrator never retypes a seat's findings
 from a reply. Tell each seat to read its brief from the file. In Phase 1, neither seat may
@@ -179,23 +193,26 @@ read the peer's file. Review only; no source edits or commits. Do not set
 a time or token limit on a seat: a seat stopped part-way is a failed pass
 that has to be rerun, which costs more than letting it finish. Apply a
 limit only when the user asks for one, and then treat an exceeded limit as
-an incomplete review for that seat, never as a completed one. Spawn both seats
-as a general-purpose agent (`Tools: *`), not a restricted-toolset subagent
-type — this is what gives each seat WebFetch/WebSearch for
-review-protocol.md's Web verification rules; naming a more restricted spawn
-type for either seat silently loses that capability with no error to catch
-it. Both briefs carry review-protocol.md's "Web verification: reviewer
+an incomplete review for that seat, never as a completed one. Start both seats through the transport the host file
+names; a native seat gets full tools so it keeps web access. For a CLI seat,
+`node "<skill-dir>/scripts/review-run.mjs" phase1 --run-dir "<run-dir>" --start` builds both briefs
+from `run.json`, starts each CLI seat detached through its runtime's dispatcher, `claude-dispatch.mjs` or `codex-dispatch.mjs` (a Claude seat writes only into its
+own `phase1/seat-<role>/` folder; a Codex seat returns its answer as the final message and the dispatcher saves it) and prints the brief path of each native seat; `--wait` waits for
+both, copies each file-channel CLI seat's file to `phase1/<role>-findings.md`, compares the two resolved model IDs (Claude: `init`; Codex: the thread rollout)
+(native seats: the requested IDs, recorded as `family-distinct`) and stops if they are equal, then
+runs `validate`. When a CLI seat ended badly (an error, or a detached worker that died), the next
+`--wait` dispatches that seat again as a new session in the same worktree; it does not resume the
+failed session (to resume the recorded session, run the seat's dispatcher by hand with `--session`). The
+worktree is the one its failed attempt recorded. Both briefs carry review-protocol.md's "Web verification: reviewer
 rules" subsection (build-brief adds it unless the task says "repo-only
-review") — pair-review is Claude-and-Claude, so this capability
+review") — both pair-review seats come from one vendor, so this capability
 is symmetric between seats by construction, unlike cross-review's
 Codex/OpenCode asymmetry. While both run, report status about every 10
 minutes or when the user asks: each seat's elapsed time and how many
 `## A<n>`/`## B<n>` headings its file holds so far (the brief asks each
 seat to add findings as it confirms them). A partial file is not a result;
-validate only after the seat replies "written". Note each seat's agentId
-for `build-manifest --seat-transcript` (it sums the seat's real token use;
-the harness's `totalTokens` is only its last call's size) and its duration
-for `--seat-usage`: add up the clock time of all its turns.
+validate only after the seat replies "written". Record each seat's transcript or result for
+`build-manifest` as the host file says, and its duration for `--seat-usage`.
 
 **Cap cost.** The per-fetch cost was measured directly: a single trivial
 web-search turn under `codex exec --search` cost 12,758–13,454 tokens across
@@ -233,8 +250,10 @@ its initial pass; resume it for the exchange. This avoids agents waiting
 indefinitely for a peer that has not been released by the orchestrator.
 Missing files may be recovered verbatim from a valid final response.
 
-Both seats are Claude subagents with file-writing tools, so no sandbox
-stops a source edit. After each phase (Phase 1, the exchange, and the
+In a Claude pair both seats are Claude subagents with file-writing tools, so no sandbox
+stops a source edit. In an OpenAI pair both seats run in Codex's `read-only` sandbox, which is enforced, and `touchedFiles` is still checked. For a Claude CLI seat `fileTools` are enforced and `shell` is prompt-only: a shell can
+still read the peer's files and write by absolute path, so the report says so and `touchedFiles` in
+each `result.json` is the check. After each phase (Phase 1, the exchange, and the
 auditor), run `scripts/preflight.mjs --cd <target-dir> --check-stale
 <snapshotHash>` with the hash from pre-flight. `stale: true` means something
 changed the target during the review: stop, find the changed files, and
@@ -274,8 +293,8 @@ started it; if that session ended, resume the session first
 **A provider becomes unavailable during Phase 1** (a usage limit the user will
 not wait out, a lost login). Before any findings are exchanged, that seat may
 move to another provider under the replacement rule above, and the run may move
-to the other skill when only that skill allows the new pairing (two Claude
-models: pair-review; a non-Claude seat: cross-review). Move the unused seat's
+to the other skill when only that skill allows the new pairing (two models of one vendor:
+pair-review; two vendors: cross-review). Move the unused seat's
 folder out of `phase1/` and keep it, and build the new seat's brief with the
 skill that now runs the review, from the same task packet. A seat that is
 running or finished keeps its pass only when its brief differs from that

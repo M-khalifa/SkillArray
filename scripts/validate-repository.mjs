@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -67,6 +67,24 @@ async function main() {
   assert(typeof reviews.version === "string" && reviews.version.length > 0, "reviews plugin.json must declare a version");
 
   {
+    // The Codex manifest and marketplace sit beside the Claude Code ones and must agree with them.
+    const codex = await readJson("plugins/reviews/.codex-plugin/plugin.json");
+    assert(codex.name === "reviews", "Codex plugin.json: unexpected plugin name");
+    assert(
+      codex.version === reviews.version,
+      `Codex plugin.json version ${codex.version} differs from the Claude Code plugin version ${reviews.version}`,
+    );
+    assert(codex.skills === "./skills/", "Codex plugin.json: skills must be ./skills/");
+    const codexMarketplace = await readJson(".agents/plugins/marketplace.json");
+    assert(Array.isArray(codexMarketplace.plugins), "Codex marketplace plugins must be an array");
+    const entry = codexMarketplace.plugins.find((plugin) => plugin.name === "reviews");
+    assert(
+      entry && entry.source && entry.source.path === "./plugins/reviews",
+      "Codex marketplace: the reviews entry must point at ./plugins/reviews",
+    );
+  }
+
+  {
     // CHANGELOG's top RELEASED header (skipping a leading "- Unreleased"
     // section, which documents in-progress work for a version plugin.json
     // has not been bumped to yet) is another place a version could silently
@@ -99,16 +117,6 @@ async function main() {
   );
   assert(pairVersion === reviews.version, "pair-review version differs from plugin version");
   assert(crossVersion === reviews.version, "cross-review version differs from plugin version");
-
-  for (const file of ["configuration.md", "model-capabilities.md", "review-protocol.md", "review-profiles.md"]) {
-    const pair = await readFile(
-      await requireFile(path.join("plugins/reviews/skills/pair-review/references", file)),
-    );
-    const cross = await readFile(
-      await requireFile(path.join("plugins/reviews/skills/cross-review/references", file)),
-    );
-    assert(pair.equals(cross), `${file}: pair-review and cross-review copies differ`);
-  }
 
   {
     // model-capabilities.md previously described OpenCode as detection-only
@@ -156,6 +164,37 @@ async function main() {
       /-C\s+"?<target-dir>"?\s+worktree remove/.test(scorecard),
       "phase-3-scorecard.md: Isolation cleanup must run 'git -C <target-dir> worktree remove', not an ambiguous-cwd command",
     );
+  }
+
+  {
+    // pair-review's phase 3 must clean up every actor's worktree the same way cross-review's does.
+    const scorecard = (
+      await readFile(
+        await requireFile("plugins/reviews/skills/pair-review/references/phase-3-scorecard.md"),
+      )
+    ).toString("utf8");
+    assert(
+      /worktree prune/.test(scorecard),
+      "pair-review phase-3-scorecard.md: Isolation cleanup must cover 'git worktree prune'",
+    );
+    assert(
+      /-C\s+"?<target-dir>"?\s+worktree remove/.test(scorecard),
+      "pair-review phase-3-scorecard.md: Isolation cleanup must run 'git -C <target-dir> worktree remove'",
+    );
+  }
+
+  for (const skill of ["cross-review", "pair-review"]) {
+    // Each SKILL.md carries the host table and links both host files, which must exist.
+    const skillDir = `plugins/reviews/skills/${skill}`;
+    const entry = (await readFile(await requireFile(`${skillDir}/SKILL.md`))).toString("utf8");
+    assert(/^## Host table\s*$/m.test(entry), `${skill} SKILL.md: missing the "## Host table" heading`);
+    for (const host of ["claude-code", "codex"]) {
+      await requireFile(`${skillDir}/references/hosts/${host}.md`);
+      assert(
+        entry.includes(`](references/hosts/${host}.md)`),
+        `${skill} SKILL.md: must link references/hosts/${host}.md`,
+      );
+    }
   }
 
   {
@@ -249,18 +288,40 @@ async function main() {
     "scripts/validate-package.mjs",
     "scripts/blind-relabel.mjs",
     "scripts/tests/blind-relabel.test.mjs",
-    "scripts/tests/fixtures/blind-relabel/A-findings.md",
-    "scripts/tests/fixtures/blind-relabel/B-findings.md",
     "scripts/build-manifest.mjs",
     "scripts/tests/build-manifest.test.mjs",
     "scripts/exchange.mjs",
     "scripts/tests/exchange.test.mjs",
+    "scripts/detach-utils.mjs",
+    "scripts/claude-dispatch.mjs",
+    "scripts/codex-dispatch.mjs",
+    "scripts/host-support.mjs",
+    "scripts/native-agent.mjs",
+    "scripts/tests/native-agent.test.mjs",
+    "scripts/tests/host-support.test.mjs",
+    "scripts/tests/codex-dispatch.test.mjs",
+    "scripts/tests/claude-dispatch.test.mjs",
+    "scripts/worktree-utils.mjs",
+    "scripts/rollout-utils.mjs",
+    "scripts/tests/detach-utils.test.mjs",
+    "scripts/tests/worktree-utils.test.mjs",
+    "scripts/tests/rollout-utils.test.mjs",
+    "scripts/run-descriptor.mjs",
+    "scripts/tests/run-descriptor.test.mjs",
+    "scripts/tests/validate-package.test.mjs",
     "scripts/env-filter.mjs",
     "scripts/tests/env-filter.test.mjs",
     "scripts/spawn-utils.mjs",
     "scripts/tests/spawn-utils.test.mjs",
     "scripts/preflight.mjs",
     "scripts/tests/preflight.test.mjs",
+    "scripts/tests/preflight-host.test.mjs",
+    "scripts/build-report.mjs",
+    "scripts/build-recheck-packet.mjs",
+    "scripts/tests/build-recheck-packet.test.mjs",
+    "scripts/tests/build-report.test.mjs",
+    "scripts/review-run.mjs",
+    "scripts/tests/review-run.test.mjs",
     "scripts/context-builder.mjs",
     "scripts/tests/context-builder.test.mjs",
     "scripts/build-brief.mjs",
@@ -268,6 +329,7 @@ async function main() {
     "scripts/snapshot-utils.mjs",
     "scripts/tests/snapshot-utils.test.mjs",
     "references/review-protocol.md",
+    "references/task-packet-template.md",
     "references/review-profiles.md",
     "references/configuration.md",
     "references/model-capabilities.md",
@@ -280,6 +342,32 @@ async function main() {
       await requireFile(path.join("plugins/reviews/skills/cross-review", file)),
     );
     assert(pair.equals(cross), `${file}: pair-review and cross-review copies differ`);
+  }
+
+  // The two skills' test fixtures: the same files, byte for byte.
+  const fixtureFiles = async (skill) => {
+    const base = path.join(root, "plugins/reviews/skills", skill, "scripts/tests/fixtures");
+    const found = [];
+    await requireFile(path.relative(root, base));
+    const walk = async (dir) => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) await walk(path.join(dir, entry.name));
+        else found.push(path.relative(base, path.join(dir, entry.name)).split(path.sep).join("/"));
+      }
+    };
+    await walk(base);
+    return { base, found: found.sort() };
+  };
+  const crossFixtures = await fixtureFiles("cross-review");
+  const pairFixtures = await fixtureFiles("pair-review");
+  assert(
+    crossFixtures.found.join("\n") === pairFixtures.found.join("\n"),
+    `scripts/tests/fixtures differ between the skills: ${[...new Set([...crossFixtures.found, ...pairFixtures.found])].filter((f) => !(crossFixtures.found.includes(f) && pairFixtures.found.includes(f))).join(", ")}`,
+  );
+  for (const file of crossFixtures.found) {
+    const cross = await readFile(path.join(crossFixtures.base, file));
+    const pair = await readFile(path.join(pairFixtures.base, file));
+    assert(cross.equals(pair), `scripts/tests/fixtures/${file}: pair-review and cross-review copies differ`);
   }
 
   // Each installed skill folder ships the release notes, so a user can see what changed.

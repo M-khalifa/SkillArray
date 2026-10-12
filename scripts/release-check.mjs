@@ -16,6 +16,7 @@ const node = process.execPath;
 
 const steps = [
   { label: "repository parity validation", cwd: root, cmd: node, args: ["scripts/validate-repository.mjs"] },
+  { label: "install check (Claude Code and Codex layouts)", cwd: root, cmd: node, args: ["scripts/install-check.mjs"] },
   {
     label: "pair-review package validation",
     cwd: path.join(root, "plugins/reviews/skills/pair-review"),

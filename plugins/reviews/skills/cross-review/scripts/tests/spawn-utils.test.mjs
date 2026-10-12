@@ -149,3 +149,14 @@ test('killTree: a log callback receives a message on taskkill failure (win32 bra
   const child = fakeChild(999999999);
   await assert.doesNotReject(() => killTree(child, { platform: 'win32', log: () => {} }));
 });
+
+test('preserveEarlierResult: a dead worker\'s live stderr log is archived with its attempt, not erased by the next dispatch', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'preserve live '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const result = path.join(dir, 'result.json');
+  await fs.writeFile(result, '{"status":"running"}');
+  await fs.writeFile(path.join(dir, 'result.stderr.live.log'), 'ERROR exec_command failed: x\n');
+  assert.equal(await preserveEarlierResult(result), path.join(dir, 'result.attempt-1.json'));
+  assert.equal(await fs.readFile(path.join(dir, 'result.attempt-1.stderr.live.log'), 'utf8'), 'ERROR exec_command failed: x\n');
+  assert.equal(await fs.access(path.join(dir, 'result.stderr.live.log')).then(() => true, () => false), false);
+});

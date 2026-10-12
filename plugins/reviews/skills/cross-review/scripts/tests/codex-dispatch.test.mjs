@@ -21,6 +21,7 @@ import {
   posixKillTree,
   installSignalForwarding,
   RESULT_REQUIRED_KEYS,
+  codexReadOnly,
   retryDeadline,
   spawnCli,
   buildChildEnv,
@@ -444,7 +445,10 @@ test('installSignalForwarding: uninstall removes the listeners, a later signal d
   assert.deepEqual(killed, []);
 });
 
-test('RESULT_REQUIRED_KEYS: codex and opencode dispatchers share the same result.json schema (minus their own session-id key)', async () => {
+const HAS_OPENCODE = fs.access(new URL('../opencode-dispatch.mjs', import.meta.url)).then(() => true, () => false);
+
+test('RESULT_REQUIRED_KEYS: codex and opencode dispatchers share the same result.json schema (minus their own session-id key)', async (t) => {
+  if (!(await HAS_OPENCODE)) return t.skip('opencode-dispatch.mjs is not in this skill folder');
   const { RESULT_REQUIRED_KEYS: opencodeKeys } = await import('../opencode-dispatch.mjs');
   assert.deepEqual([...RESULT_REQUIRED_KEYS].sort(), [...opencodeKeys].sort());
 });
@@ -608,4 +612,9 @@ test('retryDeadline: reads a 12-hour clock time as today, or tomorrow when it is
   for (const text of [null, '', '15:06', '13:06 PM', '3:66 PM', '0:30 AM', 'Sep 29th, 2026 3:06 PM', 'in 5 days']) {
     assert.equal(retryDeadline(text, now), null, JSON.stringify(text));
   }
+});
+
+test('a read-only Codex run records a read-only guarantee for the manifest and any other sandbox records none', () => {
+  assert.deepEqual(codexReadOnly({ sandbox: 'read-only' }), { fileTools: 'enforced', shell: 'enforced', cwd: 'target' });
+  assert.equal(codexReadOnly({ sandbox: 'workspace-write' }), null);
 });

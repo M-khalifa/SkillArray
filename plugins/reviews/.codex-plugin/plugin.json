@@ -1,0 +1,24 @@
+{
+  "name": "reviews",
+  "version": "1.1.0",
+  "description": "Same-vendor and cross-vendor evidence-grounded multi-model review for code, architecture, and technical documents: execution-gated, identity-blinded, refutation-asymmetric.",
+  "author": {
+    "name": "Mahmoud Khalifa"
+  },
+  "license": "MIT",
+  "keywords": [
+    "review",
+    "cross-review",
+    "pair-review",
+    "code-review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Reviews",
+    "shortDescription": "Review code and documents with two AI models, then cross-examine the findings",
+    "longDescription": "cross-review and pair-review run two reviewers on the same target, exchange their findings with identities hidden, and settle each finding with a fresh auditor. They produce findings.json, a scorecard and a manifest. A review run from a Codex host is not supported in 1.1.0; run the skills from Claude Code.",
+    "developerName": "Mahmoud Khalifa",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"]
+  }
+}

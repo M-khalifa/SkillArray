@@ -46,12 +46,34 @@ test('scorecard: totals per final_state and one row per finding, copied from fin
   ] };
   const lines = scorecardMarkdown(doc).split('\n');
   assert.equal(lines[0], '2 findings: 1 settled-agree, 1 settled-refuted, 0 unresolved-low-stakes, 0 unresolved-high-stakes, 0 dropped-speculative');
-  assert.equal(lines[1], 'Independently discovered: 1. HIGH/CRITICAL: 1. Auditor checked: 2. Falsification verified: 1.');
+  assert.equal(lines[1], 'Independently discovered: 1. HIGH/CRITICAL: 1. Auditor checked: 2. Falsification verified: 1. Peer responses: 1 conceded, 2 disputed, 0 unaddressed (33% conceded).');
   assert.equal(lines[5], '| F1 | Cache key \\| ignores ctime | A3, B1 | yes | HIGH | EXECUTED | REPRODUCED | A3: conceded; B1: disputed-no-counter-fact (verified: CONFIRMED) | CONFIRMED | settled-agree |  |');
   assert.equal(lines[6], '| F2 | Roadmap date conflicts | A7 | no | MEDIUM | INFERENCE | SUPPORTED | A7: disputed-with-counter-fact | REFUTED | settled-refuted | refuted by peer counter-fact, auditor check |');
   const unresolved = scorecardMarkdown({ findings: [{ id: 'F3', origins: ['A1', 'B3'], severity: 'HIGH', final_state: 'unresolved-high-stakes',
     peer_responses: [{ claim: 'A1', response: 'disputed-with-counter-fact' }, { claim: 'B3', response: 'conceded' }], auditor_check: { result: 'CONFIRMED' } }] });
   assert.match(unresolved, /\| CONFIRMED \| unresolved-high-stakes \| peer counter-fact not tested; an auditor confirmation alone cannot settle it \(ask for "deep verify disputed high-severity findings"\) \|/);
+});
+
+test('scorecard: a Note line follows the totals line when the auditor checked nothing and a HIGH/CRITICAL finding stands on concession alone', () => {
+  const finding = (id, severity, check, extra = {}) => ({
+    id, origins: [`A${id.slice(1)}`], independently_discovered: false, severity, basis: 'EXECUTED', evidence_strength: 'REPRODUCED',
+    peer_responses: [{ claim: `A${id.slice(1)}`, response: 'conceded' }], auditor_check: { result: check, reason: 'light audit' }, final_state: 'settled-agree', ...extra,
+  });
+  const note = (n) => `Note: no claim was independently checked by the auditor (light audit, every claim conceded); ${n} HIGH/CRITICAL finding(s) are settled by concession only. Use --audit-depth full to have the auditor re-check them.`;
+  const lines = scorecardMarkdown({ findings: [finding('F1', 'HIGH', 'NOT_CHECKED'), finding('F2', 'CRITICAL', 'NOT_CHECKED'), finding('F3', 'LOW', 'NOT_CHECKED')] }).split('\n');
+  assert.match(lines[0], /^3 findings: /);
+  assert.equal(lines[1], note(2));
+  assert.match(lines[2], /^Independently discovered: 0\. HIGH\/CRITICAL: 2\. Auditor checked: 0\./);
+  const audited = scorecardMarkdown({ findings: [finding('F1', 'HIGH', 'NOT_CHECKED'), finding('F2', 'LOW', 'CONFIRMED')] });
+  assert.doesNotMatch(audited, /no claim was independently checked/);
+  const low = scorecardMarkdown({ findings: [finding('F1', 'MEDIUM', 'NOT_CHECKED'), finding('F2', 'LOW', 'NOT_CHECKED')] });
+  assert.doesNotMatch(low, /no claim was independently checked/);
+  const rows = audited.split('\n').filter((l) => /^\| F\d/.test(l));
+  assert.match(rows[0], /\| settled-agree \| settled by concession only; the auditor did not check it \|$/);
+  assert.match(rows[1], /\| CONFIRMED \| settled-agree \|  \|$/);
+  assert.doesNotMatch(low, /settled by concession only; the auditor/);
+  const verified = scorecardMarkdown({ findings: [finding('F1', 'HIGH', 'NOT_CHECKED', { verifications: [{ claim: 'A1', verdict: 'CONFIRMED' }] })] });
+  assert.doesNotMatch(verified, /settled by concession only; the auditor/);
 });
 
 test('scorecard --phase1-dir: a Hypotheses column lists the bracketed tags from each origin claim heading, merged per finding; without the flag there is no such column', async (t) => {
@@ -75,6 +97,26 @@ test('scorecard --phase1-dir: a Hypotheses column lists the bracketed tags from 
   assert.match(lines[6], /^\| F2 \| Minor \|  \| A2 \|/);
   const plain = spawnSync(process.execPath, [SCRIPT, 'scorecard', '--in', input], { encoding: 'utf8' });
   assert.doesNotMatch(plain.stdout, /Hypotheses/);
+});
+
+test('scorecard --phase1-dir: with the run task packet beside it, heading tags are read as the report reads them (no digit, dots, bare); severity in any case', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'scorecard-packet-tags-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const p1 = path.join(dir, 'phase1');
+  await fs.mkdir(p1);
+  await fs.writeFile(path.join(dir, 'task-packet.md'), '# P\n\n- [AC-OWN-C] owner item\n- [AC-1.2] dotted\n- [AC-4] bare\n');
+  await fs.writeFile(path.join(p1, 'A-findings.md'), '# Seat A findings\n\n## A1 — [AC-OWN-C] [DOC] owner item broken\nSeverity: HIGH\n\n## A2 — dotted [AC-1.2] and bare (AC-4)\nSeverity: LOW\n');
+  await fs.writeFile(path.join(p1, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
+  const input = path.join(dir, 'findings.json');
+  await fs.writeFile(input, JSON.stringify({ findings: [
+    { id: 'F1', title: 'Owner item', origins: ['A1'], severity: 'HIGH', severity_audited: 'medium', peer_responses: [], auditor_check: { result: 'CONFIRMED' }, final_state: 'settled-agree' },
+    { id: 'F2', title: 'Dotted', origins: ['A2'], severity: 'LOW', peer_responses: [], auditor_check: { result: 'CONFIRMED' }, final_state: 'settled-agree' },
+  ] }));
+  const r = spawnSync(process.execPath, [SCRIPT, 'scorecard', '--in', input, '--phase1-dir', p1], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^\| F1 \| Owner item \| AC-OWN-C \|/m, 'a packet tag without a digit; [DOC] is not a packet tag');
+  assert.match(r.stdout, /^\| F2 \| Dotted \| AC-1\.2, AC-4 \|/m);
+  assert.match(r.stdout, /^\| AC-OWN-C \| F1 \| MEDIUM \| settled-agree \|$/m, 'a lower-case audited severity is still the highest severity');
 });
 
 test('scorecard: refuses an untranslated X/Y file and a file with no findings array; the CLI writes --out or prints to stdout', async (t) => {
@@ -2575,7 +2617,7 @@ test('dogfood: relabeling the shipped A-findings.md fixture produces P-labeled p
   assert.deepEqual(relabeledFences, originalFences, 'fenced Evidence blocks must be byte-identical, never relabeled');
 });
 
-test('dogfood: double-relabeling the real findings files to X/Y (Phase 3 flow) leaves no real A/B letter anywhere, headers included', async (t) => {
+test('dogfood: double-relabeling the real findings files to X/Y (Phase 3 flow) leaves no real A/B letter anywhere, headers included [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blind-relabel-dogfood-xy-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
@@ -2601,7 +2643,7 @@ test('dogfood: double-relabeling the real findings files to X/Y (Phase 3 flow) l
   }
 });
 
-test('dogfood: scanning the real relabeled peer-views finds zero self-identification, only expected target-file mentions', async (t) => {
+test('dogfood: scanning the real relabeled peer-views finds zero self-identification, only expected target-file mentions [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blind-relabel-dogfood-scan-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   // The fixtures are a real self-review of a skill like this one, so their content legitimately
@@ -2666,7 +2708,7 @@ function claimBlock(id, severity = 'HIGH', tail = '') {
   return `## ${id} — t\nSeverity: ${severity}\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n\`\`\`\nran it\n\`\`\`\n${tail}`;
 }
 
-test('scanText: F1 -- a git target checked out on a vendor-token branch ("codex/topic") does not exempt a third-person identity mention, since exempt names come from git ls-files, never .git/refs; a tracked codex-dispatch.mjs still exempts', async (t) => {
+test('scanText: F1 -- a git target checked out on a vendor-token branch ("codex/topic") does not exempt a third-person identity mention, since exempt names come from git ls-files, never .git/refs; a tracked codex-dispatch.mjs still exempts [slow]', async (t) => {
   const dir = await tempDir(t, 'f1-git-branch-');
   const git = (...a) => {
     const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir, encoding: 'utf8' });
@@ -2797,7 +2839,7 @@ test('CLI relabel: F5 -- a Phase 3 second pass with --phase1-dir rewrites a pros
   assert.match(await fs.readFile(out, 'utf8'), /Same root cause as Y5, seen on B200 hardware\./);
 });
 
-test('dogfood: F5 -- a full double relabel of a real run\'s Phase 1 files (rebuttal sections included) leaves zero real A/B claim IDs anywhere and leaves A100/B200-shaped non-claim tokens alone', async (t) => {
+test('dogfood: F5 -- a full double relabel of a real run\'s Phase 1 files (rebuttal sections included) leaves zero real A/B claim IDs anywhere and leaves A100/B200-shaped non-claim tokens alone [slow]', async (t) => {
   // Stored as *-findings.fixture.md (the skill's .gitignore drops *-findings.md); copied to real names.
   const src = path.join(FIXTURE_DIR, 'real-run-rebuttals');
   const dir = await tempDir(t, 'f5-real-run-');
@@ -2937,7 +2979,7 @@ test('CLI append-rebuttals: F8 -- normalizes "## P<n>" entry headings to "###", 
   assert.match(again.stderr, /already contains "## Rebuttals \(from B\) of A claims"/);
 });
 
-test('CLI append-rebuttals: F8 -- refuses, leaving --onto byte-identical, on a coverage gap, a duplicate entry, a missing Action line, a fenced P token naming a peer-view claim, or an --onto that is not the peer\'s file', async (t) => {
+test('CLI append-rebuttals: F8 -- refuses, leaving --onto byte-identical, on a coverage gap, a duplicate entry, a missing Action line, a fenced P token naming a peer-view claim, or an --onto that is not the peer\'s file [slow]', async (t) => {
   const { dir, aText, peerView, onto } = await f8Setup(t);
   const cases = [
     ['## P1\nClaim: P1\nAction: CONCEDE\n', /no rebuttal entry for peer-view claim\(s\) \[P2\]/],
@@ -3042,7 +3084,7 @@ test('CLI audit-prep --breakdown-out: writes the same breakdown line to a file o
   assert.throws(() => parseArgs(['scan', '--in', 'a', '--breakdown-out', 'b']), /--breakdown-out is only accepted by audit-prep/);
 });
 
-test('CLI audit-prep: F31 -- refuses a non-empty --out-dir or one equal to --phase1-dir or the mapping file\'s folder, and writes nothing to --out-dir when a scan hits (a surviving Phase 2 label via --phase2-dir)', async (t) => {
+test('CLI audit-prep: F31 -- refuses a non-empty --out-dir or one equal to --phase1-dir or the mapping file\'s folder, and writes nothing to --out-dir when a scan hits (a surviving Phase 2 label via --phase2-dir) [slow]', async (t) => {
   const { root, p1, mapDir, target, mapping } = await f31Setup(t);
   for (const bad of [p1, mapDir]) {
     const r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', bad, '--target-dir', target]);
@@ -3141,46 +3183,46 @@ function scanIds(s, withTarget = true) {
   return runCli(withTarget ? [...args, '--target-dir', PHASE_TARGET] : args);
 }
 
-test('CLI scan target-derived: hardware-ID chunk "20:00:00:25:B5:00:00:0A" found in the target does not hard-stop on B5', async (t) => {
+test('CLI scan target-derived: hardware-ID chunk "20:00:00:25:B5:00:00:0A" found in the target does not hard-stop on B5 [slow]', async (t) => {
   const r = scanIds(await targetExemptSetup(t, 'port id 20:00:00:25:B5:00:00:0A online'));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "B5"/);
   assert.match(r.stdout, /scan clean/);
 });
 
-test('CLI scan target-derived: `df -B1` chunk found in the target does not hard-stop on B1', async (t) => {
+test('CLI scan target-derived: `df -B1` chunk found in the target does not hard-stop on B1 [slow]', async (t) => {
   const r = scanIds(await targetExemptSetup(t, '$ df -B1 /data'));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "B1"/);
 });
 
-test('CLI scan target-derived: quoted docstring line "P1 scope ... is P2" that occurs verbatim in the target does not hard-stop on P1/P2', async (t) => {
+test('CLI scan target-derived: quoted docstring line "P1 scope ... is P2" that occurs verbatim in the target does not hard-stop on P1/P2 [slow]', async (t) => {
   const r = scanIds(await targetExemptSetup(t, '> P1 scope covers account creation only; billing export is P2.'));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "P1"/);
   assert.match(r.stderr, /target-derived "P2"/);
 });
 
-test('CLI scan target-derived: "P0-P4 complete" (P4 embedded in a target chunk) does not hard-stop', async (t) => {
+test('CLI scan target-derived: "P0-P4 complete" (P4 embedded in a target chunk) does not hard-stop [slow]', async (t) => {
   const r = scanIds(await targetExemptSetup(t, 'status: P0-P4 complete'));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "P4"/);
 });
 
-test('CLI scan target-derived: bare "see A2" in a fence still hard-stops even though the target has a standalone "A2"', async (t) => {
+test('CLI scan target-derived: bare "see A2" in a fence still hard-stops even though the target has a standalone "A2" [slow]', async (t) => {
   const r = scanIds(await targetExemptSetup(t, 'see A2 for the root cause'));
   assert.equal(r.status, 1);
   assert.match(r.stderr, /CLAIM-ID LEAK line \d+ \(real "A2" survives relabel\)/);
 });
 
-test('CLI scan target-derived: "A2/A3" cross-reference absent from the target still hard-stops', async (t) => {
+test('CLI scan target-derived: "A2/A3" cross-reference absent from the target still hard-stops [slow]', async (t) => {
   const r = scanIds(await targetExemptSetup(t, 'same defect as A2/A3'));
   assert.equal(r.status, 1);
   assert.match(r.stderr, /real "A2" survives/);
   assert.match(r.stderr, /real "A3" survives/);
 });
 
-test('CLI scan target-derived: an exempt hardware ID plus a bare B5 on the same line still hard-stops', async (t) => {
+test('CLI scan target-derived: an exempt hardware ID plus a bare B5 on the same line still hard-stops [slow]', async (t) => {
   const r = scanIds(await targetExemptSetup(t, 'id 20:00:00:25:B5:00:00:0A, see B5'));
   assert.equal(r.status, 1);
   assert.match(r.stderr, /real "B5" survives/);
@@ -3282,7 +3324,7 @@ async function sourceDirSetup(t) {
   return { ...s, p2, src };
 }
 
-test('CLI audit-prep/scan --source-dir: a quoted line from a second repo exempts its "P2" peer-label hit; without --source-dir it still hard-stops', async (t) => {
+test('CLI audit-prep/scan --source-dir: a quoted line from a second repo exempts its "P2" peer-label hit; without --source-dir it still hard-stops [slow]', async (t) => {
   const s = await sourceDirSetup(t);
   const base = ['audit-prep', '--phase1-dir', s.p1, '--mapping', s.mapping, '--target-dir', s.target, '--phase2-dir', s.p2];
   let r = runCli([...base, '--out-dir', path.join(s.root, 'audit-1')]);
@@ -3342,7 +3384,7 @@ test('CLI audit-prep --packet: on success stages task-packet.md (byte-exact) and
   assert.match(r.stderr, /pass a new empty folder/);
 });
 
-test('CLI audit-prep: checklist labels written with a name in front ("CHK-P1–P3") pass, while the bare run-6 form "C1–C18/R1–R15/P1–P3" still hard-stops', async (t) => {
+test('CLI audit-prep: checklist labels written with a name in front ("CHK-P1–P3") pass, while the bare run-6 form "C1–C18/R1–R15/P1–P3" still hard-stops [slow]', async (t) => {
   const s = await f31Setup(t);
   const p2 = path.join(s.root, 'phase2');
   await fs.mkdir(p2);
@@ -3437,7 +3479,7 @@ test('target-derived exemption survives the checklist mask: a verbatim target li
   assert.match(r.stderr, /target-derived "P2"/);
 });
 
-test('readTargetText: the second read comes from the cache, and any change to a tracked, untracked or plain-folder file (even same size) is read fresh', async (t) => {
+test('readTargetText: the second read comes from the cache, and any change to a tracked, untracked or plain-folder file (even same size) is read fresh [slow]', async (t) => {
   const git = (cwd, ...a) => {
     const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
@@ -3613,6 +3655,44 @@ test('CLI splice: several --match-line/--with pairs fix several lines in one ato
   assert.equal(parseArgs(['splice', '--file', file, '--match-line', 'a', '--with', w1]).matchLine, 'a', 'a single pair keeps the old shape');
 });
 
+test('CLI splice --match-line-file: a line with double quotes is replaced through the file, a two-line file is refused, and it mixes with --match-line in order', async (t) => {
+  const dir = await tempDir(t, 'splice-line-file-');
+  const file = path.join(dir, 'A-findings.md');
+  const quoted = 'run "A11 harness" with --flag "x"';
+  const original = `## A1 — t\nEvidence:\n\`\`\`text\n${quoted}\nplain A11 line\n\`\`\`\n`;
+  await fs.writeFile(file, original);
+  const w1 = path.join(dir, 'w1.txt');
+  const w2 = path.join(dir, 'w2.txt');
+  await fs.writeFile(w1, 'run "the harness" with --flag "x"\n');
+  await fs.writeFile(w2, 'plain line\n');
+  const lineFile = path.join(dir, 'line.txt');
+  await fs.writeFile(lineFile, `${quoted}\r\n`);
+  const one = runCli(['splice', '--file', file, '--match-line-file', lineFile, '--with', w1]);
+  assert.equal(one.status, 0, one.stderr);
+  assert.equal(await fs.readFile(file, 'utf8'), original.replace(quoted, 'run "the harness" with --flag "x"'));
+
+  await fs.writeFile(file, original);
+  const twoLines = path.join(dir, 'two.txt');
+  await fs.writeFile(twoLines, `${quoted}\nplain A11 line\n`);
+  const refused = runCli(['splice', '--file', file, '--match-line-file', twoLines, '--with', w1]);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /--match-line-file .*more than one line/);
+  assert.equal(await fs.readFile(file, 'utf8'), original, 'a refused file leaves the target unchanged');
+
+  const second = path.join(dir, 'second.txt');
+  await fs.writeFile(second, 'plain A11 line');
+  const mixed = runCli(['splice', '--file', file, '--match-line-file', lineFile, '--with', w1, '--match-line', 'plain A11 line', '--with', w2]);
+  assert.equal(mixed.status, 0, mixed.stderr);
+  assert.match(mixed.stdout, /replaced 2 line\(s\)/);
+  assert.equal(await fs.readFile(file, 'utf8'), original.replace(quoted, 'run "the harness" with --flag "x"').replace('plain A11 line', 'plain line'));
+
+  await fs.writeFile(file, original);
+  const reversed = runCli(['splice', '--file', file, '--match-line', quoted, '--with', w1, '--match-line-file', second, '--with', w2]);
+  assert.equal(reversed.status, 0, reversed.stderr);
+  assert.equal(await fs.readFile(file, 'utf8'), original.replace(quoted, 'run "the harness" with --flag "x"').replace('plain A11 line', 'plain line'));
+  assert.match(runCli(['splice', '--file', file, '--match-line-file', path.join(dir, 'missing.txt'), '--with', w1]).stderr, /--match-line-file: could not read/);
+});
+
 test('CLI validate: warns (exit 0) on a citation past the end of the cited file, narrows a bare name to the file the --packet names, and stays quiet for an in-range line, an ambiguous name or a file found nowhere', async (t) => {
   const dir = await tempDir(t, 'validate-cite-');
   const src = path.join(dir, 'src');
@@ -3652,4 +3732,219 @@ test('CLI: an argument error prints only that subcommand\'s usage and ends with 
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr.trimEnd().split('\n').at(-1), /unknown subcommand "bogus-sub"/);
   assert.match(unknown.stderr, /node blind-relabel\.mjs relabel[\s\S]*node blind-relabel\.mjs clear-cache/, 'an unknown subcommand lists every command line');
+});
+
+// These identity-term tests, like the older scan tests, assume an OS temp path with no vendor word in it.
+const RUNTIME_TERMS = [
+  ['SendMessage', 'The SendMessage call reached the reviewer.'],
+  ['spawn_agent', 'The spawn_agent call started the second pass.'],
+  ['Sonnet', 'The Sonnet reviewer found this first.'],
+  ['haiku', 'The haiku model agreed with the finding.'],
+];
+
+test('scanText: identity terms -- the runtime tool names and the short Claude model aliases hard-stop as whole words, and the CLI names and "opus" were already covered', async () => {
+  for (const [term, line] of RUNTIME_TERMS) {
+    const { identityHits, selfIdHits } = await scanText(line, undefined);
+    assert.equal(identityHits.length + selfIdHits.length, 1, term);
+  }
+  for (const covered of ['claude-dispatch', 'codex-dispatch', 'opencode-dispatch', 'opus']) {
+    assert.equal((await scanText(`The ${covered} step ran.`, undefined)).identityHits.length, 1, covered);
+  }
+  for (const miss of ['sonnets', 'haikus', 'haiku_parser', 'resendMessage', 'spawn_agents']) {
+    const { identityHits, selfIdHits, otherHits } = await scanText(`The ${miss} step ran.`, undefined);
+    assert.equal(identityHits.length + selfIdHits.length + otherHits.length, 0, `${miss} is not a whole-word match`);
+  }
+  const selfId = await scanText('As Sonnet I ran the suite.\nI think haiku wrote this.', undefined);
+  assert.equal(selfId.selfIdHits.length, 2);
+});
+
+test('scanText: identity terms -- a term the target itself uses is reported as target-derived, never a hard stop, and a fenced mention stays exempt', async (t) => {
+  for (const [term, line] of RUNTIME_TERMS) {
+    const dir = await tempDir(t, 'identity-term-');
+    await fs.writeFile(path.join(dir, 'SKILL.md'), `This skill documents ${term} for its readers.\n`);
+    const { identityHits, otherHits } = await scanText(line, dir);
+    assert.equal(identityHits.length, 0, term);
+    assert.equal(otherHits.length, 1, term);
+    assert.equal(otherHits[0].targetDerived, true, term);
+    assert.equal((await scanText(`\`\`\`\n${line}\n\`\`\`\n`, undefined)).identityHits.length, 0, `${term} inside a fence`);
+  }
+});
+
+test('scanText: identity terms -- a vendor word inside a file path is a hit unless the target has that path, in a git work tree and in a plain folder', async (t) => {
+  const line = 'See models/sonnet/render.py:12 and tools/spawn_agent.py for the call.';
+  assert.equal((await scanText(line, undefined)).identityHits.length, 1);
+  const plain = await tempDir(t, 'identity-path-');
+  await fs.mkdir(path.join(plain, 'models', 'sonnet'), { recursive: true });
+  await fs.mkdir(path.join(plain, 'tools'));
+  await fs.writeFile(path.join(plain, 'models', 'sonnet', 'render.py'), '');
+  await fs.writeFile(path.join(plain, 'tools', 'spawn_agent.py'), '');
+  const walked = await scanText(line, plain);
+  assert.equal(walked.identityHits.length, 0);
+  assert.equal(walked.otherHits.length, 1);
+  const repo = await tempDir(t, 'identity-path-git-');
+  const git = (...a) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git('init', '-q');
+  await fs.mkdir(path.join(repo, 'models', 'sonnet'), { recursive: true });
+  await fs.writeFile(path.join(repo, 'models', 'sonnet', 'render.py'), '');
+  await fs.writeFile(path.join(repo, 'spawn_agent.py'), '');
+  git('add', '.');
+  assert.equal((await scanText(line, repo)).identityHits.length, 0);
+  const partial = await tempDir(t, 'identity-path-partial-');
+  await fs.writeFile(path.join(partial, 'spawn_agent.py'), '');
+  const one = await scanText('See models/sonnet/render.py:12 for the call.', partial);
+  assert.equal(one.identityHits.length, 1, 'only the term the target lacks stays a hard stop');
+});
+
+test('host, transport, provider and model fields of run.json never enter the audit staging folder, the auditor brief or a peer view [slow]', async (t) => {
+  const root = await tempDir(t, 'identity-run-');
+  const runDir = path.join(root, 'run');
+  const p1 = path.join(runDir, 'phase1');
+  const privateDir = path.join(runDir, 'phase3-private');
+  const target = path.join(root, 'target');
+  for (const d of [p1, privateDir, target]) await fs.mkdir(d, { recursive: true });
+  await fs.writeFile(path.join(target, 'x.js'), 'x\n');
+  await fs.writeFile(path.join(p1, 'A-findings.md'), `# Seat A findings\n\n${claimBlock('A1', 'HIGH')}\n## Rebuttals (from B) of A claims\n\n### A1\nClaim: A1\nAction: DISPUTE\nCounter-fact: x.js:1 guards it\n`);
+  await fs.writeFile(path.join(p1, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B1', 'LOW')}\n## Rebuttals (from A) of B claims\n\n### B1\nClaim: B1\nAction: CONCEDE\n`);
+  const mapping = path.join(privateDir, 'seat-to-audit-label.json');
+  await fs.writeFile(mapping, '{"A":"X","B":"Y"}\n');
+  const unique = { host: 'descriptor-host-zq', model: 'descriptor-model-zq', provider: 'descriptor-provider-zq', sessionId: 'descriptor-session-zq' };
+  const actor = (role) => ({ role, provider: unique.provider, runtime: 'claude', model: unique.model, effort: null, transport: 'cli', sessionId: unique.sessionId, outputDir: path.join(p1, `seat-${role}`), resultPath: null, worktreePath: null });
+  await fs.writeFile(path.join(runDir, 'run.json'), JSON.stringify({
+    skill: 'cross-review', skillDir: root, targetDir: target, host: unique.host, flags: { auditDepth: 'light', falsification: false, mode: 'adversarial' },
+    fingerprint: null, seatA: actor('A'), seatB: actor('B'), auditor: actor('auditor'), verifiers: [],
+  }));
+  const descriptorText = await fs.readFile(path.join(runDir, 'run.json'), 'utf8');
+  for (const value of Object.values(unique)) assert.ok(descriptorText.includes(value), `control: run.json holds ${value}`);
+  const packet = path.join(root, 'task-packet.md');
+  await fs.writeFile(packet, '# Task\nReview x.js\n');
+  const outDir = path.join(root, 'audit-input');
+  const prep = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--packet', packet]);
+  assert.equal(prep.status, 0, prep.stderr);
+  const brief = path.join(outDir, 'auditor-brief.txt');
+  const built = spawnSync(process.execPath, [fileURLToPath(new URL('../build-brief.mjs', import.meta.url)), '--mode', 'auditor', '--packet', packet,
+    '--audit-dir', outDir, '--target-dir', target, '--run-dir', runDir, '--out', brief], { encoding: 'utf8' });
+  assert.equal(built.status, 0, built.stderr);
+  const peerView = path.join(root, 'peer-view-for-B.md');
+  assert.equal(runCli(['relabel', '--in', path.join(p1, 'A-findings.md'), '--out', peerView, '--from', 'A', '--to', 'P']).status, 0);
+  const files = [...(await fs.readdir(outDir)).map((f) => path.join(outDir, f)), peerView];
+  assert.ok(files.length >= 5, files.join(', '));
+  for (const file of files) {
+    const text = await fs.readFile(file, 'utf8');
+    for (const value of Object.values(unique)) assert.ok(!text.includes(value), `${path.basename(file)} leaks ${value}`);
+    if (path.basename(file) !== 'review-protocol.md') assert.doesNotMatch(text, /"(?:transport|runtime|provider|sessionId)"\s*:/, path.basename(file));
+  }
+});
+
+test('scorecard: the header shows the concession rate, and a tag table groups findings by the packet tags in the claim headings', () => {
+  const finding = (id, origins, severity, state, responses) => ({
+    id, origins, independently_discovered: false, severity, basis: 'EXECUTED', evidence_strength: 'REPRODUCED',
+    peer_responses: responses, auditor_check: { result: 'CONFIRMED' }, final_state: state,
+  });
+  const doc = { audit_depth: 'full', findings: [
+    finding('F1', ['A1'], 'HIGH', 'settled-agree', [{ claim: 'A1', response: 'conceded' }]),
+    finding('F2', ['A2', 'B1'], 'LOW', 'settled-agree', [{ claim: 'A2', response: 'conceded' }, { claim: 'B1', response: 'conceded' }]),
+    finding('F3', ['B2'], 'MEDIUM', 'unresolved-low-stakes', [{ claim: 'B2', response: 'unaddressed' }]),
+  ] };
+  const tags = new Map([['A1', ['AC-1']], ['A2', ['AC-1', 'AC-2']], ['B1', ['AC-2']], ['B2', []]]);
+  const out = scorecardMarkdown(doc, tags);
+  const lines = out.split('\n');
+  assert.match(lines[1], /Audit depth: full\. Peer responses: 3 conceded, 0 disputed, 1 unaddressed \(75% conceded\)\.$/);
+  const at = lines.indexOf('| Tag | Findings | Highest severity | Final states |');
+  assert.ok(at > 0, out);
+  assert.deepEqual(lines.slice(at + 2, at + 4), ['| AC-1 | F1, F2 | HIGH | settled-agree |', '| AC-2 | F2 | LOW | settled-agree |']);
+  assert.ok(!out.includes('| AC-3 |'));
+  assert.ok(!scorecardMarkdown(doc).includes('| Tag |'), 'no tag table without the phase 1 headings');
+  assert.ok(!scorecardMarkdown(doc, new Map([['A1', []]])).includes('| Tag |'), 'no tag table when no heading carries a tag');
+  assert.equal(scorecardMarkdown({ findings: [finding('F1', ['A1'], 'LOW', 'settled-agree', [])] }).split('\n')[1].includes('Peer responses'), false, 'no responses, no figure');
+});
+
+test('scorecard: a disputed finding\'s Note quotes the counter_fact the auditor copied, and translate checks the field', () => {
+  const base = (state, extra) => ({
+    id: 'F1', origins: ['A1'], severity: 'HIGH', final_state: state, auditor_check: { result: state === 'settled-refuted' ? 'REFUTED' : 'CONFIRMED' },
+    peer_responses: [{ claim: 'A1', response: 'disputed-with-counter-fact', ...extra }],
+  });
+  const quoted = scorecardMarkdown({ findings: [base('unresolved-high-stakes', { counter_fact: 'the loop already includes the bound' })] });
+  assert.match(quoted, /peer counter-fact not tested: "the loop already includes the bound"; an auditor confirmation alone cannot settle it/);
+  assert.match(scorecardMarkdown({ findings: [base('settled-refuted', { counter_fact: 'the function is never called' })] }), /refuted by peer counter-fact, auditor check: "the function is never called"/);
+  assert.match(scorecardMarkdown({ findings: [base('unresolved-high-stakes', {})] }), /peer counter-fact not tested; an auditor confirmation/, 'without the field the Note is as before');
+});
+
+test('CLI translate: peer_responses[].counter_fact must be one short line and only on a disputed-with-counter-fact response', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blind-relabel-counter-fact-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const mappingPath = path.join(dir, 'mapping.json');
+  await fs.writeFile(mappingPath, JSON.stringify({ A: 'X', B: 'Y' }));
+  const translate = async (name, response) => {
+    const auditPath = path.join(dir, name + '-audit.json');
+    const outPath = path.join(dir, name + '-findings.json');
+    await fs.writeFile(auditPath, JSON.stringify({ findings: [validFinding({ origins: ['X4'], severity: 'LOW', final_state: 'unresolved-low-stakes', auditor_check: { result: 'CONFIRMED', basis: 'EXECUTED', evidence: 'rerun' }, peer_responses: [response] })] }));
+    const result = spawnSync(process.execPath, [SCRIPT, 'translate', '--in', auditPath, '--out', outPath, '--mapping', mappingPath], { encoding: 'utf8' });
+    return { result, outPath };
+  };
+  const ok = await translate('ok', { claim: 'X4', response: 'disputed-with-counter-fact', counter_fact: 'the loop already includes the bound' });
+  assert.equal(ok.result.status, 0, ok.result.stderr);
+  assert.equal(JSON.parse(await fs.readFile(ok.outPath, 'utf8')).findings[0].peer_responses[0].counter_fact, 'the loop already includes the bound');
+  const two = await translate('two', { claim: 'X4', response: 'disputed-with-counter-fact', counter_fact: 'first line' + String.fromCharCode(10) + 'second line' });
+  assert.notEqual(two.result.status, 0);
+  assert.match(two.result.stderr, /counter_fact that is not one non-empty line of at most 240 characters/);
+  const long = await translate('long', { claim: 'X4', response: 'disputed-with-counter-fact', counter_fact: 'x'.repeat(241) });
+  assert.match(long.result.stderr, /not one non-empty line of at most 240 characters/);
+  const wrong = await translate('wrong', { claim: 'X4', response: 'conceded', counter_fact: 'a counter-fact on a concession' });
+  assert.match(wrong.result.stderr, /counter_fact on a "conceded" response; only disputed-with-counter-fact carries one/);
+});
+
+test('extractClaimBlocks: a level word with a trailing note counts as that level, two levels stay unrecognized', () => {
+  const text = [
+    '## A1 — note after level',
+    'Severity: MEDIUM (acceptance and documentation risk; not a crash)',
+    'Basis: STATIC_TRACE - read the code path',
+    'Evidence strength: SUPPORTED, by two call sites',
+    'Evidence: e',
+    '',
+    '## A2 — two levels',
+    'Severity: HIGH or MEDIUM',
+    'Basis: EXECUTED',
+    'Evidence strength: REPRODUCED',
+    'Evidence: e',
+    '',
+  ].join('\n');
+  const blocks = extractClaimBlocks(text).blocks;
+  const byId = (id) => (blocks instanceof Map ? blocks.get(id) : blocks.find((b) => b.id === id));
+  assert.deepEqual(claimBlockProblems(byId('A1')), []);
+  assert.equal(byId('A1').severity, 'MEDIUM');
+  assert.deepEqual(claimBlockProblems(byId('A2')), ['Severity value "HIGH or MEDIUM" is not exactly one of CRITICAL|HIGH|MEDIUM|LOW']);
+  assert.deepEqual(claimBlockProblems({ severity: null, basis: 'EXECUTED', evidenceStrength: 'REPRODUCED', evidence: 'e' }), ['no recognized "Severity:" line'], 'a missing line keeps its own message');
+});
+
+test('extractClaimBlocks: two levels in one Severity line stay unrecognized whatever the separator', () => {
+  const claim = (value) => ['## A1 - x', `Severity: ${value}`, 'Basis: EXECUTED', 'Evidence strength: REPRODUCED', 'Evidence: e', ''].join(String.fromCharCode(10));
+  const sev = (value) => extractClaimBlocks(claim(value)).blocks.get('A1').severity;
+  for (const value of ['MEDIUM-HIGH', 'HIGH, MEDIUM', 'HIGH; MEDIUM', 'HIGH (or MEDIUM)', 'LOW: maybe CRITICAL', 'HIGH - MEDIUM if exploitable']) {
+    assert.equal(SEVERITY_OK.has(sev(value)), false, `${value} is ambiguous`);
+  }
+  assert.equal(sev('MEDIUM (docs risk)'), 'MEDIUM');
+  assert.equal(sev('HIGH - needs a fix before release'), 'HIGH');
+  assert.equal(sev('LOW: cosmetic'), 'LOW');
+});
+const SEVERITY_OK = new Set(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']);
+
+test('scan: an identity hit names the matched token, so a redaction round fixes the right word', async (t) => {
+  const root = await tempDir(t, 'token-named-');
+  const input = path.join(root, 'f.md');
+  await fs.writeFile(input, 'The Claude reviewer found this.\n');
+  const r = runCli(['scan', '--in', input]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /IDENTITY line 1 \[matched: [^\]]*claude[^\]]*\]/i);
+});
+
+test('scan: a line with both a vendor word and a seat mention names both in the matched label', async (t) => {
+  const root = await tempDir(t, 'both-named-');
+  const input = path.join(root, 'f.md');
+  await fs.writeFile(input, 'The Claude reviewer and seat B disagree here.\n');
+  const r = runCli(['scan', '--in', input]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /IDENTITY line 1 \[matched: [^\]]*claude[^\]]*a seat mention\]/i);
 });

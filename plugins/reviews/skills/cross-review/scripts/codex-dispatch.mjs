@@ -8,15 +8,16 @@
 
 // Non-goals: multi-provider routing, --clean-env/--keep-env, --resume-last, --out-dir.
 
-import { appendFileSync, promises as fs } from 'node:fs';
+import { promises as fs, appendFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import process from 'node:process';
-import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildChildEnv as buildChildEnvShared } from './env-filter.mjs';
-import { hashInventory, diffInventories } from './snapshot-utils.mjs';
+import { hashWriteInventory, diffInventories, DEPENDENCIES_NOTE } from './snapshot-utils.mjs';
+import { createDetachHandlers, DEFAULT_MAX_WAIT_S, retryDeadline } from './detach-utils.mjs';
+import { findChildThreads, findThreadRollout, rolloutModel } from './rollout-utils.mjs';
 import {
   assertWin32Safe,
   winQuote,
@@ -207,7 +208,8 @@ Output:
                                  computed from a git status snapshot taken BEFORE the
                                  run and one taken AFTER the run; for a non-git --cd,
                                  from a before/after content hash of every file
-                                 (skipping .git/ and node_modules/). null (not []) when
+                                 (skipping .git/; node_modules too only when the tree
+                                 is too large, logged as such). null (not []) when
                                  either probe fails, since an empty array would
                                  wrongly claim "confirmed nothing touched" instead of
                                  "unknown". The git path may under-report a file that
@@ -218,9 +220,9 @@ Output:
                                  (a git or inventory probe failed).
     modelRequested string|null  --model as passed, unverified against the actual runtime.
     effortRequested string|null --effort as passed, unverified against the actual runtime.
-    modelResolved  null         Always null; the JSON event stream carries no verified
-                                 effective model identity (see selectionNote).
-    effortResolved null         Always null, same reason as modelResolved.
+    modelResolved  string|null  The model in the thread's rollout turn_context; null when the
+                                 rollout is missing or has none (see selectionNote).
+    effortResolved null         Always null: no source reports the effective effort.
     selectionNote  string       States the modelResolved/effortResolved limitation above.
     isolated       false        Always false: Codex's read-only guarantee is its own
                                  --sandbox flag, not a worktree. Present so this shares a
@@ -642,8 +644,15 @@ function runCodex(options) {
       }
     });
 
+    // The same stderr, written as it arrives, so a sequencer can count failures while the seat still runs.
+    if (options.liveStderrPath) {
+      try { writeFileSync(options.liveStderrPath, ''); } catch (err) { log(`could not start ${options.liveStderrPath}: ${err.message}`); }
+    }
     child.stderr.on('data', (d) => {
       stderrBuf += d.toString('utf8');
+      if (options.liveStderrPath) {
+        try { appendFileSync(options.liveStderrPath, d); } catch { /* live log is best effort; the full stderr is saved at the end */ }
+      }
     });
 
     // Without this, a codex process dying before it reads a large brief crashes the
@@ -730,57 +739,6 @@ function buildUsageField(rawUsage) {
   };
 }
 
-// Codex writes a spawned agent's rollout with session_meta.source.subagent.thread_spawn.parent_thread_id.
-// Returns every descendant of threadId whose rollout changed since sinceMs, each with its own total usage.
-async function findChildThreads(threadId, sinceMs, sessionsDir) {
-  if (!threadId) return [];
-  const files = [];
-  const walk = async (dir) => {
-    for (const d of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
-      const p = path.join(dir, d.name);
-      if (d.isDirectory()) await walk(p);
-      else if (/^rollout-.*\.jsonl$/.test(d.name)) files.push(p);
-    }
-  };
-  // Date folders (YYYY/MM/DD) older than the call's start day, less one for time zones, cannot hold its children.
-  const since = new Date(sinceMs - 86400000);
-  const minDay = `${since.getFullYear()}${String(since.getMonth() + 1).padStart(2, '0')}${String(since.getDate()).padStart(2, '0')}`;
-  for (const y of await fs.readdir(sessionsDir).catch(() => [])) {
-    for (const m of await fs.readdir(path.join(sessionsDir, y)).catch(() => [])) {
-      for (const day of await fs.readdir(path.join(sessionsDir, y, m)).catch(() => [])) {
-        if (`${y}${m}${day}` >= minDay) await walk(path.join(sessionsDir, y, m, day));
-      }
-    }
-  }
-  const byParent = new Map();
-  for (const f of files) {
-    const st = await fs.stat(f).catch(() => null);
-    if (!st || st.mtimeMs < sinceMs) continue;
-    const text = await fs.readFile(f, 'utf8').catch(() => '');
-    const firstLine = text.split('\n', 1)[0];
-    let meta;
-    try { meta = JSON.parse(firstLine)?.payload; } catch { continue; }
-    const spawn = meta?.source?.subagent?.thread_spawn;
-    if (!spawn?.parent_thread_id) continue;
-    let usage = null;
-    for (const line of text.split('\n')) {
-      if (!line.includes('"total_token_usage"')) continue;
-      try { usage = JSON.parse(line).payload?.info?.total_token_usage ?? usage; } catch { /* partial last line */ }
-    }
-    const entry = { threadId: meta.id ?? meta.session_id ?? null, parentThreadId: spawn.parent_thread_id, agentPath: spawn.agent_path ?? null, depth: spawn.depth ?? null, usage };
-    (byParent.get(spawn.parent_thread_id) ?? byParent.set(spawn.parent_thread_id, []).get(spawn.parent_thread_id)).push(entry);
-  }
-  const out = [];
-  const queue = [threadId];
-  while (queue.length > 0) {
-    for (const child of byParent.get(queue.shift()) ?? []) {
-      out.push(child);
-      if (child.threadId) queue.push(child.threadId);
-    }
-  }
-  return out;
-}
-
 const USAGE_DELTA_KEYS = ['input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_tokens'];
 
 // Codex reports usage cumulatively for a thread, so a resumed call's own cost is its total minus
@@ -841,6 +799,11 @@ async function atomicWriteJson(filePath, data) {
 // otherwise (e.g. the process was killed by --timeout before completing, or
 // codex's event stream omitted the event for some other reason). See
 // buildUsageField() above and docs/design/structured-artifacts.md.
+// Codex enforces its own sandbox, so a read-only run is read-only for file tools and the shell alike.
+function codexReadOnly(args) {
+  return args.sandbox === 'read-only' ? { fileTools: 'enforced', shell: 'enforced', cwd: 'target' } : null;
+}
+
 const RESULT_REQUIRED_KEYS = [
   'finalMessage', 'touchedFiles',
   'modelRequested', 'effortRequested', 'modelResolved', 'effortResolved', 'selectionNote',
@@ -851,11 +814,7 @@ const RESULT_REQUIRED_KEYS = [
   'webAccess',
 ];
 
-const JOB_FILE = 'dispatch-job.json';
-const DEFAULT_MAX_WAIT_S = 540;
-const WORKER_LOG = 'dispatch-worker.log';
-
-// The in-progress record: written by --detach before the worker starts, and by the worker itself.
+// Provider fields for both foreground and detached in-progress records.
 function runningRecord(args, { startedAt, threadId = null, worker = null }) {
   return {
     threadId, finalMessage: '', touchedFiles: null,
@@ -865,6 +824,7 @@ function runningRecord(args, { startedAt, threadId = null, worker = null }) {
     selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
     isolated: false, worktreePath: null, isolationNote: null,
     webAccess: args.web,
+    host: null, transport: 'cli', readOnly: codexReadOnly(args),
     status: 'running',
     startedAt, finishedAt: null, durationMs: null, timeoutS: args.timeout,
     usage: buildUsageField(null), envMode: args.envMode,
@@ -872,187 +832,9 @@ function runningRecord(args, { startedAt, threadId = null, worker = null }) {
   };
 }
 
-// Windows: the harness kills every process in a background shell's job, detached or not, so the
-// worker is started through WMI (Win32_Process.Create), which runs it outside that job.
-// Elsewhere a detached process group is enough.
-function launchWorker(jobPath, cwd) {
-  const script = fileURLToPath(import.meta.url);
-  if (process.platform === 'win32') {
-    const q = (s) => s.replace(/'/g, "''");
-    const commandLine = `"${process.execPath}" "${script}" --job "${jobPath}"`;
-    const ps = `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${q(commandLine)}'; CurrentDirectory = '${q(cwd)}' }; ` +
-      '"$($r.ReturnValue) $($r.ProcessId)"';
-    // Full path: a filtered or test PATH may not include System32.
-    const powershell = process.env.SystemRoot
-      ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-      : 'powershell.exe';
-    const res = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true });
-    const m = /^(\d+) (\d+)\s*$/.exec((res.stdout || '').trim());
-    if (res.status !== 0 || !m || m[1] !== '0') {
-      throw new RelayError(`could not start the detached worker through WMI: ${(res.stderr || res.stdout || '').trim() || res.error?.message || `exit ${res.status}`}`);
-    }
-    return Number(m[2]);
-  }
-  const child = spawn(process.execPath, [script, '--job', jobPath], { cwd, detached: true, stdio: 'ignore' });
-  child.unref();
-  return child.pid;
-}
-
-async function runDetach(args, argv) {
-  const briefDir = path.dirname(path.resolve(args.brief));
-  const resultPath = path.join(briefDir, 'result.json');
-  if (!args.replaceCompleted) {
-    const refusal = await completedRunRefusal(args.finalMessageOut);
-    if (refusal) {
-      log(refusal);
-      process.exit(2);
-    }
-  }
-  const kept = await preserveEarlierResult(resultPath);
-  if (kept) log(`kept the earlier result.json as ${path.basename(kept)}`);
-  const jobPath = path.join(briefDir, JOB_FILE);
-  const workerLog = path.join(briefDir, WORKER_LOG);
-  // Only the variables codex needs to be found and to find its login travel in the job file;
-  // --env-passthrough names can hold secrets, so those must be set for the user, not written here.
-  const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (/^(path|codex_home)$/i.test(k)) env[k] = v;
-  await fs.writeFile(jobPath, JSON.stringify({ argv: argv.filter((a) => a !== '--detach'), cwd: process.cwd(), env }, null, 2) + '\n', 'utf8');
-  await fs.rm(workerLog, { force: true });
-  const startedAt = new Date().toISOString();
-  await atomicWriteJson(resultPath, runningRecord(args, { startedAt, worker: { detached: true, workerPid: null, workerLog } }));
-  const pid = launchWorker(jobPath, process.cwd());
-  process.stdout.write(
-    `relay: detached worker pid ${pid} started; its log is ${workerLog}.\n` +
-      `relay: wait with: node "${fileURLToPath(import.meta.url)}" --wait "${resultPath}"\n`
-  );
-  process.exit(0);
-}
-
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err.code === 'EPERM';
-  }
-}
-
-// A non-zero exit repeats its reason on stderr, so a wrapper that drops stdout still sees why.
-function waitExit(line, code) {
-  process.stdout.write(line);
-  if (code !== 0) process.stderr.write(line);
-  process.exit(code);
-}
-
-// --wait <result.json> [--max-wait <seconds>]: polls until the detached worker finishes. Safe to stop
-// and rerun at any time; it only reads files.
-async function runWait(argv) {
-  const resultPath = argv[0];
-  if (!resultPath || resultPath.startsWith('--')) throw new RelayError('--wait requires the path of a result.json');
-  // Under the harness's 10-minute tool limit, so a foreground --wait returns before it is cut off.
-  let maxWait = DEFAULT_MAX_WAIT_S;
-  for (let i = 1; i < argv.length; i++) {
-    if (argv[i] === '--max-wait' && /^[0-9]+$/.test(argv[i + 1] ?? '')) maxWait = Number(argv[++i]);
-    else throw new RelayError(`--wait accepts only --max-wait <seconds>, got "${argv[i]}"`);
-  }
-  const began = Date.now();
-  for (;;) {
-    let rec = null;
-    try {
-      rec = JSON.parse((await fs.readFile(resultPath, 'utf8')).replace(/^\uFEFF/, ''));
-    } catch (err) {
-      if (err.code !== 'ENOENT' && !(err instanceof SyntaxError)) throw new RelayError(`cannot read ${resultPath}: ${err.message}`);
-    }
-    if (rec && rec.status !== 'running') {
-      waitExit(`relay: finished with status "${rec.status}"${rec.threadId ? `, threadId ${rec.threadId}` : ''}\n`, rec.status === 'completed' ? 0 : 1);
-    }
-    if (rec && rec.workerPid && !processAlive(rec.workerPid)) {
-      waitExit(
-        `relay: worker ${rec.workerPid} is gone but result.json still says "running"` +
-          (rec.threadId ? `; resume thread ${rec.threadId} with --session` : '; no thread was started, so dispatch again') +
-          `. Its log: ${rec.workerLog ?? WORKER_LOG}\n`,
-        1
-      );
-    }
-    if (rec && !rec.workerPid && Date.now() - Date.parse(rec.startedAt) > 120000) {
-      waitExit(`relay: the detached worker never started (no workerPid after 2 minutes); see ${rec.workerLog ?? WORKER_LOG}\n`, 1);
-    }
-    if (maxWait && Date.now() - began > maxWait * 1000) {
-      waitExit('relay: still running; run --wait again\n', 3);
-    }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-}
-
-// retryAfter as a local clock time ("3:06 PM"); null for any other wording. A time more than 12 hours
-// behind now is taken as tomorrow ("1:00 AM" read at 11 PM).
-function retryDeadline(text, now = new Date()) {
-  const m = /^\s*(\d{1,2}):(\d{2})\s*([AP])\.?M\.?\s*$/i.exec(text ?? '');
-  if (!m || Number(m[1]) < 1 || Number(m[1]) > 12 || Number(m[2]) > 59) return null;
-  const at = new Date(now);
-  at.setHours((Number(m[1]) % 12) + (m[3].toUpperCase() === 'P' ? 12 : 0), Number(m[2]), 0, 0);
-  if (now - at > 12 * 3600 * 1000) at.setDate(at.getDate() + 1);
-  return at;
-}
-
-// --wait-retry <result.json> [--max-wait <seconds>]: waits until a rate-limited call's retryAfter time.
-// Same exit codes as --wait, so it is stopped and rerun the same way.
-async function runWaitRetry(argv) {
-  const resultPath = argv[0];
-  if (!resultPath || resultPath.startsWith('--')) throw new RelayError('--wait-retry requires the path of a result.json');
-  let maxWait = DEFAULT_MAX_WAIT_S;
-  for (let i = 1; i < argv.length; i++) {
-    if (argv[i] === '--max-wait' && /^[0-9]+$/.test(argv[i + 1] ?? '')) maxWait = Number(argv[++i]);
-    else throw new RelayError(`--wait-retry accepts only --max-wait <seconds>, got "${argv[i]}"`);
-  }
-  let rec;
-  try {
-    rec = JSON.parse((await fs.readFile(resultPath, 'utf8')).replace(/^\uFEFF/, ''));
-  } catch (err) {
-    throw new RelayError(`cannot read ${resultPath}: ${err.message}`);
-  }
-  if (rec.status !== 'rate-limited') throw new RelayError(`${resultPath} has status "${rec.status}", not "rate-limited"; there is no limit to wait for`);
-  const deadline = retryDeadline(rec.retryAfter);
-  if (!deadline) throw new RelayError(`retryAfter ${JSON.stringify(rec.retryAfter)} is not a plain clock time such as "3:06 PM"; wait until then yourself`);
-  const resume = rec.threadId ? `resume thread ${rec.threadId} with --session, or start a new dispatch` : 'no thread was started, so dispatch again';
-  const began = Date.now();
-  for (;;) {
-    const left = deadline - Date.now();
-    if (left <= 0) {
-      process.stdout.write(`relay: the usage limit ended at ${deadline.toLocaleTimeString()}; ${resume}\n`);
-      process.exit(0);
-    }
-    if (maxWait && Date.now() - began >= maxWait * 1000) {
-      waitExit(`relay: ${Math.ceil(left / 1000)} s left until ${deadline.toLocaleTimeString()}; run --wait-retry again\n`, 3);
-    }
-    const untilMax = maxWait ? maxWait * 1000 - (Date.now() - began) : left;
-    await new Promise((r) => setTimeout(r, Math.max(50, Math.min(30000, left, untilMax))));
-  }
-}
-
-// --job <file>: the detached worker. Runs the dispatch the job file describes, logging to a file
-// because nothing is attached to its stdout or stderr.
-async function runJob(jobPath) {
-  let job;
-  try {
-    job = JSON.parse(await fs.readFile(jobPath, 'utf8'));
-  } catch (err) {
-    throw new RelayError(`cannot read job file ${jobPath}: ${err.message}`);
-  }
-  const logPath = path.join(path.dirname(jobPath), WORKER_LOG);
-  const toLog = (chunk, enc, cb) => {
-    appendFileSync(logPath, chunk);
-    if (typeof enc === 'function') enc();
-    else if (typeof cb === 'function') cb();
-    return true;
-  };
-  process.stdout.write = toLog;
-  process.stderr.write = toLog;
-  for (const k of Object.keys(process.env)) if (/^(path|codex_home)$/i.test(k)) delete process.env[k];
-  Object.assign(process.env, job.env ?? {});
-  process.chdir(job.cwd);
-  return dispatch(job.argv, { worker: { detached: true, workerPid: process.pid, workerLog: logPath } });
-}
+const { runDetach, runWait, runWaitRetry, runJob } = createDetachHandlers({
+  scriptPath: fileURLToPath(import.meta.url), dispatch, runningRecord, atomicWriteJson, RelayError, log,
+});
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -1145,6 +927,7 @@ async function dispatch(argv, { worker = null } = {}) {
         selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
         isolated: false, worktreePath: null, isolationNote: null,
         webAccess: args.web,
+        host: null, transport: 'cli', readOnly: codexReadOnly(args),
         ...(worker ?? {}),
         status: 'error',
         error: message,
@@ -1171,13 +954,17 @@ async function dispatch(argv, { worker = null } = {}) {
   let gitTracked = false;
   let beforeStatus = null;
   let beforeInventory = null;
+  let dependenciesCovered = true;
   let touchedFilesNote;
   try {
     gitTracked = await isGitRepo(cdAbs);
     if (gitTracked) {
       beforeStatus = await gitStatusPorcelain(cdAbs);
     } else {
-      beforeInventory = (await hashInventory(cdAbs)).files;
+      const baseline = await hashWriteInventory(cdAbs);
+      beforeInventory = baseline.files;
+      dependenciesCovered = baseline.dependenciesCovered;
+      if (!dependenciesCovered) log(DEPENDENCIES_NOTE);
     }
   } catch (err) {
     gitTracked = false;
@@ -1198,6 +985,7 @@ async function dispatch(argv, { worker = null } = {}) {
   try {
     codexResult = await runCodex({
       onThreadStarted: writeRunningResult,
+      liveStderrPath: path.join(briefDir, 'result.stderr.live.log'),
       briefText,
       cd: cdAbs,
       session: args.session,
@@ -1241,7 +1029,7 @@ async function dispatch(argv, { worker = null } = {}) {
     }
   } else if (beforeInventory) {
     try {
-      touchedFiles = diffInventories(beforeInventory, (await hashInventory(cdAbs)).files);
+      touchedFiles = diffInventories(beforeInventory, (await hashWriteInventory(cdAbs, { includeDependencies: dependenciesCovered })).files);
     } catch (err) {
       touchedFilesNote = `after-run file inventory failed, touchedFiles will be null: ${err.message}`;
       log(touchedFilesNote);
@@ -1253,16 +1041,19 @@ async function dispatch(argv, { worker = null } = {}) {
     threadId: codexResult.threadId, touchedFiles,
     modelRequested: args.model, effortRequested: args.effort,
     modelResolved: null, effortResolved: null,
-    selectionNote: 'Requested flags are recorded; the JSON event stream does not verify effective model or effort.',
+    selectionNote: 'modelResolved comes from the thread rollout (turn_context), null when it is missing; the JSON event stream does not verify effective effort.',
     // Codex's read-only guarantee is its own --sandbox flag, not a worktree;
     // these stay constant so both dispatchers' result.json feed the same manifest fields.
     isolated: false, worktreePath: null, isolationNote: null,
     webAccess: args.web,
+    host: null, transport: 'cli', readOnly: codexReadOnly(args),
     ...(worker ?? {}),
     ...timingFields(codexResult.usage),
   };
   if (touchedFiles === null && touchedFilesNote) {
     baseFields.touchedFilesNote = touchedFilesNote;
+  } else if (!dependenciesCovered) {
+    baseFields.touchedFilesNote = DEPENDENCIES_NOTE;
   }
   let previous = null;
   if (args.previousResult) {
@@ -1283,6 +1074,12 @@ async function dispatch(argv, { worker = null } = {}) {
     log(`could not scan ${sessionsDir} for spawned agents: ${err.message}`);
     return null;
   });
+  baseFields.modelResolved = await findThreadRollout(codexResult.threadId, sessionsDir)
+    .then(async (file) => (file ? rolloutModel(await fs.readFile(file, 'utf8')) : null))
+    .catch((err) => {
+      log(`could not read the model from the rollout in ${sessionsDir}: ${err.message}`);
+      return null;
+    });
   if (baseFields.childThreads?.length > 0) {
     const input = baseFields.childThreads.reduce((s, c) => s + (c.usage?.input_tokens ?? 0), 0);
     log(`WARNING: codex spawned ${baseFields.childThreads.length} agent thread(s) using ${input} more input tokens, not counted in "usage"; see childThreads`);
@@ -1302,6 +1099,7 @@ async function dispatch(argv, { worker = null } = {}) {
       stderrLog = null;
     }
   }
+  if (codexResult.stderr.trim() === '' || stderrLog !== null) await fs.rm(path.join(briefDir, 'result.stderr.live.log'), { force: true });
 
   if (codexResult.timedOut) {
     const msg = `codex exec killed after exceeding --timeout ${args.timeout}s`;
@@ -1430,6 +1228,7 @@ export {
   posixKillTree,
   installSignalForwarding,
   RESULT_REQUIRED_KEYS,
+  codexReadOnly,
   DEFAULT_MAX_WAIT_S,
   retryDeadline,
   spawnCli,

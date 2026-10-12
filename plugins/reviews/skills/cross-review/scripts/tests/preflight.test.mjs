@@ -9,7 +9,7 @@ import path from 'node:path';
 import { platform as osPlatform } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
-  parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, repoFreshness, freshnessWarnings, findReviewArtifacts,
+  parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, repoFreshness, freshnessWarnings, findReviewArtifacts, summaryLine,
 } from '../preflight.mjs';
 
 function git(args, cwd) {
@@ -47,7 +47,7 @@ test('parseArgs: --env-mode rejects anything but filtered/inherit', () => {
   assert.throws(() => parseArgs(['--cd', '.', '--env-mode', 'bogus']), /filtered.*inherit/);
 });
 
-test('run(): a non-git directory gets a content-hash inventory snapshotHash, so its Tier 1/Tier 2 evidence is still bound to exact file contents', async (t) => {
+test('run(): a non-git directory gets a content-hash inventory snapshotHash, so its Tier 1/Tier 2 evidence is still bound to exact file contents [slow]', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'preflight-nogit-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(path.join(dir, 'article.md'), 'draft\n', 'utf8');
@@ -72,7 +72,7 @@ test('checkStale: a non-git directory reports stale after any file content chang
   assert.equal((await checkStale(dir, hash)).stale, true);
 });
 
-test('computeSnapshotHash: in a monorepo, a commit or edit in a sibling folder does not make the --cd folder stale, but an edit inside it does', async (t) => {
+test('computeSnapshotHash: in a monorepo, a commit or edit in a sibling folder does not make the --cd folder stale, but an edit inside it does [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const { mkdir } = await import('node:fs/promises');
   await mkdir(path.join(dir, 'apps', 'unity'), { recursive: true });
@@ -91,7 +91,7 @@ test('computeSnapshotHash: in a monorepo, a commit or edit in a sibling folder d
   assert.equal((await checkStale(target, hash)).stale, true, 'an edit inside the target');
 });
 
-test('run(): a Tier 2 command that writes into the target is reported in touchedFiles and targetChanged, including a re-edit of an already-dirty file', async (t) => {
+test('run(): a Tier 2 command that writes into the target is reported in touchedFiles and targetChanged, including a re-edit of an already-dirty file [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   await writeFile(path.join(dir, 'a.txt'), 'dirty before preflight\n', 'utf8');
   const cmd = `node -e "require('fs').writeFileSync('dump.bin','x'); require('fs').appendFileSync('a.txt','more\\n')"`;
@@ -103,7 +103,7 @@ test('run(): a Tier 2 command that writes into the target is reported in touched
   assert.equal(clean.tier2.targetChanged, false);
 });
 
-test('run(): --compact keeps the test-runner total line in summary even when warnings push it out of --tail', async (t) => {
+test('run(): --compact keeps the test-runner total line in summary even when warnings push it out of --tail [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const logDir = path.join(dir, '..', `${path.basename(dir)}-sumlogs`);
   t.after(() => rm(logDir, { recursive: true, force: true }));
@@ -114,7 +114,7 @@ test('run(): --compact keeps the test-runner total line in summary even when war
   assert.deepEqual(out.summary, ['===== 212 passed, 3 warnings in 9.1s =====']);
 });
 
-test('run(): --compact keeps pytest -q bare totals ("137 passed, 1 warning in 0.37s", "2 failed, 54 passed in 59.83s") in summary, but not a log line that merely mentions passed', async (t) => {
+test('run(): --compact keeps pytest -q bare totals ("137 passed, 1 warning in 0.37s", "2 failed, 54 passed in 59.83s") in summary, but not a log line that merely mentions passed [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const logDir = path.join(dir, '..', `${path.basename(dir)}-qlogs`);
   t.after(() => rm(logDir, { recursive: true, force: true }));
@@ -131,7 +131,7 @@ test('parseArgs: --compact without --log-dir or --out is refused, and with --out
   assert.equal(args.tail, 5);
 });
 
-test('run(): --compact keeps byte counts, sha256, tail and fail/error lines in the JSON and writes the full stdout to a log whose hash matches', async (t) => {
+test('run(): --compact keeps byte counts, sha256, tail and fail/error lines in the JSON and writes the full stdout to a log whose hash matches [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const logDir = path.join(dir, '..', `${path.basename(dir)}-logs`);
   t.after(() => rm(logDir, { recursive: true, force: true }));
@@ -153,7 +153,7 @@ test('run(): --compact keeps byte counts, sha256, tail and fail/error lines in t
   assert.equal(createHash('sha256').update(Buffer.from(full, 'utf8')).digest('hex'), out.sha256);
 });
 
-test('run(): --source-snapshot records a plain export\'s stated repo and ref with its file count and content hash; a bad value or missing folder is refused', async (t) => {
+test('run(): --source-snapshot records a plain export\'s stated repo and ref with its file count and content hash; a bad value or missing folder is refused [slow]', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'preflight-snapshot-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const target = path.join(dir, 'target');
@@ -202,7 +202,7 @@ test('run(): --cd pointing at a file (not a directory) is rejected with RelayErr
   );
 });
 
-test('Tier 1 never executes anything the target defines, even when the target has a "test" script that writes a sentinel file', async (t) => {
+test('Tier 1 never executes anything the target defines, even when the target has a "test" script that writes a sentinel file [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   await writeFile(
     path.join(dir, 'package.json'),
@@ -217,13 +217,13 @@ test('Tier 1 never executes anything the target defines, even when the target ha
   await assert.rejects(() => readFile(path.join(dir, 'SENTINEL')));
 });
 
-test('Tier 2 is gated behind --exec: no commands given means tier2 is null', async (t) => {
+test('Tier 2 is gated behind --exec: no commands given means tier2 is null [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const result = await run({ cd: dir, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [] });
   assert.equal(result.tier2, null);
 });
 
-test('Tier 2 --exec runs the given command through a filtered environment: a secret-shaped env var does not leak into the child', async (t) => {
+test('Tier 2 --exec runs the given command through a filtered environment: a secret-shaped env var does not leak into the child [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const sourceEnv = { ...process.env, PREFLIGHT_TEST_SECRET: 'leak-me' };
   const originalEnv = process.env.PREFLIGHT_TEST_SECRET;
@@ -242,7 +242,7 @@ test('Tier 2 --exec runs the given command through a filtered environment: a sec
   assert.equal(result.tier2.results[0].stdout, 'absent');
 });
 
-test('Tier 2 --exec with --env-mode inherit passes the secret through (the escape hatch, opt-in only)', async (t) => {
+test('Tier 2 --exec with --env-mode inherit passes the secret through (the escape hatch, opt-in only) [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const originalEnv = process.env.PREFLIGHT_TEST_SECRET;
   process.env.PREFLIGHT_TEST_SECRET = 'leak-me';
@@ -260,7 +260,7 @@ test('Tier 2 --exec with --env-mode inherit passes the secret through (the escap
   assert.equal(result.tier2.results[0].stdout, 'leak-me');
 });
 
-test('Tier 2 records exit code, duration, and captures stdout/stderr verbatim', async (t) => {
+test('Tier 2 records exit code, duration, and captures stdout/stderr verbatim [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const result = await run({
     cd: dir,
@@ -276,7 +276,7 @@ test('Tier 2 records exit code, duration, and captures stdout/stderr verbatim', 
   assert.ok(typeof r.durationMs === 'number' && r.durationMs >= 0);
 });
 
-test('Tier 2 --timeout kills a hanging command and reports timedOut:true, exitCode:null', async (t) => {
+test('Tier 2 --timeout kills a hanging command and reports timedOut:true, exitCode:null [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const result = await run({
     cd: dir,
@@ -290,7 +290,7 @@ test('Tier 2 --timeout kills a hanging command and reports timedOut:true, exitCo
   assert.equal(r.exitCode, null);
 });
 
-test('Tier 2 --timeout: the child\'s own "close" event (fired by killTree\'s taskkill/SIGKILL terminating it) never overwrites timedOut back to false -- this was a real race, caught by a flaky CI run', async (t) => {
+test('Tier 2 --timeout: the child\'s own "close" event (fired by killTree\'s taskkill/SIGKILL terminating it) never overwrites timedOut back to false -- this was a real race, caught by a flaky CI run [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   // Run several times: the original bug (timedOut set only inside killTree's
   // .finally(), racing against the child's own 'close' handler seeing the
@@ -308,7 +308,7 @@ test('Tier 2 --timeout: the child\'s own "close" event (fired by killTree\'s tas
   }
 });
 
-test('runTier2 spawns the Tier-2 command with detached:true on a POSIX platform, and NOT on win32 -- without it, killTree\'s process.kill(-pid) targets a group the child was never the leader of', async (t) => {
+test('runTier2 spawns the Tier-2 command with detached:true on a POSIX platform, and NOT on win32 -- without it, killTree\'s process.kill(-pid) targets a group the child was never the leader of [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const calls = [];
   const fakeSpawn = (command, opts) => {
@@ -335,7 +335,7 @@ test('runTier2 spawns the Tier-2 command with detached:true on a POSIX platform,
   assert.ok(!calls2[0].opts.detached);
 });
 
-test('Tier 2 --timeout: the timed-out command is actually terminated, not just reported as timedOut -- the real, deepest child (not just the shell wrapper) is confirmed dead', async (t) => {
+test('Tier 2 --timeout: the timed-out command is actually terminated, not just reported as timedOut -- the real, deepest child (not just the shell wrapper) is confirmed dead [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const pidfile = path.join(dir, 'child.pid');
   // node -e forks a real grandchild under the shell wrapper -- the same shape as a Tier-2
@@ -402,14 +402,14 @@ test('Tier 2 --timeout: the timed-out command is actually terminated, not just r
   assert.equal(alive, false, `pid ${pid} is still alive after run() returned -- the timed-out command was reported dead but the real process kept running`);
 });
 
-test('computeSnapshotHash: identical state produces identical hashes across independent calls (deterministic)', async (t) => {
+test('computeSnapshotHash: identical state produces identical hashes across independent calls (deterministic) [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const a = await computeSnapshotHash(dir);
   const b = await computeSnapshotHash(dir);
   assert.equal(a, b);
 });
 
-test('checkStale: a tracked-file modification after capture is detected as stale', async (t) => {
+test('checkStale: a tracked-file modification after capture is detected as stale [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const hash = await computeSnapshotHash(dir);
   await writeFile(path.join(dir, 'a.txt'), 'modified\n', 'utf8');
@@ -417,7 +417,7 @@ test('checkStale: a tracked-file modification after capture is detected as stale
   assert.equal(result.stale, true);
 });
 
-test('checkStale: a NEW untracked file after capture is detected as stale (creation, not just modification of a tracked file)', async (t) => {
+test('checkStale: a NEW untracked file after capture is detected as stale (creation, not just modification of a tracked file) [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const hash = await computeSnapshotHash(dir);
   await writeFile(path.join(dir, 'brand-new.txt'), 'new content\n', 'utf8');
@@ -433,13 +433,13 @@ test('checkStale: no change after capture reports not stale', async (t) => {
   assert.equal(result.currentSnapshotHash, hash);
 });
 
-test('run(): tier1.snapshotHash and tier2.snapshotHash agree in the same invocation (same underlying git state)', async (t) => {
+test('run(): tier1.snapshotHash and tier2.snapshotHash agree in the same invocation (same underlying git state) [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const result = await run({ cd: dir, exec: ['echo hi'], timeout: 10, envMode: 'filtered', envPassthrough: [] });
   assert.equal(result.snapshotHash, result.tier2.snapshotHash);
 });
 
-test('run(): this is a thin executor, never an analyzer -- the output carries only the documented fact fields, no interpretive text', async (t) => {
+test('run(): this is a thin executor, never an analyzer -- the output carries only the documented fact fields, no interpretive text [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const result = await run({ cd: dir, exec: ['echo hi'], timeout: 10, envMode: 'filtered', envPassthrough: [] });
   const tier1Keys = new Set(Object.keys(result.tier1));
@@ -537,7 +537,7 @@ test('parseArgs: --repo repeats and --fetch is a flag', () => {
   assert.equal(parseArgs(['--cd', '.']).fetch, false);
 });
 
-test('repoFreshness: a clone 2 commits behind its remote reports behind 0 before a fetch (stale tracking ref, lastFetchedAt says how old) and behind 2 with --fetch', async (t) => {
+test('repoFreshness: a clone 2 commits behind its remote reports behind 0 before a fetch (stale tracking ref, lastFetchedAt says how old) and behind 2 with --fetch [slow]', async (t) => {
   const { clone } = await staleCloneSetup(t);
   const before = await repoFreshness(clone, { role: 'cd' });
   assert.equal(before.branch, 'main');
@@ -557,7 +557,7 @@ test('repoFreshness: a clone 2 commits behind its remote reports behind 0 before
     'upstream and origin/HEAD are the same ref, so one warning, not two');
 });
 
-test('run(): --repo adds a record per repository after --cd, a plain folder gets gitRepo:false, a missing --repo is refused, and snapshotHash ignores --repo', async (t) => {
+test('run(): --repo adds a record per repository after --cd, a plain folder gets gitRepo:false, a missing --repo is refused, and snapshotHash ignores --repo [slow]', async (t) => {
   const { root, clone } = await staleCloneSetup(t);
   const plain = path.join(root, 'plain');
   const { mkdir } = await import('node:fs/promises');
@@ -572,7 +572,7 @@ test('run(): --repo adds a record per repository after --cd, a plain folder gets
   await assert.rejects(run({ ...base, repos: [path.join(root, 'nope')] }), /--repo ".*nope" is not an accessible directory/);
 });
 
-test('run(): --watch-file names a packet file changed by upstream commits not in HEAD, skips an unchanged one, and lists a file outside every repo', async (t) => {
+test('run(): --watch-file names a packet file changed by upstream commits not in HEAD, skips an unchanged one, and lists a file outside every repo [slow]', async (t) => {
   const { root, clone } = await staleCloneSetup(t);
   await writeFile(path.join(clone, 'b.txt'), 'local only\n', 'utf8');
   const result = await run({ cd: clone, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [], fetch: true,
@@ -582,7 +582,7 @@ test('run(): --watch-file names a packet file changed by upstream commits not in
   assert.ok(freshnessWarnings(result.repos).includes(`preflight: WARNING: a.txt in ${result.repos[0].path} changed in 2 commit(s) on origin/main not in HEAD and differs from HEAD`));
 });
 
-test('run(): --watch-file reports contentDiffers:false and only a note when the upstream change already reached HEAD another way', async (t) => {
+test('run(): --watch-file reports contentDiffers:false and only a note when the upstream change already reached HEAD another way [slow]', async (t) => {
   const { clone } = await staleCloneSetup(t);
   // The same final content, committed locally: upstream commits are still not in HEAD, the file is identical.
   git(['config', 'user.email', 'a@b.com'], clone);
@@ -596,14 +596,14 @@ test('run(): --watch-file reports contentDiffers:false and only a note when the 
   assert.ok(!lines.some((l) => /WARNING: a\.txt/.test(l)));
 });
 
-test('run(): --watch-file before any fetch sees no upstream change (stale tracking ref), so the packet must say whether --fetch ran', async (t) => {
+test('run(): --watch-file before any fetch sees no upstream change (stale tracking ref), so the packet must say whether --fetch ran [slow]', async (t) => {
   const { clone } = await staleCloneSetup(t);
   const result = await run({ cd: clone, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [], watchFiles: [path.join(clone, 'a.txt')] });
   assert.deepEqual(result.repos[0].watchedChangedUpstream, []);
   assert.equal(result.repos[0].fetched, false);
 });
 
-test('run(): a past run\'s findings files inside the target are reported as reviewArtifactFiles with a WARNING; ordinary files are not', async (t) => {
+test('run(): a past run\'s findings files inside the target are reported as reviewArtifactFiles with a WARNING; ordinary files are not [slow]', async (t) => {
   const cd = await makeGitRepo(t);
   const base = { cd, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [] };
   assert.equal((await run(base)).repos[0].reviewArtifactCount, undefined);
@@ -651,7 +651,7 @@ test('findReviewArtifacts: stops taking names from the lister once 50 hits are f
   assert.ok(pulled < 200, `only about 50-70 names should be pulled, pulled ${pulled}`);
 });
 
-test('run() --compact: a rerun into the same --log-dir deletes only this script\'s own earlier logs (a stale command-2 log from a longer run), lists them, and keeps other files', async (t) => {
+test('run() --compact: a rerun into the same --log-dir deletes only this script\'s own earlier logs (a stale command-2 log from a longer run), lists them, and keeps other files [slow]', async (t) => {
   const cd = await makeGitRepo(t);
   const logDir = await mkdtemp(path.join(tmpdir(), 'preflight-logs-'));
   t.after(() => rm(logDir, { recursive: true, force: true }));
@@ -665,7 +665,7 @@ test('run() --compact: a rerun into the same --log-dir deletes only this script\
   assert.match(await readFile(path.join(logDir, 'command-1.stdout.log'), 'utf8'), /only/);
 });
 
-test('CLI: --fetch against a repo behind its remote prints a WARNING on stderr and keeps the JSON raw', async (t) => {
+test('CLI: --fetch against a repo behind its remote prints a WARNING on stderr and keeps the JSON raw [slow]', async (t) => {
   const { clone } = await staleCloneSetup(t);
   const { fileURLToPath } = await import('node:url');
   const script = fileURLToPath(new URL('../preflight.mjs', import.meta.url));
@@ -675,4 +675,141 @@ test('CLI: --fetch against a repo behind its remote prints a WARNING on stderr a
   const out = JSON.parse(r.stdout);
   assert.equal(out.repos[0].behind, 2);
   assert.doesNotMatch(r.stdout, /WARNING/);
+});
+
+test('parseArgs: --exec-in takes a path and a command, and may repeat', () => {
+  const args = parseArgs(['--cd', '.', '--exec-in', 'b', 'x', '--exec-in', 'b', 'y']);
+  assert.deepEqual(args.execIn, [{ dir: 'b', command: 'x' }, { dir: 'b', command: 'y' }]);
+  assert.throws(() => parseArgs(['--cd', '.', '--exec-in', 'b']), /--exec-in requires a value/);
+});
+
+test('run(): --exec-in runs in the other repo and binds results to that repo\'s own snapshotHash and touchedFiles [slow]', async (t) => {
+  const repoA = await makeGitRepo(t);
+  const repoB = await makeGitRepo(t);
+  await writeFile(path.join(repoB, 'only-b.txt'), 'b\n', 'utf8');
+  const cmd = `"${process.execPath}" -e "require('fs').writeFileSync('made-by-cmd.txt','x');console.log(process.cwd())"`;
+  const result = await run({
+    cd: repoA, exec: [], execIn: [{ dir: repoB, command: cmd }, { dir: repoB, command: 'echo second' }],
+    timeout: 30, envMode: 'filtered', envPassthrough: [],
+  });
+  assert.equal(result.tier2, null);
+  assert.equal(result.tier2Repos.length, 1);
+  const entry = result.tier2Repos[0];
+  assert.equal(path.resolve(entry.path), path.resolve(repoB));
+  assert.equal(path.resolve(entry.results[0].stdout.trim()), path.resolve(repoB));
+  assert.equal(entry.snapshotHashAfter, await computeSnapshotHash(path.resolve(repoB)));
+  assert.notEqual(entry.snapshotHash, entry.snapshotHashAfter);
+  assert.notEqual(entry.snapshotHash, result.snapshotHash);
+  assert.equal(entry.targetChanged, true);
+  assert.ok(entry.results[0].touchedFiles.some((f) => JSON.stringify(f).includes('made-by-cmd.txt')));
+  assert.equal(entry.results[1].exitCode, 0);
+  assert.equal(result.snapshotHash, await computeSnapshotHash(repoA));
+});
+
+test('run(): --exec-in with --compact continues command-N log numbering after --exec [slow]', async (t) => {
+  const repoA = await makeGitRepo(t);
+  const repoB = await makeGitRepo(t);
+  const logDir = await mkdtemp(path.join(tmpdir(), 'preflight-execin-logs-'));
+  t.after(() => rm(logDir, { recursive: true, force: true }));
+  const result = await run({
+    cd: repoA, exec: ['echo one'], execIn: [{ dir: repoB, command: 'echo two' }],
+    timeout: 30, envMode: 'filtered', envPassthrough: [], compact: true, tail: 1, logDir,
+  });
+  assert.match(result.tier2.results[0].stdout.log, /command-1\.stdout\.log$/);
+  assert.match(result.tier2Repos[0].results[0].stdout.log, /command-2\.stdout\.log$/);
+  assert.match(await readFile(result.tier2Repos[0].results[0].stdout.log, 'utf8'), /two/);
+});
+
+test('run(): --exec-in rejects a missing directory', async (t) => {
+  const repoA = await makeGitRepo(t);
+  await assert.rejects(
+    run({ cd: repoA, exec: [], execIn: [{ dir: path.join(repoA, 'nope'), command: 'echo x' }], timeout: 5, envMode: 'filtered', envPassthrough: [] }),
+    /--exec-in .* does not exist/,
+  );
+});
+
+test('summaryLine: names the hash and each command exit code, with --exec-in entries and a timeout', () => {
+  const r = (exitCode, timedOut = false) => ({ exitCode, timedOut });
+  const line = summaryLine({
+    snapshotHash: 'abc', tier2: { targetChanged: false, results: [r(0), r(1)] },
+    tier2Repos: [{ path: '/b', targetChanged: true, results: [r(null, true)] }],
+  }, 'pf.json');
+  assert.equal(line, 'preflight: wrote pf.json; snapshotHash abc; tier2: 2 command(s), exit 0, 1, targetChanged false; tier2Repos /b: 1 command(s), exit timeout, targetChanged true');
+  assert.equal(summaryLine({ snapshotHash: 'abc', tier2: null }, 'pf.json'), 'preflight: wrote pf.json; snapshotHash abc; no Tier 2 command');
+});
+
+test('run(): every --exec-in folder is checked before any command runs', async (t) => {
+  const repoA = await makeGitRepo(t);
+  const wrote = path.join(repoA, 'wrote.txt').split(path.sep).join('/');
+  await assert.rejects(
+    run({ cd: repoA, exec: [`"${process.execPath}" -e "require('fs').writeFileSync('${wrote}','x')"`], execIn: [{ dir: path.join(repoA, 'nope'), command: 'echo y' }], timeout: 30, envMode: 'filtered', envPassthrough: [] }),
+    /--exec-in .* does not exist/,
+  );
+  assert.equal(await readFile(path.join(repoA, 'wrote.txt'), 'utf8').then(() => true, () => false), false, 'the --exec command did not run');
+});
+
+test('run(): an --exec-in command that writes into the --cd target is reported, not silent [slow]', async (t) => {
+  const repoA = await makeGitRepo(t);
+  const repoB = await makeGitRepo(t);
+  const injected = path.join(repoA, 'injected.txt').split(path.sep).join('/');
+  const clean = await run({ cd: repoA, exec: [], execIn: [{ dir: repoB, command: 'echo ok' }], timeout: 30, envMode: 'filtered', envPassthrough: [] });
+  assert.equal(clean.execInChangedTarget, undefined);
+  const result = await run({
+    cd: repoA, exec: [], execIn: [{ dir: repoB, command: `"${process.execPath}" -e "require('fs').writeFileSync('${injected}','x')"` }],
+    timeout: 30, envMode: 'filtered', envPassthrough: [],
+  });
+  assert.equal(result.execInChangedTarget, true);
+  assert.equal(result.tier2Repos[0].targetChanged, false, 'repo B itself was not changed');
+  assert.equal((await checkStale(repoA, result.snapshotHash)).stale, true, 'the --cd hash is stale, as the flag says');
+});
+
+test('summaryLine: the last summary line each compact command printed sits next to its exit code', () => {
+  const r = (exitCode, summary) => ({ exitCode, timedOut: false, stdout: { summary } });
+  const line = summaryLine({
+    snapshotHash: 'abc', tier2: { targetChanged: false, results: [r(0, ['collected 152 items', '152 passed in 4.2s']), r(1, []), r(0, undefined)] },
+    tier2Repos: [{ path: '/b', targetChanged: false, results: [r(0, ['48 passed'])] }],
+  }, 'pf.json');
+  assert.equal(line, 'preflight: wrote pf.json; snapshotHash abc; tier2: 3 command(s), exit 0 (152 passed in 4.2s), 1, 0, targetChanged false; tier2Repos /b: 1 command(s), exit 0 (48 passed), targetChanged false');
+});
+
+test('CLI: [slow] --fail-on-command-error exits 4 after writing the result when a --exec command fails; without it the exit stays 0', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'preflight-failflag-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'a.md'), 'x\n');
+  const script = fileURLToPath(new URL('../preflight.mjs', import.meta.url));
+  const base = [script, '--cd', dir, '--exec', 'node -e "process.exit(3)"'];
+  const plain = spawnSync(process.execPath, base, { encoding: 'utf8' });
+  assert.equal(plain.status, 0, plain.stderr);
+  const strict = spawnSync(process.execPath, [...base, '--fail-on-command-error'], { encoding: 'utf8' });
+  assert.equal(strict.status, 4, strict.stderr);
+  assert.match(strict.stderr, /1 command\(s\) failed or timed out/);
+  assert.equal(JSON.parse(strict.stdout).tier2.results[0].exitCode, 3, 'the result is still written');
+  const ok = spawnSync(process.execPath, [script, '--cd', dir, '--exec', 'node -e "0"', '--fail-on-command-error'], { encoding: 'utf8' });
+  assert.equal(ok.status, 0, ok.stderr);
+});
+
+test('CLI: a reader that closes stdout early does not fail the script (EPIPE exits 0) [slow]', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'preflight-epipe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'a.md'), 'x\n');
+  const script = fileURLToPath(new URL('../preflight.mjs', import.meta.url));
+  for (let i = 0; i < 3; i += 1) {
+    const child = spawn(process.execPath, [script, '--cd', dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.destroy();
+    const code = await new Promise((resolve) => child.on('close', resolve));
+    assert.equal(code, 0, 'exit code with the reader gone');
+  }
+});
+
+test('summaryLine: the changed-file count and the untracked file names are in the one-line summary', () => {
+  const nl = String.fromCharCode(10);
+  const tier1 = { changedFiles: ['a.py', 'new1.py', 'new2.py'], status: [' M a.py', '?? new1.py', '?? new2.py', ''].join(nl) };
+  const line = summaryLine({ tier1, tier2: null, snapshotHash: 'abc' }, 'out.json');
+  assert.match(line, /; 3 changed file\(s\) \(2 untracked: new1\.py, new2\.py\); no Tier 2 command$/);
+  assert.equal(summaryLine({ tier1: { changedFiles: ['a.py'], status: ' M a.py' }, tier2: null, snapshotHash: 'abc' }, 'o').includes('untracked'), false);
+  assert.equal(summaryLine({ tier2: null, snapshotHash: 'abc' }, 'o'), 'preflight: wrote o; snapshotHash abc; no Tier 2 command');
+  const folder = { changedFiles: ['a.py', 'dir/x', 'dir/y', 'dir/z'], status: [' M a.py', '?? dir/', ''].join(nl) };
+  assert.match(summaryLine({ tier1: folder, tier2: null, snapshotHash: 'abc' }, 'o'), /; 4 changed file\(s\) \(3 untracked: dir\/\);/, 'a new folder counts its files, as git ls-files does');
+  const quoted = { changedFiles: ['sp ace.txt', 'plain.txt'], status: ['?? "sp ace.txt"', '?? plain.txt', ''].join(nl) };
+  assert.match(summaryLine({ tier1: quoted, tier2: null, snapshotHash: 'abc' }, 'o'), / \(2 untracked: /, 'a name git quotes still counts');
 });

@@ -1,5 +1,8 @@
 # Phase 2 — Cross-examination
 
+> **With `review-run` you do not need this file for the normal path.** SKILL.md's Quickstart lists the commands in order. Read it when a
+> step fails, a seat must be replaced or resumed by hand, a scan or validation stops the run, or you dispatch without the sequencer.
+
 ## Contents
 
 - Resuming each seat
@@ -18,42 +21,23 @@ same-round rebuttal.
 
 ## Resuming each seat
 
-Resume the Claude agent by its exact ID and seat B by Phase 1's exact session
-ID (`threadId` for Codex, `sessionId` for OpenCode). If a runtime cannot
-resume, report the limitation before replacing that seat; do not pretend a new
-context is a resumed reviewer. **Never resume seat A by forking** (e.g. an
-`Agent` tool call with `subagent_type: "fork"`, or any equivalent): a fork
-inherits the orchestrator's own conversation, which by Phase 2 already
-contains the peer's real findings and identity — handing that context to
-"seat A" for a rebuttal is a blinding breach by construction, not a resume at
-all. Resume the exact Phase 1 agent ID only: in Claude Code, send a message to
-that agent ID or name with the SendMessage tool (this continues the same agent
-with its Phase 1 context), never a new Agent spawn. If the agent can no longer
-be resumed, mark seat A's Phase 2 as incomplete; a new agent is not the same
-reviewer and its rebuttal does not count as seat A's.
+Resume each seat by its exact Phase 1 identity: a CLI seat by its session ID (`sessionId`, or
+`threadId` for Codex), a native seat by its agent ID. If a runtime cannot resume, report the
+limitation before replacing that seat; do not pretend a new context is a resumed reviewer. **Never
+resume a seat by forking the orchestrator's conversation**: a fork inherits the peer's real findings
+and identity, which is a blinding breach, not a resume. If a seat can no longer be resumed, mark its
+Phase 2 as incomplete; a new agent is not the same reviewer and its rebuttal does not count as that
+seat's. The host file holds the native resume mechanics.
 
 ## When the orchestrator session ended
 
-A harness seat can be resumed only from the orchestrator session that started
-it. From any other session SendMessage fails with "No transcript found for agent
-ID ... it never ran in this session", although the transcript file exists. A
-Codex or OpenCode seat has no such limit. So run Phase 1 and Phase 2 in the
-same orchestrator session. If that session ended, resume it first, from the
-working directory it ran in (in Claude Code: `claude --resume <session id>`, or
-headless `claude -p --resume <session id> "<send the brief to agent <agentId>>"`;
-the id is the folder name in seat A's transcript path,
-`~/.claude/projects/<project>/<session id>/subagents/agent-<agentId>.jsonl`),
-and send the Phase 2 brief from there: the resumed session reaches the agent
-with its Phase 1 context (tested headless from the same directory; the
-interactive form is untested). Only one process may resume the session: nothing
-stops a second resume, and both append to the same transcript. Agree first
-which orchestrator runs it, and check that no `claude ... --resume <session id>`
-process is already running. Only when that session cannot be resumed is seat A's
-Phase 2 incomplete. Then the run's `status` is `incomplete`, the report says
-so, and the manifest names the seat
-(`"exchange": {"incomplete_seats": ["A"], "reason": "..."}`); pass
-`build-manifest` only the phase 2 files that exist. Keep any rebuttal
-a new agent wrote out of the phase files; its concessions settle nothing.
+A native seat can be resumed only from the orchestrator session that started it, so run Phase 1 and
+Phase 2 in one session when a seat is native; a CLI seat resumes from any session by its session ID
+(`review-run.mjs phase2`). If the session ended, the host file gives the recovery. When a native seat
+cannot be resumed, its Phase 2 is incomplete: the run's `status` is `incomplete`, the report says so,
+and the manifest names the seat (`"exchange": {"incomplete_seats": ["A"], "reason": "..."}`); pass
+`build-manifest` only the phase 2 files that exist. Keep any rebuttal a new agent wrote out of the
+phase files; its concessions settle nothing.
 
 ## Blind relabel before handoff
 
@@ -165,7 +149,8 @@ branch name, never `node_modules/`). `scan` distinguishes three tiers:
 Tiers 1 and 2 behave identically: return the file to the reviewer's own
 context for redaction. Never silently forward or hand-edit prose on the
 reviewer's behalf. Allow at most one redaction round per file; if the second
-scan still hits, stop and report to the user rather than looping.
+scan names the same token again, stop and report to the user rather than looping. A different
+token means the first round worked: allow one more round for it. Each scan hit lists its matched token.
 
 **Every `scan` in this run MUST also pass `--phase1-dir <run-dir>/phase1
 --forbid-seats <the real seat letter(s) that must not survive in THIS
@@ -270,7 +255,7 @@ file to change two lines costs a full seat turn for no quality gain. Put the
 reply back with `blind-relabel.mjs splice --file <seat file> --match-heading
 "## A3" --with-result <result.json>` (a Codex/OpenCode seat) or `--with
 <file>` (a seat that wrote its reply to a file); `--match-line "<exact line>"`
-replaces one line, such as a leaked Evidence line. `--file` can also be a seat's
+replaces one line, such as a leaked Evidence line. On Windows PowerShell 5.1 use `--match-line-file <file>` (the exact line in a UTF-8 file) for a line that contains double quotes. `--file` can also be a seat's
 raw rebuttal file (`phase2/<seat>-rebuttals-raw.md`) before `finish`. The block ends at the next
 heading or `---` break, which stays in place. `splice` refuses, leaving the
 file unchanged: a match that is not unique, text before the heading, a reply
@@ -315,6 +300,12 @@ resume and 111k for a two-line redaction, mostly cached), so send nothing in a
 delta brief that the seat already has.
 
 ## Dispatching seat B
+
+`node "<skill-dir>/scripts/review-run.mjs" phase2 --run-dir "<run-dir>" --start` runs
+`exchange.mjs prepare` and resumes every CLI seat on its Phase 1 session with its delta brief
+(a Claude seat by `claude-dispatch.mjs --session`, seat B as below). `--wait` waits for every
+seat and runs `exchange.mjs finish`. It prints the delta brief path of each native seat, which
+you resume with the host's action (the host file names it).
 
 For a Codex seat B:
 

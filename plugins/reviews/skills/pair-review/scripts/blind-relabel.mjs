@@ -10,6 +10,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { headingTags as readHeadingTags, packetCriteria } from './build-report.mjs';
 
 class RelayError extends Error {}
 
@@ -42,7 +43,7 @@ Usage:
     --rebutter <A|B> --peer-view <phase2 peer-view the rebutter saw> [--target-dir <path>] [--source-dir <path>]...
   node blind-relabel.mjs audit-prep --phase1-dir <path> --mapping <flip json> --out-dir <path>
     --target-dir <path> [--source-dir <path>]... [--tokens t1,t2,...] [--phase2-dir <path>] [--packet <task-packet.md>]
-  node blind-relabel.mjs splice --file <findings.md> (--match-heading "## A3" | --match-line <exact line>)
+  node blind-relabel.mjs splice --file <findings.md> (--match-heading "## A3" | --match-line <exact line> | --match-line-file <file>)
     (--with <file> | --with-result <dispatcher result.json>)
   node blind-relabel.mjs clear-cache
   node blind-relabel.mjs -h | --help
@@ -102,7 +103,8 @@ relabel:
 scan:
   Reads --in, strips fenced/inline code, and checks the remaining prose for
   vendor/model tokens (claude, anthropic, codex, openai, gpt-, opencode,
-  fable, opus) plus any --tokens (comma-separated, case-insensitive) supplied
+  fable, opus, sonnet, haiku) and runtime tool names (SendMessage,
+  spawn_agent), plus any --tokens (comma-separated, case-insensitive) supplied
   for this run -- the actual configured model/provider strings, e.g.
   "gpt-5.6-sol,google/gemini-3-pro" -- and for a seat-letter mention (Seat A,
   Reviewer A, seat a, reviewer a, ... -- case-insensitive on the letter).
@@ -455,7 +457,11 @@ splice:
   --match-line replaces the one line equal to it, fences included
   (for a single leaked Evidence line); an empty replacement deletes it. Repeat
   --match-line and --with in pairs (same order) to fix several lines in one
-  call; every pair must apply or the file is left unchanged. The
+  call; every pair must apply or the file is left unchanged.
+  --match-line-file <path> takes the exact line from a UTF-8 file (one
+  trailing newline dropped; a file with more than one line is refused), so a
+  line with double quotes needs no shell escaping; it pairs with --with like
+  --match-line, and the two options can be mixed. The
   replacement is --with <file> or a dispatcher --with-result's finalMessage,
   with leading/trailing blank lines dropped and the file's own line ending.
   Refuses (file unchanged) on zero or several matches, an unterminated
@@ -560,6 +566,7 @@ function parseArgs(argv) {
     else if (a === '--file') { args.file = takeValue(rest, i, '--file'); i++; }
     else if (a === '--match-heading') { args.matchHeading = takeValue(rest, i, '--match-heading'); i++; }
     else if (a === '--match-line') { (args.matchLines ??= []).push(takeValue(rest, i, '--match-line')); i++; }
+    else if (a === '--match-line-file') { (args.matchLines ??= []).push({ file: takeValue(rest, i, '--match-line-file') }); i++; }
     else if (a === '--with') { (args.withs ??= []).push(takeValue(rest, i, '--with')); i++; }
     else if (a === '--with-result') { args.withResult = takeValue(rest, i, '--with-result'); i++; }
     else if (a === '--breakdown-out') { args.breakdownOut = takeValue(rest, i, '--breakdown-out'); i++; }
@@ -582,10 +589,10 @@ function parseArgs(argv) {
     if (args.withs !== undefined) { if (!args.pairs) args.with = args.withs[0]; delete args.withs; }
     const allowed = new Set(['sub', 'file', 'matchHeading', 'matchLine', 'with', 'withResult', 'pairs']);
     const extra = Object.keys(args).filter((k) => !allowed.has(k));
-    if (extra.length > 0) throw new RelayError('splice accepts only --file, --match-heading or --match-line, and --with or --with-result');
+    if (extra.length > 0) throw new RelayError('splice accepts only --file, --match-heading or --match-line or --match-line-file, and --with or --with-result');
     if (!args.file) throw new RelayError('splice requires --file');
     if (args.pairs) return args;
-    if ((args.matchHeading === undefined) === (args.matchLine === undefined)) throw new RelayError('splice requires exactly one of --match-heading and --match-line');
+    if ((args.matchHeading === undefined) === (args.matchLine === undefined)) throw new RelayError('splice requires exactly one of --match-heading and --match-line (or --match-line-file)');
     if ((args.with === undefined) === (args.withResult === undefined)) throw new RelayError('splice requires exactly one of --with and --with-result');
     if (args.matchHeading !== undefined && !/^#{1,6} \S/.test(args.matchHeading)) throw new RelayError('--match-heading must be a Markdown heading start such as "## A3"');
     return args;
@@ -877,10 +884,10 @@ function outsideChecklistLabels(text, fn, checklist = []) {
   return out + fn(text.slice(last));
 }
 
-const VENDOR_TOKENS = ['claude', 'anthropic', 'codex', 'openai', 'gpt-', 'opencode', 'fable', 'opus'];
+const VENDOR_TOKENS = ['claude', 'anthropic', 'codex', 'openai', 'gpt-', 'opencode', 'fable', 'opus', 'sonnet', 'haiku', 'sendmessage', 'spawn_agent'];
 // A token glued to -._/ (codex-dispatch.mjs, gpt-5.6-sol) is a filename/model ID, not self-reference.
 const FIRST_PERSON = String.raw`\b(?:I|I'm|I've|I am|me|my|myself|we|our)\b`;
-const VENDOR_TOKEN_ALT = String.raw`(?:\b(?:claude|anthropic|codex|openai|opencode|fable|opus)\b(?![-._/])|\bgpt-[\w.]+)`;
+const VENDOR_TOKEN_ALT = String.raw`(?:\b(?:claude|anthropic|codex|openai|opencode|fable|opus|sonnet|haiku)\b(?![-._/])|\bgpt-[\w.]+)`;
 // Not in VENDOR_TOKENS: that list also drives the filename scan, where "seat" false-positives.
 // [ABab]: lowercase "seat a"/"reviewer a" hard-stops too; "gives the reviewer a chance" is a
 // known, accepted false positive (one redaction round) -- see blind-relabel.test.mjs.
@@ -1397,7 +1404,7 @@ async function scanText(text, targetDir, extraTokens = [], targetText = null) {
       return;
     }
     if (undeclared.length > 0 || seatLeak) {
-      identityHits.push({ line: i + 1, text: line.trim() });
+      identityHits.push({ line: i + 1, text: line.trim(), tokens: undeclared, seatMention: seatLeak });
       return;
     }
     otherHits.push({ line: i + 1, text: line.trim(), targetDerived: true });
@@ -1531,6 +1538,7 @@ const FINDING_ID_RE = /^F\d+$/;
 const SEVERITY_VALUES = new Set(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']);
 const BASIS_VALUES = new Set(['EXECUTED', 'STATIC_TRACE', 'SOURCE_CITATION', 'INFERENCE']);
 const EVIDENCE_STRENGTH_VALUES = new Set(['REPRODUCED', 'DETERMINISTIC', 'SUPPORTED', 'PLAUSIBLE', 'SPECULATIVE']);
+const COUNTER_FACT_MAX = 240;
 const PEER_RESPONSE_VALUES = new Set(['unaddressed', 'conceded', 'disputed-no-counter-fact', 'disputed-with-counter-fact']);
 const FINAL_STATE_VALUES = new Set([
   'settled-agree', 'settled-refuted', 'unresolved-low-stakes', 'unresolved-high-stakes',
@@ -1578,6 +1586,15 @@ function extractClaimHeadings(text) {
 const CLAIM_SEVERITY_LINE_RE = /^Severity:\s*(.+?)\s*$/;
 const CLAIM_BASIS_LINE_RE = /^Basis:\s*(.+?)\s*$/;
 const CLAIM_EVIDENCE_STRENGTH_LINE_RE = /^Evidence strength:\s*(.+?)\s*$/;
+// A level word followed only by a parenthetical or a dash/colon/comma note ("MEDIUM (docs risk)") counts as that level;
+// "HIGH or MEDIUM" does not, because the second level makes the value ambiguous.
+function levelWord(raw, allowed) {
+  const m = /^([A-Z_]+)(?:\s*[(—–:,;-].*)?$/.exec(raw);
+  if (!m || !allowed.has(m[1])) return raw;
+  const rest = raw.slice(m[1].length).toUpperCase();
+  return [...allowed].some((level) => level !== m[1] && new RegExp(`(^|[^A-Z_])${level}($|[^A-Z_])`).test(rest)) ? raw : m[1];
+}
+
 const CLAIM_EVIDENCE_LINE_RE = /^Evidence:\s*(.*)$/;
 const SUGGESTED_FIX_LINE_RE = /^Suggested fix:\s*(.*?)\s*$/;
 // A CommonMark thematic break (bare ---/***/___, 3+ chars, optional spaces between them) used as
@@ -1708,11 +1725,11 @@ function extractClaimBlocks(text) {
       return;
     }
     const sevMatch = CLAIM_SEVERITY_LINE_RE.exec(line);
-    if (sevMatch && current.severity === null) { current.severity = sevMatch[1]; return; }
+    if (sevMatch && current.severity === null) { current.severity = levelWord(sevMatch[1], SEVERITY_VALUES); return; }
     const basisMatch = CLAIM_BASIS_LINE_RE.exec(line);
-    if (basisMatch && current.basis === null) { current.basis = basisMatch[1]; return; }
+    if (basisMatch && current.basis === null) { current.basis = levelWord(basisMatch[1], BASIS_VALUES); return; }
     const esMatch = CLAIM_EVIDENCE_STRENGTH_LINE_RE.exec(line);
-    if (esMatch && current.evidenceStrength === null) { current.evidenceStrength = esMatch[1]; return; }
+    if (esMatch && current.evidenceStrength === null) { current.evidenceStrength = levelWord(esMatch[1], EVIDENCE_STRENGTH_VALUES); return; }
     const evMatch = CLAIM_EVIDENCE_LINE_RE.exec(line);
     if (evMatch && current.evidence === null) { evidenceLines = [{ text: evMatch[1], eol }]; return; }
   });
@@ -1802,8 +1819,10 @@ async function getClaimBlock(id, phase1Dir, blocksBySeat) {
 // of one RelayError per re-run). Returns a list of human-readable problem strings, empty if none.
 function claimBlockProblems(block) {
   const problems = [];
-  if (block.severity === null || !SEVERITY_VALUES.has(block.severity)) {
+  if (block.severity === null) {
     problems.push('no recognized "Severity:" line');
+  } else if (!SEVERITY_VALUES.has(block.severity)) {
+    problems.push(`Severity value "${block.severity.slice(0, 60)}" is not exactly one of ${[...SEVERITY_VALUES].join('|')}`);
   }
   if (block.basis === null || !BASIS_VALUES.has(block.basis)) {
     problems.push('no recognized "Basis:" line');
@@ -2159,6 +2178,14 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir,
         throw new RelayError(`finding "${finding.id}" has a peer_responses[].claim that is not a non-empty string`);
       }
       assertEnum(pr.response, PEER_RESPONSE_VALUES, 'a peer_responses[].response', finding.id);
+      if (pr.counter_fact !== undefined && pr.counter_fact !== null) {
+        if (typeof pr.counter_fact !== 'string' || pr.counter_fact.trim() === '' || pr.counter_fact.length > COUNTER_FACT_MAX || /[\r\n]/.test(pr.counter_fact)) {
+          throw new RelayError(`finding "${finding.id}" has a peer_responses[].counter_fact that is not one non-empty line of at most ${COUNTER_FACT_MAX} characters`);
+        }
+        if (pr.response !== 'disputed-with-counter-fact') {
+          throw new RelayError(`finding "${finding.id}" has a peer_responses[].counter_fact on a "${pr.response}" response; only disputed-with-counter-fact carries one`);
+        }
+      }
     }
     const responseClaims = new Set(finding.peer_responses.map((pr) => pr.claim));
     const originSet = new Set(finding.origins);
@@ -2427,7 +2454,10 @@ function logScanHits(hits, label = '') {
   for (const h of hits.trustHits) {
     log(`${pre}TRUST-BOUNDARY line ${h.line}: ${h.url} is a URL embedded in the target; confirm it was not fetched`);
   }
-  for (const h of hits.identityHits) log(`${pre}IDENTITY line ${h.line}: ${h.text}`);
+  for (const h of hits.identityHits) {
+    const matched = [...(h.tokens ?? []), ...(h.seatMention ? ['a seat mention'] : [])];
+    log(`${pre}IDENTITY line ${h.line}${matched.length > 0 ? ` [matched: ${matched.join(', ')}]` : ''}: ${h.text}`);
+  }
   for (const h of hits.claimIdHits) {
     log(`${pre}CLAIM-ID LEAK line ${h.line} (real "${h.id}" survives relabel): ${h.text}`);
   }
@@ -3085,6 +3115,16 @@ function spliceText(text, { heading, line }, replacementRaw) {
   return { text: out, start: start + 1, end, count: repl.length };
 }
 
+// The exact line comes from a UTF-8 file, so a line with double quotes needs no shell escaping.
+async function resolveMatchLine(line) {
+  if (typeof line === 'string') return line;
+  const text = await readRequired(line.file, '--match-line-file');
+  const exact = text.replace(/\r?\n$/, '');
+  if (exact.includes('\n') || exact.includes('\r')) throw new RelayError(`--match-line-file ${line.file} holds more than one line; it must hold exactly the one line to replace`);
+  if (exact === '') throw new RelayError(`--match-line-file ${line.file} is empty`);
+  return exact;
+}
+
 async function runSplice(args) {
   const original = await readRequired(args.file, '--file');
   if (args.pairs) {
@@ -3092,7 +3132,7 @@ async function runSplice(args) {
     let text = original;
     const done = [];
     for (const pair of args.pairs) {
-      const spliced = spliceText(text, { line: pair.line }, await readRequired(pair.with, '--with'));
+      const spliced = spliceText(text, { line: await resolveMatchLine(pair.line) }, await readRequired(pair.with, '--with'));
       text = spliced.text;
       done.push(`${spliced.start}-${spliced.end}`);
     }
@@ -3119,7 +3159,7 @@ async function runSplice(args) {
     }
     replacement = result.finalMessage;
   }
-  const spliced = spliceText(original, { heading: args.matchHeading, line: args.matchLine }, replacement);
+  const spliced = spliceText(original, { heading: args.matchHeading, line: args.matchLine === undefined ? undefined : await resolveMatchLine(args.matchLine) }, replacement);
   await writeFileAtomic(args.file, spliced.text);
   process.stdout.write(
     `splice: replaced line(s) ${spliced.start}-${spliced.end} of ${args.file} with ${spliced.count} line(s); ` +
@@ -3129,6 +3169,12 @@ async function runSplice(args) {
 
 function scorecardCell(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|');
+}
+
+// The disputing seat's counter-fact, as the auditor copied it, so the reader sees what was claimed against the finding.
+function counterFactQuote(f) {
+  const quotes = (f.peer_responses ?? []).filter((p) => p.response === 'disputed-with-counter-fact' && typeof p.counter_fact === 'string').map((p) => p.counter_fact.trim());
+  return quotes.length > 0 ? `: "${quotes.join('" / "')}"` : '';
 }
 
 // Why a finding is unresolved or refuted, from its own fields, so "Auditor check: CONFIRMED" next to
@@ -3141,11 +3187,16 @@ function scorecardNote(f) {
     if (responses.includes('disputed-with-counter-fact')) by.push('peer counter-fact');
     if (f.auditor_check?.result === 'REFUTED') by.push('auditor check');
     if ((f.verifications ?? []).some((v) => v.verdict === 'REFUTED')) by.push('falsification verifier');
-    return `refuted by ${by.join(', ')}`;
+    return `refuted by ${by.join(', ')}${counterFactQuote(f)}`;
+  }
+  const finalSeverity = f.severity_audited ?? f.severity;
+  if (f.final_state === 'settled-agree' && (finalSeverity === 'HIGH' || finalSeverity === 'CRITICAL')
+    && (f.auditor_check?.result ?? 'NOT_CHECKED') === 'NOT_CHECKED' && !verified) {
+    return 'settled by concession only; the auditor did not check it';
   }
   if (!String(f.final_state).startsWith('unresolved')) return '';
   if (responses.includes('disputed-with-counter-fact') && !verified) {
-    return 'peer counter-fact not tested; an auditor confirmation alone cannot settle it' +
+    return `peer counter-fact not tested${counterFactQuote(f)}; an auditor confirmation alone cannot settle it` +
       (f.final_state === 'unresolved-high-stakes' ? ' (ask for "deep verify disputed high-severity findings")' : '');
   }
   if (responses.includes('disputed-no-counter-fact')) return 'disputed without a counter-fact, not settled either way';
@@ -3156,15 +3207,56 @@ function scorecardNote(f) {
 // Bracketed task-packet tags such as "[H3]" or "[CHK-2]" in a claim heading.
 const HEADING_TAG_RE = /\[([A-Z][A-Z0-9-]*\d+)\]/g;
 
-// claim ID -> tags from its Phase 1 heading, for the scorecard's Hypotheses column.
+// claim ID -> tags from its Phase 1 heading, for the scorecard's Hypotheses column. With the run's task packet next to the
+// phase1 folder, the packet's own tags are also read the way the report reads them (any case, dots, written without brackets).
 async function phase1HeadingTags(phase1Dir) {
+  const packetFile = path.join(path.dirname(path.resolve(phase1Dir)), 'task-packet.md');
+  const hasPacket = await fs.access(packetFile).then(() => true, () => false);
+  const known = hasPacket ? [...packetCriteria(await readUtf8(packetFile)).keys()] : [];
   const tags = new Map();
   for (const seat of ['A', 'B']) {
     for (const [id, block] of extractClaimBlocks(await readPhase1Seat(seat, phase1Dir)).blocks) {
-      tags.set(id, [...block.heading.matchAll(HEADING_TAG_RE)].map((m) => m[1]));
+      const own = [...block.heading.matchAll(HEADING_TAG_RE)].map((m) => m[1]);
+      const fromPacket = readHeadingTags(block.heading.replace(/^##\s+\S+/, ''), known).filter((t) => known.includes(t));
+      tags.set(id, [...new Set([...own, ...fromPacket])]);
     }
   }
   return tags;
+}
+
+// How the peers answered each other's claims: a run where every claim was conceded may be two agreeable seats, not right findings.
+function peerResponseFigure(findings) {
+  const counts = { conceded: 0, disputed: 0, unaddressed: 0 };
+  for (const f of findings) {
+    for (const p of f.peer_responses ?? []) {
+      if (p.response === 'conceded') counts.conceded += 1;
+      else if (p.response === 'unaddressed') counts.unaddressed += 1;
+      else counts.disputed += 1;
+    }
+  }
+  const total = counts.conceded + counts.disputed + counts.unaddressed;
+  if (total === 0) return '';
+  return ` Peer responses: ${counts.conceded} conceded, ${counts.disputed} disputed, ${counts.unaddressed} unaddressed (${Math.round((100 * counts.conceded) / total)}% conceded).`;
+}
+
+const SEVERITY_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+
+// One row per bracketed task-packet tag (an acceptance criterion or hypothesis id) found in the claim headings: which findings carry it.
+function tagTable(findings, headingTags) {
+  const byTag = new Map();
+  for (const f of findings) {
+    const severity = String(f.severity_audited ?? f.severity ?? '').toUpperCase();
+    for (const tag of new Set(f.origins.flatMap((o) => headingTags.get(o) ?? []))) {
+      if (!byTag.has(tag)) byTag.set(tag, []);
+      byTag.get(tag).push({ id: f.id, severity, state: f.final_state });
+    }
+  }
+  if (byTag.size === 0) return [];
+  const rows = [...byTag.entries()].sort(([a], [b]) => a.localeCompare(b, 'en', { numeric: true })).map(([tag, list]) => {
+    const worst = SEVERITY_ORDER.find((level) => list.some((x) => x.severity === level)) ?? '';
+    return `| ${scorecardCell(tag)} | ${list.map((x) => x.id).join(', ')} | ${worst} | ${[...new Set(list.map((x) => x.state))].join(', ')} |`;
+  });
+  return ['', '| Tag | Findings | Highest severity | Final states |', '|---|---|---|---|', ...rows];
 }
 
 // The Phase 3 scorecard table, read from a translated findings.json; nothing is recomputed.
@@ -3181,12 +3273,17 @@ function scorecardMarkdown(doc, headingTags = null) {
   const states = [...FINAL_STATE_VALUES].map((s) => `${count((f) => f.final_state === s)} ${s}`);
   const finalSeverity = (f) => f.severity_audited ?? f.severity;
   const high = findings.filter((f) => finalSeverity(f) === 'HIGH' || finalSeverity(f) === 'CRITICAL');
+  const checked = count((f) => f.auditor_check && f.auditor_check.result !== 'NOT_CHECKED');
   const lines = [
     `${findings.length} findings: ${states.join(', ')}`,
+    ...(checked === 0 && high.length > 0
+      ? [`Note: no claim was independently checked by the auditor (light audit, every claim conceded); ${high.length} HIGH/CRITICAL finding(s) are settled by concession only. Use --audit-depth full to have the auditor re-check them.`]
+      : []),
     `Independently discovered: ${count((f) => f.independently_discovered === true)}. ` +
       `HIGH/CRITICAL: ${high.length}. Auditor checked: ${count((f) => f.auditor_check && f.auditor_check.result !== 'NOT_CHECKED')}. ` +
       `Falsification verified: ${count((f) => Array.isArray(f.verifications) && f.verifications.length > 0)}.` +
-      (typeof doc.audit_depth === 'string' ? ` Audit depth: ${doc.audit_depth}.` : ''),
+      (typeof doc.audit_depth === 'string' ? ` Audit depth: ${doc.audit_depth}.` : '') +
+      peerResponseFigure(findings),
     '',
     '| Finding | Title | ' + (headingTags ? 'Hypotheses | ' : '') +
       'Origins | Independently discovered | Severity | Basis | Evidence strength | Peer responses | Auditor check | Final state | Note |',
@@ -3205,6 +3302,7 @@ function scorecardMarkdown(doc, headingTags = null) {
       [f.severity_audited && f.auditor_check?.severity_reason ? `severity ${f.severity_audited}: ${f.auditor_check.severity_reason}` : '', scorecardNote(f)].filter(Boolean).join('; '),
     ].map(scorecardCell).join(' | ') + ' |');
   }
+  if (headingTags) lines.push(...tagTable(findings, headingTags));
   return lines.join('\n') + '\n';
 }
 

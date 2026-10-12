@@ -82,21 +82,21 @@ test('buildPacket: a non-git directory falls back to packet:null with a reason, 
   assert.match(result.reason, /not a git repository/);
 });
 
-test('buildPacket: no --base given falls back to packet:null, never guesses a diff base', async (t) => {
+test('buildPacket: no --base given falls back to packet:null, never guesses a diff base [slow]', async (t) => {
   const { dir } = await makeGitRepoWithDiff(t);
   const result = await buildPacket({ cd: dir, base: null, symbolFileCap: 10 });
   assert.equal(result.packet, null);
   assert.match(result.reason, /no --base given/);
 });
 
-test('buildPacket: an invalid --base ref falls back to packet:null with a reason', async (t) => {
+test('buildPacket: an invalid --base ref falls back to packet:null with a reason [slow]', async (t) => {
   const { dir } = await makeGitRepoWithDiff(t);
   const result = await buildPacket({ cd: dir, base: 'not-a-real-ref', symbolFileCap: 10 });
   assert.equal(result.packet, null);
   assert.match(result.reason, /does not resolve/);
 });
 
-test('buildPacket: a real diff produces changedFiles (only the diffed files, not unrelated ones) and the raw diff text', async (t) => {
+test('buildPacket: a real diff produces changedFiles (only the diffed files, not unrelated ones) and the raw diff text [slow]', async (t) => {
   const { dir, base } = await makeGitRepoWithDiff(t);
   const result = await buildPacket({ cd: dir, base, symbolFileCap: 10 });
   assert.notEqual(result.packet, null);
@@ -105,7 +105,7 @@ test('buildPacket: a real diff produces changedFiles (only the diffed files, not
   assert.match(result.packet.diff, /new_function/);
 });
 
-test('buildPacket: changedFiles and colocatedTests use forward-slash paths on every platform (matches git\'s own output)', async (t) => {
+test('buildPacket: changedFiles and colocatedTests use forward-slash paths on every platform (matches git\'s own output) [slow]', async (t) => {
   const { dir, base } = await makeGitRepoWithDiff(t);
   const result = await buildPacket({ cd: dir, base, symbolFileCap: 10 });
   for (const f of result.packet.changedFiles) {
@@ -118,13 +118,13 @@ test('buildPacket: changedFiles and colocatedTests use forward-slash paths on ev
   }
 });
 
-test('buildPacket: colocated test found by naming convention (foo.py -> tests/test_foo.py)', async (t) => {
+test('buildPacket: colocated test found by naming convention (foo.py -> tests/test_foo.py) [slow]', async (t) => {
   const { dir, base } = await makeGitRepoWithDiff(t);
   const result = await buildPacket({ cd: dir, base, symbolFileCap: 10 });
   assert.deepEqual(result.packet.colocatedTests['lib.py'], ['tests/test_lib.py']);
 });
 
-test('buildPacket: symbol grep finds a file referencing a newly-defined symbol', async (t) => {
+test('buildPacket: symbol grep finds a file referencing a newly-defined symbol [slow]', async (t) => {
   const { dir, base } = await makeGitRepoWithDiff(t);
   const result = await buildPacket({ cd: dir, base, symbolFileCap: 10 });
   assert.ok(result.packet.symbolReferences.new_function.includes('lib.py'));
@@ -228,14 +228,14 @@ test('computeProxyMetric: a citation of a symbol-reference file (not in changedF
   assert.deepEqual(result.citedOutsidePacket, []);
 });
 
-test('buildPacket: a new UNTRACKED file (created since --base, never git-added) appears in changedFiles', async (t) => {
+test('buildPacket: a new UNTRACKED file (created since --base, never git-added) appears in changedFiles [slow]', async (t) => {
   const { dir, base } = await makeGitRepoWithDiff(t);
   await writeFile(path.join(dir, 'brand-new.py'), 'x = 1\n', 'utf8');
   const result = await buildPacket({ cd: dir, base, symbolFileCap: 10 });
   assert.ok(result.packet.changedFiles.includes('brand-new.py'), 'a new untracked file must appear in changedFiles');
 });
 
-test('buildPacket: --cd as a SUBDIRECTORY produces cd-relative changedFiles/colocatedTests, not repo-root-relative paths', async (t) => {
+test('buildPacket: --cd as a SUBDIRECTORY produces cd-relative changedFiles/colocatedTests, not repo-root-relative paths [slow]', async (t) => {
   const { subdir, base } = await makeGitRepoWithSubdirDiff(t);
   const result = await buildPacket({ cd: subdir, base, symbolFileCap: 10 });
   assert.notEqual(result.packet, null, result.reason);

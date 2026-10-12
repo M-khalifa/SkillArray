@@ -1,0 +1,51 @@
+Codex Doctor v0.162.1 · windows-x86_64
+
+Notes
+   ↑ desktop      build 26.1007.2314.0 available
+   ⚠ security     2 issues - CrowdStrike Falcon can interfere with Codex. Verify Codex exclusions.; Microsoft Defender can interfere with Codex. Verify Codex exclusions.
+   ⚠ git          this worktree is not on a Windows Dev Drive; moving it to a trusted Dev Drive can significantly improve repository and filesystem performance - create a trusted Windows Dev Drive for source repositories: https://learn.microsoft.com/en-us/windows/dev-drive/
+   ⚠ mcp          MCP configuration has optional issues - Set the missing MCP env vars or disable the affected server.
+   ✗ sandbox      elevated Windows sandbox provisioning recorded a structured failure
+   ⚠ threads      state DB rows point at missing or unusable rollout files
+─────────────────────────────────────────────────────────────
+
+Environment
+  ✓ system       en-US
+  ✓ disk         sufficient free disk space (23.8 GiB)
+  ⚠ security     2 issues - CrowdStrike Falcon can interfere with Codex. Verify Codex exclusions.; Microsoft Defender can interfere with Codex. Verify Codex exclusions.
+  ✓ install      consistent
+  ⚠ git          this worktree is not on a Windows Dev Drive; moving it to a trusted Dev Drive can significantly improve repository and filesystem performance — create a trusted Windows Dev Drive for source repositories: https://learn.microsoft.com/en-us/windows/dev-drive/
+  ✓ git          git executable found; execution not verified
+  ✓ terminal     Windows Terminal
+  ✓ title        default · project SkillArray
+  ✓ state        databases healthy
+  ⚠ threads      state DB rows point at missing or unusable rollout files
+
+Configuration
+  ✓ config       loaded
+  ✓ auth         auth is configured
+  ⚠ mcp          MCP configuration has optional issues — Set the missing MCP env vars or disable the affected server.
+  ✗ sandbox      elevated Windows sandbox provisioning recorded a structured failure
+  ✓ sandbox      no explicit filesystem paths to probe
+
+Desktop App
+  ✓ desktop      the desktop application is installed
+  ✓ desktop      the desktop application is not running
+  ✓ desktop      no locally visible recent Codex security enforcement was found
+
+Updates
+  ✓ updates      update configuration is locally consistent
+
+Connectivity
+  ✓ network      no proxy env vars
+  ✓ websocket    connected (HTTP 101 Switching Protocols) · 15s timeout
+  ✓ reachability active provider endpoints are reachable over HTTP
+
+Background Server
+  ✓ app-server   running (persistent mode)
+
+─────────────────────────────────────────────────────────────
+20 ok · 6 notes · 4 warn · 1 fail failed
+
+Run codex doctor without --summary for detailed diagnostics.
+--all expand truncated lists       --json redacted report

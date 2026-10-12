@@ -20,11 +20,14 @@
 // Claude subagent) has no result.json, so --seat-transcript sums its token use from
 // its own transcript and --seat-usage adds the duration, both as "seat_usage".
 
-import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, stat, mkdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { rolloutUsage, rolloutModel, rolloutCommands, findThreadRollout } from './rollout-utils.mjs';
+import { findAgentTranscripts, findSessionTranscripts, transcriptCommands } from './native-agent.mjs';
+import { readRunDescriptor } from './run-descriptor.mjs';
 
 class RelayError extends Error {}
 
@@ -35,16 +38,16 @@ function printUsageAndExit(code) {
       `  [--verification <path>]... [--findings <findings.json>]\n` +
       `  [--seat-transcript <A|B|auditor|verifier|orchestrator>=<transcript .jsonl | agent id>]...\n` +
       `  [--seat-usage <A|B|auditor>=<final context tokens|unknown>,<duration ms|unknown>[,estimated]]...\n` +
-      `  [--reviewer-result <A|B>=<dispatcher result.json>]...\n` +
+      `  [--reviewer-result <A|B|auditor|verifier-<n>>=<dispatcher result.json>]...\n` +
       `  [--falsification <file written by audit-prep --breakdown-out>]\n\n` +
       `--falsification fills falsification.breakdown and falsification.qualified_claims\n` +
       `(the disputed HIGH/CRITICAL count) from audit-prep's breakdown file, so nobody\n` +
       `retypes them. A value the body already sets is kept and a difference is reported\n` +
       `as a WARNING; requested and verifiers_run are still authored, and a WARNING\n` +
       `names either one the body leaves out.\n\n` +
-      `--reviewer-result fills that role's reviewers[] entry from a Codex/OpenCode\n` +
+      `--reviewer-result fills reviewers[] seats A/B or actors[] auditor/verifier-<n> from a\n` +
       `dispatcher result.json: model_requested/_resolved, effort_requested/_resolved,\n` +
-      `verification_note, isolated, worktreePath, isolationNote, webAccess, usage and\n` +
+      `verification_note, host, transport, readOnly, isolated, worktreePath, isolationNote, webAccess, usage and\n` +
       `duration_ms. A field the body already sets is never changed; null and the\n` +
       `protocol example's placeholders (USER_SELECTED_OPENAI_MODEL, /abs/path/to/worktree,\n` +
       `"No runtime identity metadata available") count as not set. A missing entry is\n` +
@@ -52,7 +55,10 @@ function printUsageAndExit(code) {
       `that differs from result.json is kept and reported as a WARNING. Repeat the flag\n` +
       `for one role (Phase 1, exchange, redaction results): the files must agree on model,\n` +
       `effort and isolation; duration_ms is summed; usage_per_call lists each call; usage\n` +
-      `is the last file's when all share one threadId (Codex totals), else the per-call sum.\n\n` +
+      `is summed through usage_delta when every call has one, else last-taken for usageSemantics\n` +
+      `cumulative and summed for per-call; older files use threadId (an unstamped OpenCode result is one call).\n\n` +
+      `--run-dir <run-dir> copies run.json's host and per-actor support rows into the manifest as host, support and\n` +
+      `host_status (trial when any actor ran on a trial route); a value the body already sets is kept.\n\n` +
       `skill_version is stamped from this skill's SKILL.md unless the body sets it.\n` +
       `skill_versions ({phase1: ..., phase2: ..., phase3: ...}) is filled from\n` +
       `skill-versions.jsonl in --out's folder, which build-brief appends to for every\n` +
@@ -68,7 +74,7 @@ function printUsageAndExit(code) {
       `output_tokens is null, since\n` +
       `a transcript logs it before each reply is written. Repeat it for\n` +
       `a seat that ran as several subagents. orchestrator=<session .jsonl> records the\n` +
-      `orchestrator's own session, the one that ran this review, usually its largest cost.\n` +
+      `orchestrator's Claude session or Codex rollout (source: codex-rollout).\n` +
       `Append @<ISO start>[/<ISO end>] (orchestrator=<session .jsonl>@2026-09-30T14:05:00Z/\n` +
       `2026-09-30T15:00:00Z) to count only entries in that window, for one review in a session\n` +
       `that ran several; without an end it runs to the end of the transcript.\n` +
@@ -109,7 +115,7 @@ function printUsageAndExit(code) {
 
 function parseArgs(argv) {
   const args = {
-    in: null, out: null, taskPacket: null,
+    in: null, out: null, taskPacket: null, runDir: null, init: false,
     phase1: [], phase2: [], verification: [], findings: null, seatUsage: {}, seatTranscripts: {}, reviewerResults: {}, extraArtifacts: [],
     falsification: null,
   };
@@ -122,6 +128,8 @@ function parseArgs(argv) {
     };
     if (a === '--in') args.in = takeValue();
     else if (a === '--out') args.out = takeValue();
+    else if (a === '--run-dir') args.runDir = takeValue();
+    else if (a === '--init') args.init = true;
     else if (a === '--task-packet') args.taskPacket = takeValue();
     else if (a === '--phase1') args.phase1.push(takeValue());
     else if (a === '--phase2') args.phase2.push(takeValue());
@@ -153,15 +161,101 @@ function parseArgs(argv) {
     }
     else if (a === '--reviewer-result') {
       const v = takeValue();
-      const m = /^(A|B)=(.+)$/.exec(v);
+      const m = /^(A|B|auditor|verifier-\d+)=(.+)$/.exec(v);
       if (!m) throw new RelayError(`--reviewer-result "${v}" must look like B=<path to result.json>`);
       (args.reviewerResults[m[1]] ??= []).push(m[2]);
     }
     else if (a === '-h' || a === '--help') printUsageAndExit(0);
     else throw new RelayError(`unrecognized argument: ${a}`);
   }
-  if (!args.in || !args.out) throw new RelayError('--in and --out are both required');
+  if (args.init && !args.runDir) throw new RelayError('--init needs --run-dir');
+  if (!args.runDir && (!args.in || !args.out)) throw new RelayError('--in and --out are both required (or give --run-dir, which supplies both)');
   return args;
+}
+
+async function pathExists(file) {
+  try {
+    await stat(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readJsonIfPresent(file) {
+  try {
+    const text = await readFile(file, 'utf8');
+    return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  } catch {
+    return null;
+  }
+}
+
+// The minimal valid body for a run, from run.json and the files the run left; the orchestrator adds only what it knows.
+export async function initBody(descriptor, runDir) {
+  const phase3 = path.join(runDir, 'phase3');
+  const verifications = (await readdir(phase3).catch(() => [])).filter((f) => /^verification-.+[.]md$/.test(f));
+  const mapping = await readJsonIfPresent(path.join(runDir, 'phase3-private', 'seat-to-audit-label.json'));
+  const finished = await pathExists(path.join(phase3, 'findings.json'));
+  const family = descriptor.auditor.provider === descriptor.seatA.provider ? 'same-as-reviewer-A'
+    : descriptor.auditor.provider === descriptor.seatB.provider ? 'same-as-reviewer-B' : 'other';
+  return {
+    source_write: null,
+    falsification: { requested: descriptor.flags.falsification === true, verifiers_run: verifications.length },
+    topology: descriptor.skill === 'cross-review' ? 'cross-vendor' : 'same-vendor',
+    mode: descriptor.flags.mode,
+    status: finished ? 'completed' : 'incomplete',
+    protocol: 'review-protocol-v1.3',
+    reviewers: [
+      { role: 'A', provider: descriptor.seatA.provider, selection_source: 'explicit' },
+      { role: 'B', provider: descriptor.seatB.provider, selection_source: 'explicit' },
+    ],
+    exchange: {
+      blinded: true,
+      ...(mapping ? { seat_to_audit_label: mapping } : {}),
+      auditor_model_family: family,
+      auditor: 'fresh-context',
+      audit_depth: descriptor.flags.auditDepth,
+    },
+  };
+}
+
+// With --run-dir, every input the run left is passed unless its own flag was given: the packet, both untouched Phase 1 files, both
+// peer views, the verification files, findings.json, the falsification breakdown and every completed dispatcher result.json.
+async function collectFromRun(args) {
+  const runDir = path.resolve(args.runDir);
+  let descriptor;
+  try {
+    descriptor = await readRunDescriptor(runDir);
+  } catch (err) {
+    // With --in and --out the run folder only supplies host, support and agent ids (read loosely below); nothing is collected.
+    if (args.init || !args.in) throw new RelayError(`--run-dir ${args.runDir}: ${err.message}`);
+    return null;
+  }
+  const first = async (...candidates) => {
+    for (const candidate of candidates) if (await pathExists(candidate)) return candidate;
+    return null;
+  };
+  if (!args.taskPacket) args.taskPacket = await first(path.join(runDir, 'task-packet.md'));
+  // The untouched Phase 1 copies prove what each seat wrote before it saw its peer; the peer views are what each seat was shown.
+  if (args.phase1.length === 0) for (const role of ['A', 'B']) { const f = await first(path.join(runDir, 'phase1', 'original', `${role}-findings.md`), path.join(runDir, 'phase1', `${role}-findings.md`)); if (f) args.phase1.push(f); }
+  if (args.phase2.length === 0) for (const role of ['A', 'B']) { const f = await first(path.join(runDir, 'phase2', `peer-view-for-${role}.md`)); if (f) args.phase2.push(f); }
+  const phase3 = path.join(runDir, 'phase3');
+  if (args.verification.length === 0) for (const f of (await readdir(phase3).catch(() => [])).filter((name) => /^verification-.+[.]md$/.test(name)).sort()) args.verification.push(path.join(phase3, f));
+  if (!args.findings) args.findings = await first(path.join(phase3, 'findings.json'));
+  if (!args.falsification && descriptor.flags.falsification === true) args.falsification = await first(path.join(phase3, 'falsification-breakdown.json'));
+  const completed = async (file) => (await readJsonIfPresent(file))?.status === 'completed';
+  const explicit = new Set(Object.keys(args.reviewerResults));
+  const collect = async (role, file) => { if (!explicit.has(role) && (await completed(file))) (args.reviewerResults[role] ??= []).push(file); };
+  for (const role of ['A', 'B']) {
+    await collect(role, path.join(runDir, 'phase1', role, 'result.json'));
+    await collect(role, path.join(runDir, 'phase2', role, 'result.json'));
+    for (const entry of (await readdir(phase3).catch(() => [])).filter((name) => name.startsWith(`redact-${role}`)).sort()) await collect(role, path.join(phase3, entry, 'result.json'));
+  }
+  await collect('auditor', path.join(path.dirname(runDir), `${path.basename(runDir)}-audit-dispatch`, 'result.json'));
+  for (const entry of (await readdir(phase3).catch(() => [])).filter((name) => /^verifier-\d+$/.test(name)).sort()) await collect(entry, path.join(phase3, entry, 'result.json'));
+  if (!args.out) args.out = args.init ? path.join(phase3, 'manifest-body.json') : path.join(runDir, 'manifest.json');
+  return descriptor;
 }
 
 function sha256(buf) {
@@ -204,9 +298,10 @@ async function buildHashes(args) {
   return hashes;
 }
 
-// result.json key -> manifest reviewers[] key.
+// result.json key -> manifest reviewers[] or actors[] key.
 const REVIEWER_FIELDS = [
   ['modelRequested', 'model_requested'], ['modelResolved', 'model_resolved'],
+  ['host', 'host'], ['transport', 'transport'], ['readOnly', 'readOnly'],
   ['effortRequested', 'effort_requested'], ['effortResolved', 'effort_resolved'],
   ['selectionNote', 'verification_note'], ['isolated', 'isolated'], ['worktreePath', 'worktreePath'],
   ['isolationNote', 'isolationNote'], ['webAccess', 'webAccess'], ['usage', 'usage'], ['durationMs', 'duration_ms'],
@@ -222,24 +317,49 @@ function isUnset(entry, key) {
   return v === null || (typeof v === 'string' && LEGACY_PLACEHOLDERS.has(v));
 }
 
-const IDENTITY_FIELDS = ['modelRequested', 'modelResolved', 'effortRequested', 'effortResolved', 'isolated', 'worktreePath'];
+// A saved "default" effort and the null a dispatcher stores mean the same thing.
+function sameEffort(field, value) {
+  return (field === 'effort_requested' || field === 'effort_resolved') && (value === 'default' || value === undefined) ? null : value;
+}
 
-// One Codex thread reports cumulative usage, so its last call already holds the total. Anything
-// else (several threads, OpenCode's per-call counts) is summed field by field from each call's own usage.
+const IDENTITY_FIELDS = ['modelRequested', 'modelResolved', 'effortRequested', 'effortResolved', 'isolated', 'worktreePath', 'host', 'transport', 'readOnly'];
+
+// A field counts as known only when every call reports it; one missing call makes the sum unknown (null).
+function sumUsages(usages, source) {
+  const sum = { source };
+  const keys = new Set();
+  for (const u of usages) {
+    // A call without its own numbers makes any sum wrong; say so instead of counting it as zero.
+    const numeric = u && typeof u === 'object' && u.source !== 'unavailable' && Object.values(u).some((v) => typeof v === 'number');
+    if (!numeric) return { source: 'unavailable', note: 'a call has no usable usage numbers; see usage_per_call' };
+    for (const [k, v] of Object.entries(u)) if (typeof v === 'number') keys.add(k);
+  }
+  for (const k of keys) sum[k] = usages.every((u) => typeof u[k] === 'number') ? usages.reduce((s, u) => s + u[k], 0) : null;
+  return sum;
+}
+
+const hasUsableUsage = (u) => u != null && typeof u === 'object' && u.source !== 'unavailable' && Object.values(u).some((v) => typeof v === 'number');
+// An OpenCode result from before it was stamped: a sessionId, no threadId, no usageSemantics. Each is one call.
+const isUnstampedOpenCode = (r) => !r.usageSemantics && r.threadId == null && typeof r.sessionId === 'string';
+
+// Per-call results are summed, and so is every set of results that all carry a usable usage_delta (a thread that had
+// usage before the review then counts only this review). Other cumulative results (explicit, or older files with no
+// usageSemantics and no usage_delta) take each thread's last total, and different threads add up. Results with no
+// threadId count as one thread.
 function mergedUsage(results) {
   const last = results[results.length - 1].usage;
   if (results.length === 1) return last;
   const threads = new Set(results.map((r) => r.threadId ?? null));
-  if (threads.size === 1 && !threads.has(null)) return last;
-  const sum = { source: 'summed-per-call' };
-  for (const r of results) {
-    const u = r.usage_delta ?? r.usage;
-    // A call without its own numbers makes any sum wrong; say so instead of counting it as zero.
-    const numeric = u && typeof u === 'object' && u.source !== 'unavailable' && Object.values(u).some((v) => typeof v === 'number');
-    if (!numeric) return { source: 'unavailable', note: 'a call has no usable usage numbers; see usage_per_call' };
-    for (const [k, v] of Object.entries(u)) if (typeof v === 'number') sum[k] = (sum[k] ?? 0) + v;
+  const everyDelta = results.every((r) => hasUsableUsage(r.usage_delta));
+  if (!everyDelta && results.every((r) => !r.usageSemantics) && threads.size === 1 && !threads.has(null)) return last;
+  const legacyCumulative = results.every((r) => !r.usageSemantics && r.usage_delta == null && !isUnstampedOpenCode(r));
+  if (legacyCumulative || (!everyDelta && !results.some((r) => r.usageSemantics === 'per-call') && results.some((r) => r.usageSemantics === 'cumulative'))) {
+    const finals = new Map();
+    for (const r of results) finals.set(r.threadId ?? null, r);
+    if (finals.size === 1) return last;
+    return sumUsages([...finals.values()].map((r) => r.usage), 'summed-per-thread');
   }
-  return sum;
+  return sumUsages(results.map((r) => (r.usageSemantics === 'per-call' ? r.usage : r.usage_delta ?? r.usage)), 'summed-per-call');
 }
 
 const BREAKDOWN_KEYS = ['high_or_critical', 'disputed', 'conceded', 'unaddressed'];
@@ -277,8 +397,8 @@ async function fillFalsification(existing, file, warnings) {
   return out;
 }
 
-async function fillReviewers(manifest, reviewerResults, warnings = []) {
-  const reviewers = Array.isArray(manifest.reviewers) ? manifest.reviewers.map((r) => ({ ...r })) : [];
+async function fillReviewers(manifest, reviewerResults, warnings = [], collection = 'reviewers') {
+  const reviewers = Array.isArray(manifest[collection]) ? manifest[collection].map((r) => ({ ...r })) : [];
   for (const [role, fileOrFiles] of Object.entries(reviewerResults)) {
     const files = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
     const results = [];
@@ -298,6 +418,9 @@ async function fillReviewers(manifest, reviewerResults, warnings = []) {
             'pass the result.json of the call that resumed that thread instead -- a Codex thread\'s usage is cumulative, so it covers the interrupted work'
         );
       }
+      if (result.usageSemantics !== undefined && !['cumulative', 'per-call'].includes(result.usageSemantics)) {
+        throw new RelayError(`--reviewer-result ${role}: "${file}" has invalid usageSemantics; expected cumulative or per-call`);
+      }
       results.push(result);
     }
     // Every call of one seat must be the same model, effort and isolation; a mis-dispatched call
@@ -314,41 +437,68 @@ async function fillReviewers(manifest, reviewerResults, warnings = []) {
       reviewers.push(entry);
     }
     const merged = { ...results[0], usage: mergedUsage(results) };
+    for (const field of ['host', 'transport', 'readOnly']) merged[field] ??= null;
+    if (merged.usage == null || (results.some((r) => r.usageSemantics) && (merged.usage.source === 'unavailable' || !Object.values(merged.usage).some(Number.isFinite)))) {
+      merged.usage_reason = merged.usage?.note ?? merged.usage?.reason ?? 'dispatcher reported no usable usage numbers; see usage_per_call';
+      merged.usage = null;
+    }
     if (results.every((r) => typeof r.durationMs === 'number')) merged.durationMs = results.reduce((s, r) => s + r.durationMs, 0);
     for (const [from, to] of REVIEWER_FIELDS) {
       if (!Object.hasOwn(merged, from)) continue;
       if (isUnset(entry, to)) {
         entry[to] = merged[from];
-      } else if (to !== 'usage' && to !== 'duration_ms' && JSON.stringify(entry[to]) !== JSON.stringify(merged[from])) {
-        warnings.push(`reviewers[${role}].${to} is ${JSON.stringify(entry[to])} in the body but ${JSON.stringify(merged[from])} in ${files[0]}; kept the body's value`);
+      } else if (to !== 'usage' && to !== 'duration_ms' && JSON.stringify(sameEffort(to, entry[to])) !== JSON.stringify(sameEffort(to, merged[from]))) {
+        warnings.push(`${collection}[${role}].${to} is ${JSON.stringify(entry[to])} in the body but ${JSON.stringify(merged[from])} in ${files[0]}; kept the body's value`);
       }
     }
     if (results.length > 1 && isUnset(entry, 'usage_per_call')) {
-      entry.usage_per_call = results.map((r) => r.usage_delta ?? r.usage ?? null);
+      entry.usage_per_call = results.map((r) => (r.usageSemantics === 'per-call' ? r.usage : r.usage_delta ?? r.usage) ?? null);
     }
+    if (merged.usage_reason && isUnset(entry, 'usage_reason')) entry.usage_reason = merged.usage_reason;
     // Agents a Codex seat spawned bill the same account but are not in "usage".
     const children = results.flatMap((r) => (Array.isArray(r.childThreads) ? r.childThreads : []));
     if (children.length > 0 && isUnset(entry, 'child_threads')) {
       entry.child_threads = children;
-      warnings.push(`reviewers[${role}]: the seat spawned ${children.length} agent thread(s) whose tokens are not in usage; see child_threads`);
+      warnings.push(`${collection}[${role}]: the seat spawned ${children.length} agent thread(s) whose tokens are not in usage; see child_threads`);
+    }
+    if (isUnset(entry, 'commands')) {
+      const commands = await resultCommands(results);
+      if (commands) entry.commands = commands;
     }
   }
   return reviewers;
 }
 
-// An agent id (the Agent tool's agentId) is looked up as <config>/projects/*/*/subagents/agent-<id>.jsonl.
-async function resolveTranscript(role, value) {
-  if (!/^a[0-9a-f]{8,}$/.test(value)) return value;
-  const projects = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), '.claude'), 'projects');
-  const found = [];
-  for (const proj of await readdir(projects).catch(() => [])) {
-    for (const session of await readdir(path.join(projects, proj)).catch(() => [])) {
-      const f = path.join(projects, proj, session, 'subagents', `agent-${value}.jsonl`);
-      if (await stat(f).then((s) => s.isFile(), () => false)) found.push(f);
-    }
+// Shell commands a CLI seat tried over all its calls, each session or thread read once: a Claude CLI session transcript
+// (the result has a sessionId) or a Codex thread rollout. A call whose record cannot be found or read makes it unknown (null).
+async function resultCommands(results) {
+  const sessionsDir = path.join(process.env.CODEX_HOME || path.join(homedir(), '.codex'), 'sessions');
+  const seen = new Set();
+  const sum = { tried: 0, failed: 0, source: null };
+  for (const r of results) {
+    const claude = typeof r.sessionId === 'string';
+    const id = claude ? r.sessionId : r.threadId;
+    if (typeof id !== 'string' || !id) return null;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const files = claude ? await findSessionTranscripts(id) : [await findThreadRollout(id, sessionsDir)].filter(Boolean);
+    if (files.length !== 1) return null;
+    const text = await readFile(files[0], 'utf8').catch(() => null);
+    const counted = text === null ? null : claude ? transcriptCommands(text) : rolloutCommands(text);
+    const source = claude ? 'claude-transcript' : 'codex-rollout';
+    if (!counted || (sum.source !== null && sum.source !== source)) return null;
+    sum.tried += counted.tried;
+    sum.failed += counted.failed;
+    sum.source = source;
   }
+  return sum.source === null ? null : sum;
+}
+
+// An agent id (the Agent tool's agentId) is looked up as <config>/projects/*/*/subagents/agent-<id>.jsonl, a Codex thread id as its rollout.
+async function resolveTranscript(role, value) {
+  const found = await findAgentTranscripts(value);
   if (found.length !== 1) {
-    throw new RelayError(`--seat-transcript ${role}: agent id "${value}" matched ${found.length} transcripts under ${projects}; pass the .jsonl path instead`);
+    throw new RelayError(`--seat-transcript ${role}: agent id "${value}" matched ${found.length} transcripts under the Claude projects folder or the Codex sessions folder; pass the .jsonl path instead`);
   }
   return found[0];
 }
@@ -358,6 +508,7 @@ async function resolveTranscript(role, value) {
 async function transcriptUsage(role, files) {
   const calls = new Map();
   const used = [];
+  const commands = { tried: 0, failed: 0, source: 'transcript' };
   let skipped = 0;
   let activeMs = 0;
   let timed = false;
@@ -382,6 +533,29 @@ async function transcriptUsage(role, files) {
     } catch (err) {
       throw new RelayError(`--seat-transcript ${role}: failed to read "${file}": ${err.message}`);
     }
+    let first;
+    try { first = JSON.parse(text.replace(/^\uFEFF/, '').split('\n', 1)[0]); } catch {}
+    if (first?.type === 'session_meta') {
+      if (files.length !== 1) throw new RelayError(`--seat-transcript ${role}: pass one Codex rollout per role, with one usage window`);
+      const timestamps = text.split('\n').flatMap((line) => {
+        try { const ms = Date.parse(JSON.parse(line).timestamp); return Number.isFinite(ms) ? [ms] : []; } catch { return []; }
+      });
+      const usage = rolloutUsage(text.replace(/^\uFEFF/, ''), { start: fromMs, end: fromMs !== null ? toMs ?? timestamps.reduce((latest, ms) => Math.max(latest, ms), fromMs) : null });
+      const commands = rolloutCommands(text, { start: fromMs, end: toMs });
+      return {
+        ...usage, source: 'codex-rollout', transcripts: [path.basename(file)],
+        model_resolved: rolloutModel(text), model_resolved_note: 'the model in the thread rollout turn_context: the configured model, as for a Codex CLI seat',
+        ...(usage.source === 'unavailable' ? { input_tokens: null, cached_input_tokens: null, cache_write_input_tokens: null, output_tokens: null, reasoning_tokens: null, total_tokens: null } : {}),
+        active_ms: null, active_ms_note: 'working time is not recorded by rollout token events',
+        ...(since !== null ? { counted_from: since } : {}),
+        ...(until !== null ? { counted_until: until } : {}),
+        ...(commands ? { commands: { ...commands, source: 'codex-rollout' } } : {}),
+      };
+    }
+    const claude = text.split('\n').some((line) => {
+      try { const e = JSON.parse(line); return e.type === 'assistant' && e.message && typeof e.message === 'object'; } catch { return false; }
+    });
+    if (!claude) throw new RelayError(`--seat-transcript ${role}: neither a Codex rollout (session_meta first line) nor a Claude session transcript; no API usage found in ${path.basename(file)}`);
     // Working time: a gap counts only when it ends in the model's reply or a tool result, and not
     // while waiting after a final reply (stop_reason "end_turn" or a SubagentHandback tool call).
     // A gap that ends at a new prompt, an interrupt or a queued message was a wait.
@@ -422,6 +596,9 @@ async function transcriptUsage(role, files) {
       }
     }
     used.push(path.basename(file));
+    const counted = transcriptCommands(text, { start: fromMs, end: toMs });
+    commands.tried += counted.tried;
+    commands.failed += counted.failed;
   }
   if (calls.size === 0) throw new RelayError(`--seat-transcript ${role}: no API usage found in ${used.join(', ')}; is it a subagent transcript?`);
   const out = {
@@ -442,10 +619,23 @@ async function transcriptUsage(role, files) {
     out.total_input_tokens += ctx;
     out.max_context_tokens = Math.max(out.max_context_tokens, ctx);
   }
+  const inputKeys = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'];
+  const missing = [...calls.values()].some(({ usage }) => !inputKeys.some((key) => Number.isFinite(usage[key]))) ? inputKeys : [];
+  if (missing.length > 0) {
+    for (const key of missing) out[key] = null;
+    out.total_input_tokens = null;
+    out.max_context_tokens = null;
+    out.reason = `missing transcript usage fields: ${missing.join(', ')}`;
+  } else {
+    out.new_input_tokens = out.input_tokens + out.cache_creation_input_tokens;
+    out.context_reread_tokens = out.cache_read_input_tokens;
+    out.usage_note = 'total_input_tokens counts the whole context re-sent on every call; new_input_tokens is what this actor added, context_reread_tokens is the cached context read again';
+  }
   out.active_ms = timed ? activeMs : null;
   if (since !== null) out.counted_from = since;
   if (until !== null) out.counted_until = until;
   if (skipped > 0) out.unparsed_lines = skipped;
+  out.commands = commands;
   return out;
 }
 
@@ -518,8 +708,28 @@ async function ownSkillVersion() {
 }
 
 async function run(args) {
-  let manifest;
-  try {
+  let initial = null;
+  if (args.runDir) {
+    const descriptor = await collectFromRun(args);
+    if (args.init) {
+      await mkdir(path.dirname(path.resolve(args.out)), { recursive: true });
+      await writeFile(path.resolve(args.out), JSON.stringify(await initBody(descriptor, path.resolve(args.runDir)), null, 2) + String.fromCharCode(10), { flag: 'wx' });
+      process.stdout.write(`build-manifest: wrote the minimal body ${path.resolve(args.out)}; add what only you know, then run without --init\n`);
+      return null;
+    }
+    if (!args.in && descriptor) initial = await initBody(descriptor, path.resolve(args.runDir));
+  }
+  if (args.runDir) {
+    let agents = null;
+    try {
+      agents = JSON.parse(await readFile(path.join(args.runDir, 'native-agents.json'), 'utf8'));
+    } catch { /* none recorded */ }
+    for (const role of ['A', 'B', 'auditor']) {
+      if (agents && typeof agents[role] === 'string' && !(args.seatTranscripts[role]?.length > 0)) (args.seatTranscripts[role] ??= []).push(agents[role]);
+    }
+  }
+  let manifest = initial;
+  if (initial === null) try {
     // A BOM (PowerShell Set-Content -Encoding utf8 writes one) is not valid JSON.
     manifest = JSON.parse((await readFile(args.in, 'utf8')).replace(/^\uFEFF/, ''));
   } catch (err) {
@@ -569,7 +779,10 @@ async function run(args) {
 
   const reviewerResults = args.reviewerResults ?? {};
   const warnings = [];
-  if (Object.keys(reviewerResults).length > 0) manifest.reviewers = await fillReviewers(manifest, reviewerResults, warnings);
+  const seats = Object.fromEntries(Object.entries(reviewerResults).filter(([role]) => role === 'A' || role === 'B'));
+  const actors = Object.fromEntries(Object.entries(reviewerResults).filter(([role]) => role !== 'A' && role !== 'B'));
+  if (Object.keys(seats).length > 0) manifest.reviewers = await fillReviewers(manifest, seats, warnings);
+  if (Object.keys(actors).length > 0) manifest.actors = await fillReviewers(manifest, actors, warnings, 'actors');
   if (args.falsification) manifest.falsification = await fillFalsification(manifest.falsification, args.falsification, warnings);
   const recorded = await recordedSkillVersions(path.dirname(path.resolve(args.out)));
   if (recorded) {
@@ -580,14 +793,44 @@ async function run(args) {
     const distinct = [...new Set(Object.values(recorded).flat())];
     if (distinct.length > 1) warnings.push(`the skill version changed during the run: ${distinct.join(', ')}`);
   }
+  if (args.runDir) {
+    let descriptor = null;
+    try {
+      const raw = await readFile(path.join(args.runDir, 'run.json'), 'utf8');
+      descriptor = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
+    } catch (err) {
+      warnings.push(`--run-dir ${args.runDir}: run.json could not be read (${err.message}); no support record was added`);
+    }
+    // A result.json does not say which provider ran it; run.json does, and the report's cost table reads the usage shape from it.
+    for (const actor of descriptor && Array.isArray(manifest.actors) ? manifest.actors : []) {
+      const planned = actor.role === 'auditor' ? descriptor.auditor : (descriptor.verifiers ?? []).find((v) => v?.role === actor.role);
+      if (isUnset(actor, 'provider') && planned?.provider) actor.provider = planned.provider;
+    }
+    if (descriptor && Array.isArray(descriptor.support)) {
+      if (!Object.hasOwn(manifest, 'host')) manifest.host = descriptor.host;
+      if (!Object.hasOwn(manifest, 'support')) manifest.support = descriptor.support;
+      if (!Object.hasOwn(manifest, 'host_status')) manifest.host_status = descriptor.support.some((row) => row.status === 'trial') ? 'trial' : 'supported';
+    }
+  }
   for (const file of await unlistedResults(path.dirname(path.resolve(args.out)), reviewerResults)) {
-    warnings.push(`${file} is a completed seat call that was not passed to --reviewer-result; its tokens and duration are not in this manifest`);
+    warnings.push(`${file} is a completed call that was not passed to --reviewer-result (a session probe, an earlier attempt, or a seat call left out); its tokens and duration are not in this manifest`);
   }
   for (const w of warnings) process.stderr.write(`build-manifest: WARNING: ${w}\n`);
 
   const hashes = await buildHashes(args);
   const stamped = { ...manifest, run_id: randomUUID(), hashes };
   if (Object.keys(seatUsage).length > 0) stamped.seat_usage = { ...(bodyUsage ?? {}), ...seatUsage };
+  // A reviewer entry read on its own looks free when its cost sits in seat_usage; point to it and carry the model.
+  for (const reviewer of Array.isArray(stamped.reviewers) ? stamped.reviewers : []) {
+    const used = stamped.seat_usage?.[reviewer.role];
+    if (!used) continue;
+    if (isUnset(reviewer, 'usage') && isUnset(reviewer, 'usage_ref')) reviewer.usage_ref = `seat_usage.${reviewer.role}`;
+    const models = used.models ? Object.keys(used.models) : [];
+    if (isUnset(reviewer, 'model_resolved') && models.length === 1) {
+      reviewer.model_resolved = models[0];
+      reviewer.model_resolved_source = 'transcript';
+    }
+  }
   if (!Object.hasOwn(stamped, 'skill_version')) {
     const version = await ownSkillVersion();
     if (version) stamped.skill_version = version;
@@ -615,7 +858,7 @@ async function main() {
   }
   try {
     const stamped = await run(args);
-    process.stdout.write(`build-manifest: wrote ${args.out} (run_id ${stamped.run_id})\n`);
+    if (stamped) process.stdout.write(`build-manifest: wrote ${args.out} (run_id ${stamped.run_id})\n`);
   } catch (err) {
     if (err instanceof RelayError) {
       process.stderr.write(`build-manifest.mjs: ${err.message}\n`);
@@ -629,6 +872,11 @@ const isDirectRun =
   typeof process.argv[1] === 'string' &&
   import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectRun) {
+  // A reader that stops early (head, Select-Object -First) closes the pipe: the rest of the output is dropped, the exit code stays.
+  process.stdout.on('error', (err) => {
+    if (err.code === 'EPIPE') return;
+    throw err;
+  });
   main().catch((err) => {
     process.stderr.write(`build-manifest.mjs: unexpected failure: ${err.stack || err}\n`);
     process.exit(1);

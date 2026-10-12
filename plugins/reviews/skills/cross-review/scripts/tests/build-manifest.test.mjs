@@ -4,6 +4,14 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync } from 'node:fs';
+
+// No test reads this machine's real Codex or Claude sessions: both homes point at an empty temp folder.
+const ISOLATED_HOME = mkdtempSync(path.join(os.tmpdir(), 'build-manifest-homes-'));
+process.env.CODEX_HOME = path.join(ISOLATED_HOME, 'codex');
+process.env.CLAUDE_CONFIG_DIR = path.join(ISOLATED_HOME, 'claude');
+process.on('exit', () => rmSync(ISOLATED_HOME, { recursive: true, force: true }));
 import { parseArgs, buildHashes, run, sha256, RelayError } from '../build-manifest.mjs';
 
 async function tmpDir(t) {
@@ -330,6 +338,22 @@ test('--reviewer-result: an authored upper-case value is kept with a WARNING (on
   await assert.rejects(run({ ...base, reviewerResults: { B: [p1, otherWt] } }), /disagree on worktreePath/);
 });
 
+test('--reviewer-result: effort "default" in the body equals null in result.json for requested and resolved; any other difference still warns', async (t) => {
+  const dir = await tmpDir(t);
+  const attempt = async (bodyEffort, resultEffort) => {
+    const result = path.join(dir, 'r.json');
+    await fs.writeFile(result, JSON.stringify({ modelRequested: 'gpt-6-sol', modelResolved: null, effortRequested: resultEffort, effortResolved: resultEffort, isolated: true, worktreePath: 'C:/wt', usage: {}, durationMs: 1 }));
+    const inPath = path.join(dir, 'm.json');
+    await fs.writeFile(inPath, JSON.stringify({ reviewers: [{ role: 'B', effort_requested: bodyEffort, effort_resolved: bodyEffort }] }));
+    const base = { in: inPath, out: path.join(dir, 'o.json'), taskPacket: null, phase1: [], phase2: [], verification: [], findings: null };
+    return (await run({ ...base, reviewerResults: { B: [result] } })).warnings.filter((w) => /effort_/.test(w));
+  };
+  assert.deepEqual(await attempt('default', null), []);
+  assert.equal((await attempt('high', null)).length, 2);
+  assert.match((await attempt('high', null))[0], /effort_requested is "high" in the body but null in /);
+  assert.equal((await attempt('high', 'low')).length, 2);
+});
+
 test('run: stamps skill_version from this skill\'s SKILL.md, and keeps one the body already set', async (t) => {
   const dir = await tmpDir(t);
   const inPath = path.join(dir, 'm.json');
@@ -404,7 +428,8 @@ test('--seat-transcript: sums every API call once from a subagent transcript, th
     source: 'transcript', transcripts: ['agent-a0123456789abcdef.jsonl'], calls: 3,
     input_tokens: 12, cache_creation_input_tokens: 1300, cache_read_input_tokens: 1010,
     output_tokens: null, output_tokens_note: 'not in the transcript: it records output_tokens from the start of each reply, before the reply is written',
-    total_input_tokens: 2322, max_context_tokens: 1312, models: { 'claude-opus-5-5': 2, 'claude-sonnet-5-5': 1 }, active_ms: null, unparsed_lines: 1, duration_ms: null,
+    total_input_tokens: 2322, max_context_tokens: 1312, models: { 'claude-opus-5-5': 2, 'claude-sonnet-5-5': 1 }, new_input_tokens: 1312, context_reread_tokens: 1010, usage_note: 'total_input_tokens counts the whole context re-sent on every call; new_input_tokens is what this actor added, context_reread_tokens is the cached context read again', active_ms: null, unparsed_lines: 1,
+    commands: { tried: 0, failed: 0, source: 'transcript' }, duration_ms: null,
   };
   const byPath = await run({ ...base, seatUsage: {}, seatTranscripts: { A: [file] } });
   assert.deepEqual(byPath.seat_usage.A, expected);
@@ -636,4 +661,543 @@ test('--extra-artifact: hashes a named file the protocol does not name into hash
     buildHashes({ taskPacket: null, phase1: [], phase2: [], verification: [], findings: null, extraArtifacts: [['gone', path.join(dir, 'gone.md')]] }),
     (e) => e instanceof RelayError && /^--extra-artifact gone ".*gone\.md" cannot be read \(ENOENT\)/.test(e.message)
   );
+});
+const fixturePath = (name) => new URL('fixtures/' + name, import.meta.url);
+const resultFixtures = ['phase1-result.json', 'phase2-result.json'].map((name) => fixturePath('claude-session/' + name));
+
+test('--reviewer-result: per-call Phase 1 and Phase 2 usage is summed even with one threadId', async (t) => {
+  const dir = await tmpDir(t);
+  const files = await Promise.all(resultFixtures.map(async (url, i) => {
+    const file = path.join(dir, 'phase' + (i + 1) + '.json');
+    await fs.copyFile(url, file);
+    return file;
+  }));
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, '{}');
+  const out = await run(parseArgs(['--in', input, '--out', path.join(dir, 'manifest.json'),
+    ...files.flatMap((file) => ['--reviewer-result', 'A=' + file])]));
+  const calls = await Promise.all(resultFixtures.map(async (url) => JSON.parse(await fs.readFile(url, 'utf8'))));
+  const expected = { source: 'summed-per-call' };
+  for (const call of calls) for (const [key, value] of Object.entries(call.usage)) {
+    if (typeof value === 'number') expected[key] = (expected[key] ?? 0) + value;
+  }
+  assert.deepEqual(out.reviewers[0].usage, expected);
+  assert.notDeepEqual(out.reviewers[0].usage, calls[1].usage);
+  assert.deepEqual(out.reviewers[0].usage_per_call, calls.map((call) => call.usage));
+  assert.equal(out.reviewers[0].duration_ms, calls.reduce((sum, call) => sum + call.durationMs, 0));
+  assert.deepEqual([out.reviewers[0].host, out.reviewers[0].transport, out.reviewers[0].readOnly],
+    [calls[0].host, calls[0].transport, calls[0].readOnly]);
+});
+
+test('--reviewer-result: auditor and repeated verifier roles populate actors and do not warn as unlisted', async (t) => {
+  const dir = await tmpDir(t);
+  const files = [];
+  for (const [i, url] of resultFixtures.entries()) {
+    const file = path.join(dir, 'phase' + (i + 1), 'auditor', 'result.json');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.copyFile(url, file);
+    files.push(file);
+  }
+  const input = path.join(dir, 'body.json');
+  const authored = { role: 'A', host: 'claude-code', transport: 'native', readOnly: { shell: 'prompt-only' } };
+  await fs.writeFile(input, JSON.stringify({ reviewers: [authored], actors: [{ role: 'auditor', host: 'claude-code' }] }));
+  const flags = ['--in', input, '--out', path.join(dir, 'manifest.json'),
+    ...['auditor', 'verifier-1', 'verifier-2'].flatMap((role) => files.flatMap((file) => ['--reviewer-result', role + '=' + file]))];
+  const out = await run(parseArgs(flags));
+  assert.deepEqual(out.reviewers, [authored]);
+  assert.deepEqual(out.actors.map((actor) => actor.role), ['auditor', 'verifier-1', 'verifier-2']);
+  for (const actor of out.actors) {
+    assert.equal(actor.usage.input_tokens, 17);
+    assert.equal(actor.duration_ms, 3000);
+    assert.equal(actor.transport, 'cli');
+  }
+  assert.equal(out.actors[0].host, 'claude-code');
+  assert.match(out.warnings.join('\n'), /actors\[auditor\]\.host/);
+  assert.ok(!out.warnings.some((warning) => /not passed to --reviewer-result/.test(warning)));
+  for (const role of ['verifier', 'verifier-x', 'orchestrator', 'C']) {
+    assert.throws(() => parseArgs(['--in', 'i', '--out', 'o', '--reviewer-result', role + '=x']), /must look like/);
+  }
+});
+
+test('--reviewer-result: explicit cumulative semantics wins without threadId; unknown provenance stays null', async (t) => {
+  const dir = await tmpDir(t);
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, '{}');
+  const common = { modelRequested: 'gpt-fixture', usageSemantics: 'cumulative', status: 'completed' };
+  const files = [];
+  for (const [i, count] of [10, 30].entries()) {
+    const file = path.join(dir, 'r' + i + '.json');
+    await fs.writeFile(file, JSON.stringify({ ...common, usage: { input_tokens: count } }));
+    files.push(file);
+  }
+  const build = () => run(parseArgs(['--in', input, '--out', path.join(dir, 'manifest.json'),
+    ...files.flatMap((file) => ['--reviewer-result', 'B=' + file])]));
+  const entry = (await build()).reviewers[0];
+  assert.deepEqual(entry.usage, { input_tokens: 30 });
+  assert.deepEqual([entry.host, entry.transport, entry.readOnly], [null, null, null]);
+  await fs.writeFile(files[1], JSON.stringify({ ...common, usage: { source: 'unavailable' } }));
+  const missing = (await build()).reviewers[0];
+  assert.equal(missing.usage, null);
+  assert.match(missing.usage_reason, /no usable usage/);
+  await fs.writeFile(files[1], JSON.stringify({ ...common, usageSemantics: 'guess' }));
+  await assert.rejects(build(), /invalid usageSemantics/);
+});
+
+test('--reviewer-result: provenance is preserved in body with warnings and mismatched calls are refused', async (t) => {
+  const dir = await tmpDir(t);
+  const input = path.join(dir, 'body.json');
+  const first = JSON.parse(await fs.readFile(resultFixtures[0], 'utf8'));
+  const file = path.join(dir, 'result.json');
+  await fs.writeFile(file, JSON.stringify(first));
+  const body = { role: 'A', host: 'claude-code', transport: 'native', readOnly: { shell: 'prompt-only', cwd: 'target' } };
+  await fs.writeFile(input, JSON.stringify({ reviewers: [body] }));
+  const base = ['--in', input, '--out', path.join(dir, 'manifest.json'), '--reviewer-result', 'A=' + file];
+  const out = await run(parseArgs(base));
+  for (const key of ['host', 'transport', 'readOnly']) {
+    assert.deepEqual(out.reviewers[0][key], body[key]);
+    assert.ok(out.warnings.some((warning) => warning.includes('reviewers[A].' + key)));
+    const second = path.join(dir, key + '.json');
+    await fs.writeFile(second, JSON.stringify({ ...first, [key]: body[key] }));
+    await assert.rejects(run(parseArgs([...base, '--reviewer-result', 'A=' + second])), new RegExp('disagree on ' + key));
+  }
+});
+
+test('--seat-transcript: orchestrator detects Codex rollouts, subtracts window counters and leaves missing usage null', async (t) => {
+  const { fileURLToPath } = await import('node:url');
+  const dir = await tmpDir(t);
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, '{}');
+  const file = fileURLToPath(fixturePath('rollout/orchestrator.jsonl'));
+  const build = (value) => run(parseArgs(['--in', input, '--out', path.join(dir, 'manifest.json'), '--seat-transcript', 'orchestrator=' + value]));
+  const start = '2026-10-04T12:00:10Z';
+  const end = '2026-10-04T12:00:30Z';
+  const out = (await build(file + '@' + start + '/' + end)).seat_usage.orchestrator;
+  assert.equal(out.source, 'codex-rollout');
+  assert.deepEqual([out.input_tokens, out.cached_input_tokens, out.output_tokens, out.total_tokens], [60, 20, 15, 75]);
+  assert.deepEqual([out.counted_from, out.counted_until], [start, end]);
+  assert.equal(out.active_ms, null);
+  assert.equal(out.duration_ms, null);
+  assert.match(out.active_ms_note, /not recorded/);
+  assert.equal((await build(file)).seat_usage.orchestrator.input_tokens, 300);
+  assert.equal((await build(file + '@' + start)).seat_usage.orchestrator.input_tokens, 200);
+  const missing = (await build(fileURLToPath(fixturePath('rollout/no-usage.jsonl')))).seat_usage.orchestrator;
+  assert.equal(missing.source, 'codex-rollout');
+  assert.equal(missing.input_tokens, null);
+  assert.equal(missing.total_tokens, null);
+  assert.match(missing.reason, /no rollout token usage/);
+  const baseline = (await build(file + '@2026-10-03T12:00:00Z/2026-10-03T13:00:00Z')).seat_usage.orchestrator;
+  assert.equal(baseline.input_tokens, null);
+  assert.match(baseline.reason, /no rollout token usage/);
+  const invalid = path.join(dir, 'invalid.jsonl');
+  await fs.writeFile(invalid, '{"type":"unrelated","usage":{"input_tokens":500}}\n');
+  await assert.rejects(build(invalid), /neither a Codex rollout .* nor a Claude session transcript/);
+});
+
+test('--seat-transcript: real lean Claude session reports independently counted calls, models and active time', async (t) => {
+  const { fileURLToPath } = await import('node:url');
+  const dir = await tmpDir(t);
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, '{}');
+  const fixture = fixturePath('claude-session/lean-session.jsonl');
+  const text = await fs.readFile(fixture, 'utf8');
+  const rows = text.trim().split('\n').map(JSON.parse);
+  const calls = Object.fromEntries(rows.filter((row) => row.type === 'assistant' && row.message?.id && row.message.usage)
+    .map((row) => [row.message.id, row.message]));
+  const models = {};
+  for (const call of Object.values(calls)) models[call.model] = (models[call.model] ?? 0) + 1;
+  assert.deepEqual(Object.keys(models), ['claude-haiku-4-5-20251001']);
+  assert.equal(rows.filter((row) => row.type === 'user' && typeof row.message?.content === 'string').length, 2);
+  const timeline = rows.filter((row) => Number.isFinite(Date.parse(row.timestamp)));
+  let active = 0;
+  for (let i = 1; i < timeline.length; i++) {
+    const row = timeline[i];
+    const previous = timeline[i - 1];
+    const lastMessage = timeline.slice(0, i).findLast((entry) => entry.type === 'assistant' || entry.type === 'user');
+    const toolResult = row.type === 'user' && Array.isArray(row.message?.content) && row.message.content.some((item) => item.type === 'tool_result');
+    const toolPending = lastMessage?.type === 'assistant' && lastMessage.message.stop_reason === 'tool_use';
+    const finished = lastMessage?.type === 'assistant' && lastMessage.message.stop_reason === 'end_turn';
+    if (!finished && (row.type === 'assistant' || toolResult || toolPending)) {
+      active += Math.max(0, Date.parse(row.timestamp) - Date.parse(previous.timestamp));
+    }
+  }
+  assert.ok(active > 0);
+  const out = await run(parseArgs(['--in', input, '--out', path.join(dir, 'manifest.json'), '--seat-transcript', 'A=' + fileURLToPath(fixture)]));
+  assert.equal(out.seat_usage.A.source, 'transcript');
+  assert.equal(out.seat_usage.A.calls, Object.keys(calls).length);
+  assert.deepEqual(out.seat_usage.A.models, models);
+  assert.equal(out.seat_usage.A.active_ms, active);
+  assert.equal(out.seat_usage.A.duration_ms, active);
+  assert.ok(Buffer.byteLength(text) <= 102400);
+  assert.doesNotMatch(text, /mkhalifa|Mahmoud|C:[\\/]+Users[\\/]+mkhalifa|@/i);
+});
+
+test('protocol manifest example covers every key stamped on a complete fixture run', async (t) => {
+  const { fileURLToPath } = await import('node:url');
+  const dir = await tmpDir(t);
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, JSON.stringify({ falsification: { requested: true, verifiers_run: 1 } }));
+  const flags = ['--in', input, '--out', path.join(dir, 'manifest.json')];
+  for (const [flag, names] of [
+    ['--task-packet', ['task.md']], ['--phase1', ['A.md', 'B.md']],
+    ['--phase2', ['A.md', 'B.md']], ['--verification', ['X1.md']], ['--findings', ['findings.json']],
+  ]) {
+    for (const name of names) {
+      const file = path.join(dir, flag.slice(2) + '-' + name);
+      await fs.writeFile(file, '{}\n');
+      flags.push(flag, file);
+    }
+  }
+  const synthesis = path.join(dir, 'synthesis.md');
+  await fs.writeFile(synthesis, 'synthesis');
+  flags.push('--extra-artifact', 'synthesis=' + synthesis);
+  const breakdown = path.join(dir, 'breakdown.json');
+  await fs.writeFile(breakdown, JSON.stringify({ high_or_critical: 2, disputed: 1, conceded: 1, unaddressed: 0 }));
+  flags.push('--falsification', breakdown);
+  await fs.writeFile(path.join(dir, 'skill-versions.jsonl'), JSON.stringify({ phase: 'phase1', skill: 'fixture', version: '1.0.0' }) + '\n');
+  for (const role of ['A', 'B', 'auditor']) {
+    for (const [i, url] of resultFixtures.entries()) {
+      const result = JSON.parse(await fs.readFile(url, 'utf8'));
+      if (role === 'B' && i === 0) result.childThreads = [{ threadId: 'CHILD', parentThreadId: 'PARENT', agentPath: '/root/child', depth: 1, usage: { input_tokens: 2 } }];
+      const file = path.join(dir, role + i + '.json');
+      await fs.writeFile(file, JSON.stringify(result));
+      flags.push('--reviewer-result', role + '=' + file);
+    }
+  }
+  const verifier = path.join(dir, 'verifier.json');
+  await fs.writeFile(verifier, JSON.stringify({ modelRequested: 'haiku', usageSemantics: 'per-call', usage: { source: 'unavailable' } }));
+  flags.push('--reviewer-result', 'verifier-1=' + verifier);
+  flags.push('--seat-transcript', 'A=' + fileURLToPath(fixturePath('claude-session/lean-session.jsonl')),
+    '--seat-usage', 'A=unknown,999000,estimated',
+    '--seat-transcript', 'orchestrator=' + fileURLToPath(fixturePath('rollout/orchestrator.jsonl')) + '@2026-10-04T12:00:10Z/2026-10-04T12:00:30Z');
+  const stamped = await run(parseArgs(flags));
+  const protocol = await fs.readFile(new URL('../../references/review-protocol.md', import.meta.url), 'utf8');
+  const section = protocol.slice(protocol.indexOf('## Manifest and final output'));
+  const example = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(section)[1]);
+  const keyPaths = (value, prefix = '') => {
+    if (Array.isArray(value)) return value.flatMap((item) => keyPaths(item, prefix + '[]'));
+    if (!value || typeof value !== 'object') return [];
+    return Object.entries(value).flatMap(([key, child]) => {
+      const current = prefix ? prefix + '.' + key : key;
+      return [current, ...keyPaths(child, current)];
+    });
+  };
+  const documented = new Set(keyPaths(example));
+  const missing = [...new Set(keyPaths(JSON.parse(await fs.readFile(flags[3], 'utf8'))))].filter((key) => !documented.has(key));
+  assert.deepEqual(missing, [], 'example omits keys observed in build-manifest fixture output');
+  assert.ok(Object.keys(stamped).length > 5);
+});
+
+test('--seat-transcript: missing Claude token fields remain null with a reason', async (t) => {
+  const dir = await tmpDir(t);
+  const input = path.join(dir, 'body.json');
+  const transcript = path.join(dir, 'partial.jsonl');
+  await fs.writeFile(input, '{}');
+  await fs.writeFile(transcript, JSON.stringify({ type: 'assistant', message: { id: 'partial', model: 'fixture', usage: {} } }) + '\n');
+  const out = await run(parseArgs(['--in', input, '--out', path.join(dir, 'manifest.json'), '--seat-transcript', 'A=' + transcript]));
+  assert.equal(out.seat_usage.A.input_tokens, null);
+  for (const key of ['cache_creation_input_tokens', 'cache_read_input_tokens', 'total_input_tokens', 'max_context_tokens']) {
+    assert.equal(out.seat_usage.A[key], null);
+  }
+  assert.match(out.seat_usage.A.reason, /missing transcript usage fields/);
+  assert.equal(out.seat_usage.A.active_ms, null);
+});
+
+async function usageOf(t, results, role = 'A') {
+  const dir = await tmpDir(t);
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, '{}');
+  const files = [];
+  for (const [i, result] of results.entries()) {
+    const file = path.join(dir, 'r' + i + '.json');
+    await fs.writeFile(file, JSON.stringify({ modelRequested: 'm', status: 'completed', ...result }));
+    files.push(file);
+  }
+  const out = await run(parseArgs(['--in', input, '--out', path.join(dir, 'manifest.json'),
+    ...files.flatMap((file) => ['--reviewer-result', role + '=' + file])]));
+  return out.reviewers[0];
+}
+
+test('--reviewer-result: a token field that one per-call result lacks is unknown in the sum, not a partial total', async (t) => {
+  const entry = await usageOf(t, [
+    { usageSemantics: 'per-call', usage: { source: 'provider', input_tokens: 100, output_tokens: 10, cached_input_tokens: null } },
+    { usageSemantics: 'per-call', usage: { source: 'provider', input_tokens: null, output_tokens: 20, cached_input_tokens: 5 } },
+  ]);
+  assert.equal(entry.usage.input_tokens, null, 'input is unknown when one call did not report it');
+  assert.equal(entry.usage.cached_input_tokens, null, 'a field reported by only one call is unknown too');
+  assert.equal(entry.usage.output_tokens, 30, 'a field every call reports is still summed');
+  const all = await usageOf(t, [
+    { usageSemantics: 'per-call', usage: { source: 'provider', input_tokens: 1, output_tokens: 2 } },
+    { usageSemantics: 'per-call', usage: { source: 'provider', input_tokens: 3, output_tokens: 4 } },
+  ]);
+  assert.deepEqual([all.usage.input_tokens, all.usage.output_tokens], [4, 6]);
+});
+
+test('--reviewer-result: explicit cumulative results from different threads add each thread\'s final total', async (t) => {
+  const cumulative = (threadId, input) => ({ usageSemantics: 'cumulative', threadId, usage: { source: 'provider', input_tokens: input } });
+  const two = await usageOf(t, [cumulative('thread-1', 100), cumulative('thread-2', 200)]);
+  assert.equal(two.usage.input_tokens, 300, 'the first session is not dropped');
+  const resumed = await usageOf(t, [cumulative('thread-1', 100), cumulative('thread-1', 150), cumulative('thread-2', 200)]);
+  assert.equal(resumed.usage.input_tokens, 350, 'one thread counts its last total only');
+  const same = await usageOf(t, [cumulative('thread-1', 100), cumulative('thread-1', 150)]);
+  assert.equal(same.usage.input_tokens, 150, 'one shared thread still takes the last total');
+});
+
+test('the shipped Claude session fixture carries no provider request, message or tool-use IDs and no thinking signatures', async () => {
+  const text = await fs.readFile(fixturePath('claude-session/lean-session.jsonl'), 'utf8');
+  assert.equal(/(?<![A-Za-z0-9])(?:req|msg|toolu)_(?!PLACEHOLDER_\d+(?![A-Za-z0-9]))[A-Za-z0-9]+/.test(text), false, 'every req_, msg_ and toolu_ value is a placeholder');
+  assert.equal(/"signature":"[^"]/.test(text), false, 'thinking signatures are blank');
+  const messageIds = new Set([...text.matchAll(/"id":"(msg_PLACEHOLDER_\d+)"/g)].map((m) => m[1]));
+  assert.ok(messageIds.size > 1 && messageIds.size < [...text.matchAll(/"id":"msg_PLACEHOLDER_\d+"/g)].length, 'repeated message ids map to one placeholder, so the per-message dedupe still applies');
+});
+
+test('R2-F13: legacy cumulative results (no usageSemantics, no usage_delta) from several threads take each thread\'s final total', async (t) => {
+  const legacy = (threadId, input) => ({ threadId, usage: { source: 'provider', input_tokens: input } });
+  const resumed = await usageOf(t, [legacy('thread-1', 100), legacy('thread-1', 150), legacy('thread-2', 200)]);
+  assert.equal(resumed.usage.input_tokens, 350, 'thread-1 counts its final 150 once, plus thread-2');
+  assert.equal(resumed.usage.source, 'summed-per-thread');
+  const two = await usageOf(t, [legacy('thread-1', 100), legacy('thread-2', 200)]);
+  assert.equal(two.usage.input_tokens, 300);
+  const same = await usageOf(t, [legacy('thread-1', 100), legacy('thread-1', 150)]);
+  assert.equal(same.usage.input_tokens, 150, 'one shared thread still takes the last total');
+  const withDelta = await usageOf(t, [{ threadId: 'thread-1', usage: { input_tokens: 100 }, usage_delta: { input_tokens: 100 } }, { threadId: 'thread-1', usage: { input_tokens: 150 }, usage_delta: { input_tokens: 50 } }, { threadId: 'thread-2', usage: { input_tokens: 200 }, usage_delta: { input_tokens: 200 } }]);
+  assert.equal(withDelta.usage.input_tokens, 350, 'records with a usage_delta are still summed by their deltas');
+});
+
+test('final-F2: results of one resumed thread that carry usage_delta are summed through the deltas, not read as the last cumulative total', async (t) => {
+  const resumedPreUsed = await usageOf(t, [
+    { threadId: 'thread-1', usage: { source: 'provider', input_tokens: 900 }, usage_delta: { source: 'delta-from-previous-result', input_tokens: 100 } },
+    { threadId: 'thread-1', usage: { source: 'provider', input_tokens: 950 }, usage_delta: { source: 'delta-from-previous-result', input_tokens: 50 } },
+  ]);
+  assert.equal(resumedPreUsed.usage.input_tokens, 150, 'only this review\'s own cost is counted');
+  assert.equal(resumedPreUsed.usage.source, 'summed-per-call');
+  assert.deepEqual(resumedPreUsed.usage_per_call.map((u) => u.input_tokens), [100, 50], 'the total agrees with usage_per_call');
+  const fresh = await usageOf(t, [
+    { threadId: 'thread-1', usage: { source: 'provider', input_tokens: 100 }, usage_delta: { source: 'fresh-thread', input_tokens: 100 } },
+    { threadId: 'thread-1', usage: { source: 'provider', input_tokens: 150 }, usage_delta: { source: 'delta-from-previous-result', input_tokens: 50 } },
+  ]);
+  assert.equal(fresh.usage.input_tokens, 150, 'a fresh thread still totals its final cumulative value');
+  const unavailable = await usageOf(t, [
+    { threadId: 'thread-1', usage: { source: 'provider', input_tokens: 100 }, usage_delta: { source: 'fresh-thread', input_tokens: 100 } },
+    { threadId: 'thread-1', usage: { source: 'provider', input_tokens: 150 }, usage_delta: { source: 'unavailable', reason: 'resumed thread' } },
+  ]);
+  assert.equal(unavailable.usage.input_tokens, 150, 'a call whose delta is unavailable keeps the last-total reading');
+});
+
+test('final-F6: OpenCode results are summed per call, stamped or not; a Codex thread without deltas still takes its last total', async (t) => {
+  const stamped = await usageOf(t, [
+    { sessionId: 'ses-1', usageSemantics: 'per-call', usage: { source: 'provider', input_tokens: 1000, output_tokens: 10 } },
+    { sessionId: 'ses-1', usageSemantics: 'per-call', usage: { source: 'provider', input_tokens: 300, output_tokens: 10 } },
+  ]);
+  assert.deepEqual([stamped.usage.source, stamped.usage.input_tokens, stamped.usage.output_tokens], ['summed-per-call', 1300, 20]);
+  const legacyOpenCode = await usageOf(t, [
+    { sessionId: 'ses-1', usage: { source: 'provider', input_tokens: 1000, output_tokens: 10 } },
+    { sessionId: 'ses-1', usage: { source: 'provider', input_tokens: 300, output_tokens: 10 } },
+  ]);
+  assert.deepEqual([legacyOpenCode.usage.source, legacyOpenCode.usage.input_tokens], ['summed-per-call', 1300], 'an OpenCode result from before the stamp is summed as 1.0.0 did');
+  const codex = await usageOf(t, [
+    { threadId: 'thread-1', usage: { source: 'provider', input_tokens: 100 } },
+    { threadId: 'thread-1', usage: { source: 'provider', input_tokens: 150 } },
+  ]);
+  assert.equal(codex.usage.input_tokens, 150);
+});
+
+test('a native Codex seat: --seat-transcript A=<rollout> records usage and the rollout model, and --run-dir copies host, support rows and host_status', async (t) => {
+  const dir = await tmpDir(t);
+  const line = (o) => JSON.stringify(o);
+  const rollout = [
+    line({ type: 'session_meta', timestamp: '2026-10-07T13:05:41.000Z', payload: { id: 'agent-thread', timestamp: '2026-10-07T13:05:41.000Z' } }),
+    line({ type: 'turn_context', timestamp: '2026-10-07T13:05:42.000Z', payload: { model: 'gpt-5.6-terra', effort: 'medium' } }),
+    line({ type: 'event_msg', timestamp: '2026-10-07T13:09:00.000Z', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 4000, cached_input_tokens: 3000, cache_write_input_tokens: 0, output_tokens: 90, reasoning_output_tokens: 20, total_tokens: 4090 } } } }),
+  ].join('\n') + '\n';
+  const file = path.join(dir, 'rollout-agent.jsonl');
+  await fs.writeFile(file, rollout);
+  const run = path.join(dir, 'run');
+  await fs.mkdir(run);
+  const rows = [{ role: 'A', runtime: 'codex', transport: 'native', status: 'trial' }, { role: 'auditor', runtime: 'codex', transport: 'native', status: 'trial' }];
+  await fs.writeFile(path.join(run, 'run.json'), JSON.stringify({ host: 'codex', support: rows }));
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, '{}');
+  const out = await run_(input, path.join(dir, 'manifest.json'));
+  assert.ok(!('support' in out), 'no --run-dir, no support record');
+  const manifest = await runCli(['--in', input, '--out', path.join(dir, 'm2.json'), '--run-dir', run, '--seat-transcript', 'A=' + file]);
+  assert.equal(manifest.seat_usage.A.source, 'codex-rollout');
+  assert.equal(manifest.seat_usage.A.input_tokens, 4000);
+  assert.equal(manifest.seat_usage.A.model_resolved, 'gpt-5.6-terra');
+  assert.match(manifest.seat_usage.A.model_resolved_note, /configured model/);
+  assert.equal(manifest.host, 'codex');
+  assert.deepEqual(manifest.support, rows);
+  assert.equal(manifest.host_status, 'trial');
+  await fs.writeFile(input, JSON.stringify({ host_status: 'supported' }));
+  const kept = await runCli(['--in', input, '--out', path.join(dir, 'm3.json'), '--run-dir', run]);
+  assert.equal(kept.host_status, 'supported', 'a body value is kept');
+  const missing = await runCli(['--in', input, '--out', path.join(dir, 'm4.json'), '--run-dir', path.join(dir, 'no-such-run')]);
+  assert.ok(missing.warnings.some((w) => /run\.json could not be read/.test(w)));
+  await fs.writeFile(path.join(run, 'run.json'), JSON.stringify({ host: 'codex', support: rows, auditor: { role: 'auditor', provider: 'anthropic' }, verifiers: [{ role: 'verifier-1', provider: 'openai' }] }));
+  await fs.writeFile(input, JSON.stringify({ actors: [{ role: 'auditor' }, { role: 'verifier-1', provider: 'opencode' }] }));
+  const stamped = await runCli(['--in', input, '--out', path.join(dir, 'm5.json'), '--run-dir', run]);
+  assert.deepEqual(stamped.actors.map((a) => a.provider), ['anthropic', 'opencode'], 'run.json fills a missing actor provider; a body value is kept');
+});
+
+function runCli(args) {
+  return run(parseArgs(args));
+}
+
+test('a native seat read cold: reviewers[A] points to its seat_usage and carries the single transcript model; native-agents.json supplies the transcript', async (t) => {
+  const dir = await tmpDir(t);
+  const at = (s) => new Date(Date.UTC(2026, 9, 7, 13, 0, s)).toISOString();
+  const entry = (id, stop, input, create, read) => JSON.stringify({ type: 'assistant', timestamp: at(Number(id.slice(1))), message: { id, model: 'claude-opus-5-5', stop_reason: stop, usage: { input_tokens: input, cache_creation_input_tokens: create, cache_read_input_tokens: read, output_tokens: 1 } } });
+  const transcript = path.join(dir, 'agent-a.jsonl');
+  await fs.writeFile(transcript, [entry('m1', 'tool_use', 5, 100, 1000), entry('m2', 'end_turn', 5, 20, 1200)].join('\n') + '\n');
+  const run = path.join(dir, 'run');
+  await fs.mkdir(run);
+  await fs.writeFile(path.join(run, 'native-agents.json'), JSON.stringify({ A: transcript }));
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, JSON.stringify({ reviewers: [{ role: 'A', provider: 'anthropic' }, { role: 'B', provider: 'openai' }] }));
+  const out = await runCli(['--in', input, '--out', path.join(dir, 'manifest.json'), '--run-dir', run]);
+  const usage = out.seat_usage.A;
+  assert.equal(usage.calls, 2);
+  assert.equal(usage.new_input_tokens, 130, 'plain input plus cache creation');
+  assert.equal(usage.context_reread_tokens, 2200, 'cache reads are the context read again');
+  assert.equal(usage.total_input_tokens, 2330);
+  assert.match(usage.usage_note, /whole context re-sent on every call/);
+  const a = out.reviewers.find((r) => r.role === 'A');
+  assert.equal(a.usage_ref, 'seat_usage.A');
+  assert.equal(a.model_resolved, 'claude-opus-5-5');
+  assert.equal(a.model_resolved_source, 'transcript');
+  const b = out.reviewers.find((r) => r.role === 'B');
+  assert.ok(!('usage_ref' in b), 'a seat without seat_usage gets no pointer');
+  const explicit = await runCli(['--in', input, '--out', path.join(dir, 'm2.json'), '--run-dir', run, '--seat-transcript', 'A=' + transcript + '@2026-10-07T13:00:02Z']);
+  assert.equal(explicit.seat_usage.A.calls, 1, 'an explicit --seat-transcript wins over native-agents.json');
+});
+
+async function fixtureRun(t) {
+  const { writeRunDescriptor } = await import('../run-descriptor.mjs');
+  const dir = await tmpDir(t);
+  const runDir = path.join(dir, 'run');
+  const actor = (role, extra = {}) => ({ role, provider: 'anthropic', runtime: 'claude', model: 'opus', effort: null, transport: 'cli', sessionId: null, outputDir: path.join(dir, role), resultPath: null, worktreePath: null, ...extra });
+  await fs.mkdir(path.join(runDir, 'phase1', 'B'), { recursive: true });
+  await writeRunDescriptor(runDir, {
+    skill: 'cross-review', skillDir: path.join(dir, 'skill'), targetDir: dir, host: 'claude-code',
+    flags: { auditDepth: 'full', falsification: false, mode: 'adversarial' }, fingerprint: null,
+    seatA: actor('A', { transport: 'native' }), seatB: actor('B', { provider: 'openai', runtime: 'codex', model: 'gpt-5.6-terra' }), auditor: actor('auditor', { transport: 'native', outputDir: `${runDir}-audit-input` }), verifiers: [],
+  });
+  return { dir, runDir };
+}
+
+test('--init writes the minimal body from run.json and refuses to overwrite it', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  await fs.mkdir(path.join(runDir, 'phase3-private'), { recursive: true });
+  await fs.writeFile(path.join(runDir, 'phase3-private', 'seat-to-audit-label.json'), JSON.stringify({ A: 'Y', B: 'X' }));
+  const out = path.join(runDir, 'body.json');
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir, '--out', out])), null);
+  const body = JSON.parse(await fs.readFile(out, 'utf8'));
+  assert.deepEqual(body.reviewers.map((r) => [r.role, r.provider]), [['A', 'anthropic'], ['B', 'openai']]);
+  assert.equal(body.topology, 'cross-vendor');
+  assert.equal(body.mode, 'adversarial');
+  assert.equal(body.status, 'incomplete', 'no findings.json yet');
+  assert.deepEqual(body.exchange, { blinded: true, seat_to_audit_label: { A: 'Y', B: 'X' }, auditor_model_family: 'same-as-reviewer-A', auditor: 'fresh-context', audit_depth: 'full' });
+  assert.deepEqual(body.falsification, { requested: false, verifiers_run: 0 });
+  await assert.rejects(run(parseArgs(['--init', '--run-dir', runDir, '--out', out])), /EEXIST|exists/);
+  assert.throws(() => parseArgs(['--init', '--out', out]), /--init needs --run-dir/);
+});
+
+test('--run-dir alone collects the packet, both phases, findings and every completed result.json; an explicit flag wins', async (t) => {
+  const { dir, runDir } = await fixtureRun(t);
+  const write = (file, text) => fs.mkdir(path.dirname(file), { recursive: true }).then(() => fs.writeFile(file, text));
+  await write(path.join(runDir, 'task-packet.md'), 'packet');
+  for (const role of ['A', 'B']) {
+    await write(path.join(runDir, 'phase1', 'original', `${role}-findings.md`), `## ${role}1\n`);
+    await write(path.join(runDir, 'phase1', `${role}-findings.md`), `## ${role}1\nrebuttal appended\n`);
+    await write(path.join(runDir, 'phase2', `peer-view-for-${role}.md`), '## P1\n');
+  }
+  await write(path.join(runDir, 'phase3', 'findings.json'), '{}');
+  await write(path.join(runDir, 'phase3', 'verification-X1.md'), 'v');
+  const results = await Promise.all(resultFixtures.map(async (url) => fs.readFile(url, 'utf8')));
+  await write(path.join(runDir, 'phase1', 'B', 'result.json'), results[0]);
+  await write(path.join(runDir, 'phase2', 'B', 'result.json'), results[1]);
+  await write(path.join(runDir, 'phase2', 'B', 'result.attempt-1.json'), results[0]);
+  const manifest = await run(parseArgs(['--run-dir', runDir]));
+  assert.equal(manifest.status, 'completed', 'findings.json exists');
+  assert.equal(manifest.falsification.verifiers_run, 1);
+  assert.deepEqual(Object.keys(manifest.hashes).sort().slice(0, 4), ['findings_json', 'phase1', 'phase2', 'task_packet'].sort());
+  assert.equal(Object.keys(manifest.hashes.phase1).length, 2);
+  assert.equal(Object.keys(manifest.hashes.phase2).length, 2);
+  const b = manifest.reviewers.find((r) => r.role === 'B');
+  assert.equal(b.usage_per_call.length, 2, 'both completed B calls are summed; the attempt file is not');
+  assert.ok(await fs.stat(path.join(runDir, 'manifest.json')), 'default output is <run-dir>/manifest.json');
+  const explicit = await run(parseArgs(['--run-dir', runDir, '--out', path.join(dir, 'm2.json'), '--task-packet', path.join(runDir, 'phase1', 'A-findings.md')]));
+  assert.equal(explicit.hashes.task_packet, sha256(Buffer.from('## A1\nrebuttal appended\n')), 'an explicit --task-packet is kept');
+  assert.deepEqual(Object.keys(manifest.hashes.phase1).sort(), ['A-findings.md', 'B-findings.md'], 'the untouched originals are hashed, not the working files');
+  assert.equal(manifest.hashes.phase1['A-findings.md'], sha256(Buffer.from('## A1\n')));
+  assert.deepEqual(Object.keys(manifest.hashes.phase2).sort(), ['peer-view-for-A.md', 'peer-view-for-B.md']);
+});
+
+// CODEX_HOME and CLAUDE_CONFIG_DIR point at a temp folder, so no test reads this machine's real sessions.
+async function commandHomes(t) {
+  const dir = await tmpDir(t);
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };
+  process.env.CODEX_HOME = path.join(dir, 'codex');
+  process.env.CLAUDE_CONFIG_DIR = path.join(dir, 'claude');
+  t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  const fixture = (name) => fileURLToPath(fixturePath('commands/' + name));
+  const rollout = async (name, threadId) => {
+    const day = path.join(process.env.CODEX_HOME, 'sessions', '2026', '10', '08');
+    await fs.mkdir(day, { recursive: true });
+    await fs.copyFile(fixture(name), path.join(day, `rollout-2026-10-08T11-59-10-${threadId}.jsonl`));
+  };
+  const input = path.join(dir, 'body.json');
+  await fs.writeFile(input, '{}');
+  const build = (...flags) => run(parseArgs(['--in', input, '--out', path.join(dir, 'manifest.json'), ...flags]));
+  return { dir, fixture, rollout, build, input };
+}
+
+test('commands: a Codex CLI seat counts its thread rollout once over phase 1 and 2; no rollout or no items leaves it unknown', async (t) => {
+  const { dir, fixture, rollout, build } = await commandHomes(t);
+  const result = JSON.parse(await fs.readFile(fixture('codex-seat-result.json'), 'utf8'));
+  const p1 = path.join(dir, 'p1.json');
+  const p2 = path.join(dir, 'p2.json');
+  await fs.writeFile(p1, JSON.stringify(result));
+  await fs.writeFile(p2, JSON.stringify(result));
+  assert.ok(!('commands' in (await build('--reviewer-result', 'B=' + p1)).reviewers[0]), 'no rollout found: no count, never 0');
+  await rollout('codex-sandbox-rollout.jsonl', result.threadId);
+  const seat = (await build('--reviewer-result', 'B=' + p1, '--reviewer-result', 'B=' + p2)).reviewers[0];
+  assert.deepEqual(seat.commands, { tried: 2, failed: 2, source: 'codex-rollout' }, 'run4 seat B: both commands refused by the sandbox, the shared thread counted once');
+  const auditor = (await build('--reviewer-result', 'auditor=' + p1)).actors[0];
+  assert.deepEqual(auditor.commands, { tried: 2, failed: 2, source: 'codex-rollout' }, 'a CLI auditor is counted the same way');
+  const other = path.join(dir, 'other.json');
+  await fs.writeFile(other, JSON.stringify({ ...result, threadId: '01a0e4ee-d854-74c2-a1b9-3f5c9cea44a3' }));
+  await rollout('codex-child-no-items.jsonl', '01a0e4ee-d854-74c2-a1b9-3f5c9cea44a3');
+  assert.ok(!('commands' in (await build('--reviewer-result', 'B=' + p1, '--reviewer-result', 'B=' + other)).reviewers[0]), 'one thread that cannot be counted makes the seat unknown');
+  const noThread = path.join(dir, 'nothread.json');
+  await fs.writeFile(noThread, JSON.stringify({ ...result, threadId: null }));
+  assert.ok(!('commands' in (await build('--reviewer-result', 'B=' + noThread)).reviewers[0]));
+});
+
+test('commands: a Claude CLI seat counts its session transcript; a body value is kept; an OpenCode session is not counted', async (t) => {
+  const { dir, fixture, build, input } = await commandHomes(t);
+  const result = JSON.parse(await fs.readFile(fixture('claude-cli-result.json'), 'utf8'));
+  const file = path.join(dir, 'result.json');
+  await fs.writeFile(file, JSON.stringify(result));
+  assert.ok(!('commands' in (await build('--reviewer-result', 'A=' + file)).reviewers[0]), 'no session transcript: unknown');
+  const session = path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', 'C--target', `${result.sessionId}.jsonl`);
+  await fs.mkdir(path.dirname(session), { recursive: true });
+  await fs.copyFile(fixture('claude-cli-session.jsonl'), session);
+  assert.deepEqual((await build('--reviewer-result', 'A=' + file)).reviewers[0].commands, { tried: 2, failed: 0, source: 'claude-transcript' });
+  await fs.writeFile(input, JSON.stringify({ reviewers: [{ role: 'A', commands: { tried: 9, failed: 0, source: 'hand' } }] }));
+  assert.deepEqual((await build('--reviewer-result', 'A=' + file)).reviewers[0].commands, { tried: 9, failed: 0, source: 'hand' });
+  await fs.writeFile(input, '{}');
+  const opencode = path.join(dir, 'opencode.json');
+  await fs.writeFile(opencode, JSON.stringify({ modelRequested: 'x', status: 'completed', sessionId: 'ses_abc', usageSemantics: 'per-call', usage: { input_tokens: 1 } }));
+  assert.ok(!('commands' in (await build('--reviewer-result', 'B=' + opencode)).reviewers[0]));
+});
+
+test('commands: a native seat transcript records its Bash calls in seat_usage, inside the usage window', async (t) => {
+  const { fixture, build } = await commandHomes(t);
+  const file = fixture('claude-agent-transcript.jsonl');
+  assert.deepEqual((await build('--seat-transcript', 'A=' + file)).seat_usage.A.commands, { tried: 2, failed: 1, source: 'transcript' });
+  const windowed = (await build('--seat-transcript', 'auditor=' + file + '@2026-10-10T15:03:00Z/2026-10-10T15:05:00Z')).seat_usage.auditor;
+  assert.deepEqual(windowed.commands, { tried: 1, failed: 0, source: 'transcript' }, 'the failed call at 15:10 is outside the window');
+  const codex = (await build('--seat-transcript', 'A=' + fixture('codex-sandbox-rollout.jsonl'))).seat_usage.A;
+  assert.deepEqual(codex.commands, { tried: 2, failed: 2, source: 'codex-rollout' }, 'a native Codex seat rollout');
+  assert.ok(!('commands' in (await build('--seat-transcript', 'A=' + fixture('codex-child-no-items.jsonl'))).seat_usage.A), 'items missing: unknown');
 });

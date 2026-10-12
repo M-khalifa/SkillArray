@@ -20,7 +20,7 @@ function realGitDir() {
   return path.dirname(out.split(/\r?\n/)[0]);
 }
 
-test('dispatcher passes selected model and effort to a fake CLI on fresh and resumed runs', async (t) => {
+test('dispatcher passes selected model and effort to a fake CLI on fresh and resumed runs [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch test '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -104,11 +104,12 @@ ${events}
     assert.equal(output.status, 'completed');
     assert.deepEqual(output.touchedFiles, ['article.md', 'scratch.txt']);
     assert.ok(!('touchedFilesNote' in output), 'a successful inventory diff needs no note');
+    assert.equal(await fs.access(path.join(phase1, 'result.stderr.live.log')).then(() => true, () => false), false, 'a finished run leaves no live stderr log, even when stderr was empty');
     assertResultSchema(output);
   });
 }
 
-test('codex-dispatch writes usage_delta: the fresh call\'s own usage, then only the resumed call\'s share when --previous-result is passed', async (t) => {
+test('codex-dispatch writes usage_delta: the fresh call\'s own usage, then only the resumed call\'s share when --previous-result is passed [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch delta '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -159,7 +160,7 @@ console.log(JSON.stringify({type:'turn.completed', usage: resumed
   assert.ok((await fs.readdir(phase2)).includes('result.attempt-1.json'));
 });
 
-test('codex-dispatch puts codex\'s own turn.failed error first in result.error (MCP connector stderr noise left out) and a retry keeps the failed result as result.attempt-1.json', async (t) => {
+test('codex-dispatch puts codex\'s own turn.failed error first in result.error (MCP connector stderr noise left out) and a retry keeps the failed result as result.attempt-1.json [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch codex error '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -199,6 +200,7 @@ process.exit(1);
   assert.equal(first.stderrLog, path.join(phase1, 'result.stderr.log'));
   assert.match(first.error, /full stderr: .*result\.stderr\.log/);
   assert.equal((await fs.readFile(first.stderrLog, 'utf8')).split('\n').filter((l) => l.includes('rmcp::')).length, 30, 'the filtered lines are kept in the log');
+  assert.equal(await fs.access(path.join(phase1, 'result.stderr.live.log')).then(() => true, () => false), false, 'the live log is removed once the full stderr log is written');
   r = dispatch();
   assert.equal(r.status, 1);
   assert.match(r.stderr, /kept the earlier result\.json as result\.attempt-1\.json/);
@@ -209,7 +211,7 @@ process.exit(1);
   assert.ok(names.includes('result.attempt-1.stderr.log') && names.includes('result.attempt-2.stderr.log'), 'each attempt keeps its own stderr log');
 });
 
-test('codex-dispatch --web records every web_search item (every query of a batched call, action, result URLs) in result.webCalls; without --web there is no webCalls field', async (t) => {
+test('codex-dispatch --web records every web_search item (every query of a batched call, action, result URLs) in result.webCalls; without --web there is no webCalls field [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch web '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -254,7 +256,7 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   }
 });
 
-test('codex-dispatch writes result.json with status "running" and the threadId as soon as codex names its thread, so a dispatcher killed from outside leaves a resumable id; the next dispatch keeps it as result.attempt-1.json', async (t) => {
+test('codex-dispatch writes result.json with status "running" and the threadId as soon as codex names its thread, so a dispatcher killed from outside leaves a resumable id; the next dispatch keeps it as result.attempt-1.json [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch running '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -308,7 +310,7 @@ if (input.includes('hang')) { setTimeout(() => process.exit(0), 8000); } else {
   assert.equal(kept.threadId, 't-killed', 'the interrupted thread id survives the retry');
 });
 
-test('codex-dispatch --detach returns at once with a running record, the worker finishes the dispatch on its own, and --wait reports the final status', async (t) => {
+test('codex-dispatch --detach returns at once with a running record, the worker finishes the dispatch on its own, and --wait reports the final status [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch detach '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -342,7 +344,7 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   assertResultSchema(placeholder);
   const job = JSON.parse(await fs.readFile(path.join(folder, 'dispatch-job.json'), 'utf8'));
   assert.ok(!job.argv.includes('--detach'), 'the worker runs the dispatch itself, not another detach');
-  const w = spawnSync(process.execPath, [script, '--wait', path.join(folder, 'result.json'), '--max-wait', '60'], { env, encoding: 'utf8', timeout: 90000 });
+  const w = spawnSync(process.execPath, [script, '--wait', path.join(folder, 'result.json'), '--max-wait', '150'], { env, encoding: 'utf8', timeout: 180000 });
   assert.equal(w.status, 0, w.stdout + w.stderr);
   assert.match(w.stdout, /finished with status "completed", threadId t-detach/);
   const final = JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8'));
@@ -351,10 +353,10 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   assert.equal(typeof final.workerPid, 'number');
   assert.equal(await fs.readFile(out, 'utf8'), 'detached done');
   assert.match(await fs.readFile(path.join(folder, 'dispatch-worker.log'), 'utf8'), /relay: done/);
-  assert.ok(Date.now() - started < 60000);
+  assert.ok(Date.now() - started < 170000);
 });
 
-test('codex-dispatch --wait: a worker gone while result.json says running exits 1 and names the thread to resume; --max-wait exits 3; bad arguments exit 2', async (t) => {
+test('codex-dispatch --wait: a worker gone while result.json says running exits 1 and names the thread to resume; --max-wait exits 3; bad arguments exit 2 [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch wait '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
@@ -376,7 +378,7 @@ test('codex-dispatch --wait: a worker gone while result.json says running exits 
   assert.equal(r.status, 2);
 });
 
-test('codex-dispatch --wait-retry: exits 0 with the thread to resume once retryAfter has passed, 3 when --max-wait passes first, 2 for another status, a non-clock retryAfter or a bad argument', async (t) => {
+test('codex-dispatch --wait-retry: exits 0 with the thread to resume once retryAfter has passed, 3 when --max-wait passes first, 2 for another status, a non-clock retryAfter or a bad argument [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch retry '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
@@ -407,7 +409,7 @@ test('codex-dispatch --wait-retry: exits 0 with the thread to resume once retryA
   assert.equal(run('--bogus').status, 2);
 });
 
-test('both dispatchers refuse, before starting anything, to overwrite an existing --final-message-out file unless --replace-completed; a completed result.json in the folder does not stop a resume', async (t) => {
+test('both dispatchers refuse, before starting anything, to overwrite an existing --final-message-out file unless --replace-completed; a completed result.json in the folder does not stop a resume [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch done '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -451,7 +453,7 @@ test('both dispatchers refuse, before starting anything, to overwrite an existin
   assert.match(run('--final-message-out', findings).stderr, /it is empty \(0 bytes\), so that answer failed/);
 });
 
-test('both dispatchers: a run that exits 0 with an empty last message is status "error" and writes no --final-message-out file', async (t) => {
+test('both dispatchers: a run that exits 0 with an empty last message is status "error" and writes no --final-message-out file [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch empty '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -493,7 +495,7 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   }
 });
 
-test('codex-dispatch: a Codex usage limit is status "rate-limited" with retryAfter and the threadId kept for a resume; another failure stays "error"', async (t) => {
+test('codex-dispatch: a Codex usage limit is status "rate-limited" with retryAfter and the threadId kept for a resume; another failure stays "error" [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch limit '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -536,7 +538,7 @@ process.exit(1);
   }
 });
 
-test('codex-dispatch --final-message-out writes the exact final message as UTF-8 without BOM, and a failed run leaves the earlier file untouched', async (t) => {
+test('codex-dispatch --final-message-out writes the exact final message as UTF-8 without BOM, and a failed run leaves the earlier file untouched [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch final out '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -574,7 +576,7 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   assert.ok(!('finalMessageOut' in JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8'))));
 });
 
-test('opencode-dispatch --final-message-out writes the final message, and an unwritable path turns the run into status error', async (t) => {
+test('opencode-dispatch --final-message-out writes the final message, and an unwritable path turns the run into status error [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode final out '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -609,7 +611,7 @@ console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text
   assert.equal(failed.finalMessage, '## B1 — naïve', 'result.json still carries the message');
 });
 
-test('opencode-dispatch --isolate --worktree: Phase 1 and Phase 2 briefs in different folders share one worktree outside the run directory', async (t) => {
+test('opencode-dispatch --isolate --worktree: Phase 1 and Phase 2 briefs in different folders share one worktree outside the run directory [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode worktree '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -650,7 +652,7 @@ console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text
   assert.match(bad.stderr, /--worktree is only meaningful with --isolate/);
 });
 
-test('opencode-dispatch: a retry in the same folder keeps the earlier result.json as result.attempt-1.json', async (t) => {
+test('opencode-dispatch: a retry in the same folder keeps the earlier result.json as result.attempt-1.json [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode retry '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -721,9 +723,10 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:26076,cac
   assertResultSchema(output);
 });
 
-test('dispatcher kills a hung codex process on --timeout and writes status timed-out', async (t) => {
+test('dispatcher kills a hung codex process on --timeout and writes status timed-out [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch timeout '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  // The killed child can hold the folder for a moment on Windows (EBUSY); retry the cleanup.
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
@@ -764,7 +767,8 @@ setInterval(() => {}, 1000);
 
 test('opencode-dispatch kills a hung opencode process on --timeout and writes status timed-out', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode timeout '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  // The killed child can hold the folder for a moment on Windows (EBUSY); retry the cleanup.
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');

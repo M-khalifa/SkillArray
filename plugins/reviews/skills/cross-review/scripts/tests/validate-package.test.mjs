@@ -6,17 +6,19 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-test('validator accepts LF and CRLF copy installs and rejects the wrong skill identity', async (t) => {
+test('validator accepts LF and CRLF copy installs and rejects the wrong skill identity [slow]', async (t) => {
   const source = fileURLToPath(new URL('../../', import.meta.url));
   const skill = path.basename(path.resolve(source));
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'review-package-test-'));
   t.after(() => fs.rm(temp, { recursive: true, force: true }));
   const copy = path.join(temp, skill);
-  await fs.cp(source, copy, { recursive: true });
+  // Tests are not part of the identity check, and every .mjs file costs the validator one node spawn.
+  const testsDir = path.join(source, 'scripts', 'tests');
+  await fs.cp(source, copy, { recursive: true, filter: (from) => path.resolve(from) !== path.resolve(testsDir) });
   const entry = path.join(copy, 'SKILL.md');
   const text = (await fs.readFile(entry, 'utf8')).replace(/\r\n/g, '\n');
   const validate = () => spawnSync(process.execPath, [path.join(copy, 'scripts', 'validate-package.mjs')], {
-    encoding: 'utf8', timeout: 30000,
+    encoding: 'utf8', timeout: 180000,
   });
   for (const newline of ['\n', '\r\n']) {
     await fs.writeFile(entry, text.replace(/\n/g, newline));

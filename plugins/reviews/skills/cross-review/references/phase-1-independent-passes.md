@@ -1,5 +1,8 @@
 # Phase 1 — Independent passes
 
+> **With `review-run` you do not need this file for the normal path.** SKILL.md's Quickstart lists the commands in order. Read it when a
+> step fails, a seat must be replaced or resumed by hand, a scan or validation stops the run, or you dispatch without the sequencer.
+
 ## Contents
 
 - Run directory and source snapshot
@@ -13,6 +16,8 @@ Resolve configuration and complete SKILL.md preflight before this phase.
 ## Run directory and source snapshot
 
 Create a unique directory under the harness scratchpad or OS temporary directory.
+Keep it outside the target's git repository unless it sits in a git-ignored folder (preflight refuses that
+layout with a Claude CLI or OpenCode seat).
 For a run that may last more than a day (a resume after a usage limit, a series
 of reviews), put the run directory and any source snapshot outside the OS
 temporary directory: a temp cleaner such as Windows Storage Sense can delete
@@ -89,6 +94,16 @@ reports `targetChanged`. A test suite that writes into the target (dumps,
 caches) is visible there before any seat starts; clean it up or record it in
 the packet, or a seat can be blamed for a file the tests wrote. Gitignored
 output is not covered.
+
+With `--out`, pre-flight writes the JSON to the file and prints one summary line (hash, per-command exit codes,
+`targetChanged`). The commands are under `tier2.results[]` (`command`, `exitCode`, `timedOut`, `touchedFiles`, and
+`stdout`/`stderr` with `log`, `sha256`, `tail`, `summary`, `matches` under `--compact`), next to `tier2.snapshotHash`.
+
+**Tests in a second repository.** `--exec-in <path> "<command>"` (repeatable) runs a Tier 2 command with `<path>` as
+the working directory. Results for each path are listed under `tier2Repos`, with that repository's own
+`snapshotHash`, `snapshotHashAfter`, `targetChanged` and per-command `touchedFiles`. Check each repository for
+staleness with its own `preflight.mjs --cd <path> --check-stale <snapshotHash>`; `--exec` results stay bound to `--cd`.
+With `--compact`, the command logs continue the `command-N` numbering after `--exec`'s.
 
 **Repository freshness.** A local clone can be far behind its remote: in one
 live run a HIGH security finding described code already fixed upstream, and
@@ -193,8 +208,8 @@ Both seats write findings under their own `A`/`B` claim numbering per
 [review-protocol.md](review-protocol.md)'s Three label layers — never `CL`/`CX`,
 never a vendor name in the claim ID. Build both briefs with
 [scripts/build-brief.mjs](../scripts/build-brief.mjs) so each carries the same
-verbatim rule blocks (Standard seat instructions, Model identity, the findings
-schema, and Web verification unless the task says "repo-only review"):
+verbatim rule blocks (Standard seat instructions, the findings schema, and Web
+verification unless the task says "repo-only review"):
 
 ```text
 node "<skill-dir>/scripts/build-brief.mjs" --mode phase1 --packet "<run-dir>/task-packet.md" --seat A --out "<run-dir>/phase1/brief-A.txt" --output-path "<run-dir>/phase1/A-findings.md"
@@ -204,19 +219,27 @@ node "<skill-dir>/scripts/build-brief.mjs" --mode phase1 --packet "<run-dir>/tas
 A hand-written brief is allowed only when the script cannot run; it must then
 copy those sections verbatim.
 
-Claude (seat A): use the selected seat-A model and supported effort mechanism.
-Spawn it as a general-purpose agent (`Tools: *`), not a restricted-toolset
-subagent type — this is what gives it WebFetch/WebSearch for the Web
-verification rules in [review-protocol.md](review-protocol.md) and the
-file-writing tool it needs for `--output-path`; naming a more restricted spawn
-type silently loses both without any error to catch it. Tell it to read its
-brief from the file and to write its findings to `phase1/A-findings.md`
-itself, replying only with counts. The orchestrator then validates that file;
-it never re-types a seat's findings from a reply, which doubles the token cost
-of every finding and adds transcription risk. If the agent cannot write the
-file, capture its reply verbatim instead and say so in the manifest. Give the
-agent a unique name and keep its agent ID for the next phase. Its claims use
-`A1, A2, ...`. It must not read seat B's findings during this phase.
+Seat A: start it on the selected seat-A model and effort, through the transport the host file
+names (a native agent on Claude Code, `claude-dispatch` through `review-run.mjs` otherwise). It writes
+`phase1/A-findings.md` itself and replies only with counts; the orchestrator validates that file and
+never re-types a seat's findings from a reply. If it cannot write the file, capture its reply verbatim
+and say so in the manifest. Its claims use `A1, A2, ...`. It must not read seat B's findings during
+this phase. How to spawn a native seat, and what to keep for the next phase, is in the host file.
+
+A CLI seat is started by the sequencer. `node "<skill-dir>/scripts/review-run.mjs" phase1
+--run-dir "<run-dir>" --start` builds both Phase 1 briefs from `run.json` (the channel of each
+seat comes from its runtime), starts every CLI seat detached with the dispatcher flags shown
+below, and prints the brief path of each native seat. `--wait` waits for every seat, copies each
+file-channel CLI seat's own file (`phase1/seat-<role>/`) to the canonical `phase1/<role>-findings.md`,
+and runs the `validate` command of the completion gate. When a CLI seat ended badly (an error, or a
+detached worker that died, or an OpenCode dispatcher that died before writing `result.json`), the next
+`--wait` dispatches that seat again as a new session in the same worktree; it does not resume the
+failed session (to resume the recorded session, run the dispatcher by hand with `--session`). The
+worktree is the one its failed attempt recorded. An OpenCode retry first moves the old `result.json`
+and worker log aside as attempt files. A CLI Claude seat writes only into its
+own `phase1/seat-<role>/` folder. By hand, a Claude seat is `claude-dispatch.mjs --brief <brief>
+--cd "<target-dir>" --model SELECTED_MODEL --out-dir <seat folder> --detach`, then
+`claude-dispatch.mjs --wait "<result.json>"`.
 
 Seat B: the brief from `build-brief.mjs` above, in its own folder.
 Its claims use `B1, B2, ...`. It must not read seat A's findings during this
@@ -235,7 +258,8 @@ Append `--effort SELECTED_LEVEL` only for a non-default effort. Timeout: when
 minutes) and write `status: "timed-out"`. Pass `--timeout SECONDS` for a
 different bound the user chose, or `--timeout 0` for no limit (a large target
 at high effort can run longer than 30 minutes). Keep the same choice on every
-dispatch of the run. `--web` enables Codex's native web search per Web verification in
+dispatch of the run. `review-run.mjs` passes `--timeout 0` (no limit) to every Claude and Codex
+seat, resume and auditor unless run.json `flags.timeoutS` names a bound. `--web` enables Codex's native web search per Web verification in
 review-protocol.md — always pass it unless the task text disabled web
 verification ("repo-only review"); the brief must still carry the Web
 verification rules verbatim regardless of this flag, since the flag alone
@@ -342,6 +366,12 @@ running against the real target. Seat B's result.json therefore always shows
 any other, not a warning to note and continue past. `touchedFiles` remains a
 secondary detection check, not the primary guarantee for OpenCode anymore.
 
+A CLI Claude seat (`claude-dispatch.mjs`) is read-only in a third way: `fileTools` are enforced
+(its file tools write only into its own folder) and `shell` is prompt-only, with its working
+directory a worktree of the snapshot (or the target with `--no-isolate`). A shell can still read
+peer files and write by absolute path, so the report says so, and `touchedFiles` in each seat's
+`result.json` is the check; read it after every seat.
+
 ## Completion gate
 
 Wait for both processes/agents to finish. Require a zero dispatcher exit and
@@ -380,10 +410,8 @@ means the seat failed or its worker is gone (the threadId to resume is
 printed). The worker writes its output to
 `dispatch-worker.log` next to the brief. It keeps this shell's PATH and
 CODEX_HOME; other `--env-passthrough` variables must be set for the user.
-The user can also turn this stopping off by starting Claude Code with
-`CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1` in its environment (Claude Code's
-own notice when it stopped a shell says so; setting it from a shell command inside
-the session has no effect). Tell the user; never change their environment yourself.
+The user can turn this stopping off for Claude Code (the Claude Code host file says how). Tell
+the user; never change their environment yourself.
 Do not start Phase 1 over when the Codex thread still exists; resume it:
 
 - `status: "running"` left behind means the dispatcher was killed (for
@@ -518,8 +546,8 @@ started it; if that session ended, resume the session first
 **A provider becomes unavailable during Phase 1** (a usage limit the user will
 not wait out, a lost login). Before any findings are exchanged, that seat may
 move to another provider under the replacement rule above, and the run may move
-to the other skill when only that skill allows the new pairing (two Claude
-models: pair-review; a non-Claude seat: cross-review). Move the unused seat's
+to the other skill when only that skill allows the new pairing (two models of one vendor:
+pair-review; two vendors: cross-review). Move the unused seat's
 folder out of `phase1/` and keep it, and build the new seat's brief with the
 skill that now runs the review, from the same task packet. A seat that is
 running or finished keeps its pass only when its brief differs from that

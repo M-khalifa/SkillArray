@@ -1,13 +1,14 @@
 # pair-review
 
-Two distinct Claude models review independently, then collaborate or challenge each other's findings.
+Two distinct models from one vendor (two Claude models or two OpenAI models through Codex) review independently, then collaborate or challenge each other's findings.
 Choose models once during setup, change them anytime, or override them for one run.
 
 ## Requirements
 
 - Node.js 22 or later.
-- A harness supporting isolated Claude subagents with explicit model selection
-  and resumed exchanges. Claude Code is the primary target.
+- A harness supporting isolated reviewers with explicit model selection and resumed exchanges:
+  Claude subagents or the Claude CLI for a Claude pair, the Codex CLI for an OpenAI pair.
+  Claude Code is the primary target.
 
 Model/effort support is checked in your runtime; installing this skill does not
 grant model access. Reviews consume the selected providers' usage.
@@ -21,8 +22,8 @@ Keep the folder name `pair-review`; the helper derives its identity from it.
 No npm install or sibling skill is required.
 
 For another skill-capable harness, use its skill directory and verify it can
-actually select the required Claude models. Installing under Codex alone does
-not provide Claude subagents.
+actually select the required models. Installing under Codex alone does
+not provide Claude subagents, and a Codex-host review is not supported in 1.1.0.
 
 ## Use
 

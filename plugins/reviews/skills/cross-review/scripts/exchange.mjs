@@ -9,6 +9,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import {
+  RunDescriptorError, readRunDescriptor, channelFor, privateOutputPath, publishSeatOutput, assertGrantsIsolated,
+} from './run-descriptor.mjs';
 
 class RelayError extends Error {}
 
@@ -31,8 +34,12 @@ checked and reported. Seat A's brief is phase2/delta-brief-A.txt and it writes
 phase2/A-rebuttals-raw.md. Seat B's brief is phase2/B/delta-brief.txt (its
 dispatcher returns the text: pass it --final-message-out
 phase2/B-rebuttals-raw.md, which is why the output says rebuttals.B null), or with
---seat-b-harness phase2/delta-brief-B.txt writing phase2/B-rebuttals-raw.md. A seat
-whose peer wrote "## No findings" has nothing to rebut: it gets no brief, and the
+--seat-b-harness phase2/delta-brief-B.txt writing phase2/B-rebuttals-raw.md.
+When <run-dir>/run.json exists it decides each seat's channel and --seat-b-harness is only an alias
+(seat B uses the file channel): a file-channel seat gets phase2/delta-brief-<seat>.txt, and a CLI one
+writes phase2/seat-<seat>/<seat>-rebuttals-raw.md, which finish copies to the canonical path; a
+final-message seat gets phase2/<seat>/delta-brief.txt. A seat whose peer wrote "## No findings"
+has nothing to rebut: it gets no brief, and the
 output names it under "skipped". prepare refuses once the exchange has
 started: a delta brief or a rebuttal file exists, or a findings file already
 has a rebuttal section.
@@ -138,11 +145,39 @@ function paths(runDir) {
   };
 }
 
-function briefPaths(p, seatBHarness) {
-  return {
-    A: path.join(p.phase2, 'delta-brief-A.txt'),
-    B: seatBHarness ? path.join(p.phase2, 'delta-brief-B.txt') : path.join(p.phase2, 'B', 'delta-brief.txt'),
-  };
+function runDescriptorError(err) {
+  return err instanceof RunDescriptorError ? new RelayError(err.message) : err;
+}
+
+async function loadDescriptor(runDir) {
+  if (!(await exists(path.join(runDir, 'run.json')))) return null;
+  try {
+    return await readRunDescriptor(runDir);
+  } catch (err) {
+    throw runDescriptorError(err);
+  }
+}
+
+// Brief and output location per seat. Without run.json seat A is a file seat and seat B follows --seat-b-harness.
+function seatPlans(args, p, desc) {
+  const plans = {};
+  for (const seat of ['A', 'B']) {
+    const actor = desc?.[`seat${seat}`];
+    const channel = actor ? channelFor(actor) : seat === 'A' || args.seatBHarness ? 'file' : 'final-message';
+    const cli = actor?.transport === 'cli' && channel === 'file';
+    plans[seat] = {
+      channel,
+      publish: cli,
+      brief: channel === 'file' ? path.join(p.phase2, `delta-brief-${seat}.txt`) : path.join(p.phase2, seat, 'delta-brief.txt'),
+      altBrief: channel === 'file' ? path.join(p.phase2, seat, 'delta-brief.txt') : path.join(p.phase2, `delta-brief-${seat}.txt`),
+      privateRaw: cli ? privateOutputPath(desc, 'phase2', seat) : null,
+      outputPath: channel !== 'file' ? null : cli ? privateOutputPath(desc, 'phase2', seat) : p.raw[seat],
+    };
+  }
+  if (desc && args.seatBHarness && plans.B.channel !== 'file') {
+    throw new RelayError('--seat-b-harness says seat B uses the file channel, but run.json makes it a final-message seat; drop the flag, run.json decides');
+  }
+  return plans;
 }
 
 async function hasRebuttalSection(file) {
@@ -151,10 +186,17 @@ async function hasRebuttalSection(file) {
 
 async function prepare(args) {
   const p = paths(args.runDir);
-  const briefs = briefPaths(p, args.seatBHarness);
-  const otherBrief = briefPaths(p, !args.seatBHarness).B;
-  for (const f of [briefs.A, briefs.B, otherBrief, p.raw.A, p.raw.B]) {
-    if (await exists(f)) throw new RelayError(`${f} exists, so the exchange was already prepared or has started; prepare builds a fresh exchange only (delete the briefs yourself only if no seat has been sent one)`);
+  const desc = await loadDescriptor(args.runDir);
+  if (desc) {
+    try {
+      await assertGrantsIsolated(desc);
+    } catch (err) {
+      throw runDescriptorError(err);
+    }
+  }
+  const plans = seatPlans(args, p, desc);
+  for (const f of [plans.A.brief, plans.B.brief, plans.A.altBrief, plans.B.altBrief, p.raw.A, p.raw.B, plans.A.privateRaw, plans.B.privateRaw]) {
+    if (f && await exists(f)) throw new RelayError(`${f} exists, so the exchange was already prepared or has started; prepare builds a fresh exchange only (delete the briefs yourself only if no seat has been sent one)`);
   }
   for (const seat of ['A', 'B']) {
     if (!(await exists(p.findings[seat]))) throw new RelayError(`${p.findings[seat]} does not exist`);
@@ -194,21 +236,20 @@ async function prepare(args) {
     if (peerClaimCount(await fs.readFile(p.peerView[seat], 'utf8')) === 0) skipped[seat] = `seat ${seat === 'A' ? 'B' : 'A'} has no findings`;
   }
   const out = { briefs: { A: null, B: null }, rebuttals: { A: null, B: null }, skipped };
-  if (!skipped.A) {
-    if (!step('build seat A delta brief', 'build-brief.mjs', ['--mode', 'delta', '--peer-view', p.peerView.A, '--out', briefs.A, '--output-path', p.raw.A])) {
-      throw new RelayError('build-brief failed for seat A');
-    }
-    Object.assign(out, { briefs: { ...out.briefs, A: briefs.A }, rebuttals: { ...out.rebuttals, A: p.raw.A } });
-  }
-  if (!skipped.B) {
-    if (args.seatBHarness === false) await fs.mkdir(path.dirname(briefs.B), { recursive: true });
-    const bArgs = ['--mode', 'delta', '--peer-view', p.peerView.B, '--out', briefs.B];
-    if (args.seatBHarness) bArgs.push('--output-path', p.raw.B);
-    if (!step('build seat B delta brief', 'build-brief.mjs', bArgs)) {
-      await fs.rm(briefs.A, { force: true });
+  if (desc) out.channels = { A: plans.A.channel, B: plans.B.channel };
+  for (const seat of ['A', 'B']) {
+    if (skipped[seat]) continue;
+    const plan = plans[seat];
+    await fs.mkdir(plan.channel === 'final-message' ? path.dirname(plan.brief) : plan.privateRaw ? path.dirname(plan.privateRaw) : p.phase2, { recursive: true });
+    const argv = ['--mode', 'delta', '--peer-view', p.peerView[seat], '--out', plan.brief, '--channel', plan.channel];
+    if (plan.outputPath) argv.push('--output-path', plan.outputPath);
+    if (!step(`build seat ${seat} delta brief`, 'build-brief.mjs', argv)) {
+      if (seat === 'A') throw new RelayError('build-brief failed for seat A');
+      await fs.rm(plans.A.brief, { force: true });
       throw new RelayError('build-brief failed for seat B; seat A\'s brief was removed so a rerun starts clean');
     }
-    Object.assign(out, { briefs: { ...out.briefs, B: briefs.B }, rebuttals: { ...out.rebuttals, B: args.seatBHarness ? p.raw.B : null } });
+    out.briefs[seat] = plan.brief;
+    out.rebuttals[seat] = plan.outputPath;
   }
   return out;
 }
@@ -231,9 +272,31 @@ async function finish(args) {
       throw new RelayError(`${p.findings[seat]} already has a rebuttal section; restore both phase1/*-findings.md from phase1/original/ before rerunning finish`);
     }
   }
+  const desc = await loadDescriptor(args.runDir);
+  const published = {};
   for (const seat of seats) {
+    const actor = desc?.[`seat${seat}`];
+    const source = actor?.transport === 'cli' && channelFor(actor) === 'file' ? privateOutputPath(desc, 'phase2', seat) : null;
+    if (source && (await exists(source))) {
+      // A refused append restores both findings files, so an earlier published copy is only an input: keep it and publish the corrected one.
+      if ((await exists(p.raw[seat])) && !(await fs.readFile(p.raw[seat])).equals(await fs.readFile(source))) {
+        const ext = path.extname(p.raw[seat]);
+        const stem = p.raw[seat].slice(0, p.raw[seat].length - ext.length);
+        let n = 1;
+        while (await exists(`${stem}.attempt-${n}${ext}`)) n += 1;
+        await fs.rename(p.raw[seat], `${stem}.attempt-${n}${ext}`);
+      }
+      if (!(await exists(p.raw[seat]))) {
+        try {
+          const copy = await publishSeatOutput(desc, 'phase2', seat);
+          published[seat] = { source: copy.source, destination: copy.destination, sha256: copy.destinationSha256 };
+        } catch (err) {
+          throw runDescriptorError(err);
+        }
+      }
+    }
     if (!(await exists(p.raw[seat]))) {
-      throw new RelayError(`${p.raw[seat]} does not exist; wait for seat ${seat}, or pass --incomplete-seats ${seat} if its exchange cannot be completed (see the exchange step's recovery rule)`);
+      throw new RelayError(`${p.raw[seat]} does not exist${source ? ` (a CLI seat writes ${source} first)` : ''}; wait for seat ${seat}, or pass --incomplete-seats ${seat} if its exchange cannot be completed (see the exchange step's recovery rule)`);
     }
     if (!(await exists(p.peerView[seat]))) throw new RelayError(`${p.peerView[seat]} does not exist; it is the peer view seat ${seat} rebutted`);
   }
@@ -256,14 +319,25 @@ async function finish(args) {
     throw new RelayError('validate failed after appending; both findings files were restored');
   }
   const actions = { concede: 0, dispute: 0 };
+  const perSeat = {};
   for (const seat of seats) {
-    for (const [, act] of (await fs.readFile(p.raw[seat], 'utf8')).matchAll(/^Action:\s*(CONCEDE|DISPUTE)\b/gm)) actions[act.toLowerCase()]++;
+    perSeat[seat] = { concede: 0, dispute: 0 };
+    for (const [, act] of (await fs.readFile(p.raw[seat], 'utf8')).matchAll(/^Action:\s*(CONCEDE|DISPUTE)\b/gm)) {
+      actions[act.toLowerCase()]++;
+      perSeat[seat][act.toLowerCase()]++;
+    }
+  }
+  for (const seat of seats) {
+    if (perSeat[seat].dispute === 0 && perSeat[seat].concede >= 3) {
+      process.stderr.write(`exchange: WARNING: seat ${seat} conceded all ${perSeat[seat].concede} peer claims; the exchange added little for that side: consider --audit-depth full\n`);
+    }
   }
   // Agreement is not a check: with no dispute, a light audit re-checks nothing.
   if (actions.dispute === 0 && actions.concede > 0) {
     process.stderr.write(`exchange: WARNING: all ${actions.concede} rebuttals conceded and none disputed; a light audit would re-check none of these findings, so use --audit-depth full (nothing to do if it is already full)\n`);
   }
   const result = { appended: seats, incomplete: args.incompleteSeats, no_peer_claims: noPeerClaims, ...actions };
+  if (Object.keys(published).length > 0) result.published = published;
   // audit-prep reads this to tell a declared incomplete seat from a finish that never succeeded.
   await fs.writeFile(path.join(p.phase2, 'exchange-result.json'), `${JSON.stringify(result, null, 2)}\n`);
   return result;

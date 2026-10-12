@@ -1,0 +1,64 @@
+{
+  "threadId": "01a11c74-5949-7571-acfc-ce0975ddb4db",
+  "touchedFiles": [],
+  "modelRequested": "gpt-6.1-sol",
+  "effortRequested": null,
+  "modelResolved": "gpt-6.1-sol",
+  "effortResolved": null,
+  "selectionNote": "modelResolved comes from the thread rollout (turn_context), null when it is missing; the JSON event stream does not verify effective effort.",
+  "isolated": false,
+  "worktreePath": null,
+  "isolationNote": null,
+  "webAccess": true,
+  "host": null,
+  "transport": "cli",
+  "readOnly": {
+    "fileTools": "enforced",
+    "shell": "enforced",
+    "cwd": "target"
+  },
+  "detached": true,
+  "workerPid": 28756,
+  "workerStartedAt": "2026-10-08T16:59:07.485Z",
+  "workerStartToken": null,
+  "startedAt": "2026-10-08T16:59:07.637Z",
+  "finishedAt": "2026-10-08T17:10:49.754Z",
+  "durationMs": 702117,
+  "timeoutS": 0,
+  "usage": {
+    "input_tokens": 1640753,
+    "cached_input_tokens": 1527424,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 17245,
+    "reasoning_tokens": 6914,
+    "estimated_cost_usd": null,
+    "source": "provider",
+    "raw": {
+      "input_tokens": 1640753,
+      "cached_input_tokens": 1527424,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 17245,
+      "reasoning_output_tokens": 6914
+    }
+  },
+  "envMode": "filtered",
+  "usage_delta": {
+    "input_tokens": 1640753,
+    "cached_input_tokens": 1527424,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 17245,
+    "reasoning_tokens": 6914,
+    "source": "fresh-thread"
+  },
+  "configOverrides": [
+    "agents.enabled=false",
+    "features.multi_agent=false",
+    "features.plugins=false",
+    "features.apps=false",
+    "features.skill_search=false",
+    "skills.max_context_tokens=1"
+  ],
+  "childThreads": [],
+  "webCalls": [],
+  "status": "completed"
+}

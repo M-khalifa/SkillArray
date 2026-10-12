@@ -6,6 +6,7 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 
 const SKIP_DIRS = new Set(['.git', 'node_modules']);
+const GIT_ONLY = new Set(['.git']);
 // Python writes these when code runs; skipCaches leaves them out of a source snapshot's hash.
 const CACHE_DIRS = new Set(['__pycache__', '.pytest_cache']);
 const CACHE_FILE_RE = /\.py[co]$/;
@@ -24,7 +25,9 @@ function sha256OfFile(filePath) {
 // Returns { files: { 'rel/path': sha256 }, snapshotHash }, plus skippedCaches (the cache folders and
 // files left out) when skipCaches is set. Paths use '/' on every platform.
 // Throws when the tree holds more than maxFiles files, rather than hashing a partial tree.
-export async function hashInventory(dir, { maxFiles = DEFAULT_MAX_FILES, skipCaches = false } = {}) {
+// node_modules is left out (a source snapshot) unless includeDependencies is set (write detection).
+export async function hashInventory(dir, { maxFiles = DEFAULT_MAX_FILES, skipCaches = false, includeDependencies = false } = {}) {
+  const skipDirs = includeDependencies ? GIT_ONLY : SKIP_DIRS;
   const rels = [];
   const skippedCaches = [];
   async function walk(abs, rel) {
@@ -32,14 +35,14 @@ export async function hashInventory(dir, { maxFiles = DEFAULT_MAX_FILES, skipCac
     for (const entry of entries) {
       const relPath = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
+        if (skipDirs.has(entry.name)) continue;
         if (skipCaches && CACHE_DIRS.has(entry.name)) { skippedCaches.push(`${relPath}/`); continue; }
         await walk(path.join(abs, entry.name), relPath);
       } else if (entry.isFile()) {
         if (skipCaches && CACHE_FILE_RE.test(entry.name)) { skippedCaches.push(relPath); continue; }
         rels.push(relPath);
         if (rels.length > maxFiles) {
-          throw new Error(`"${dir}" holds more than ${maxFiles} files; refusing a partial inventory`);
+          throw Object.assign(new Error(`"${dir}" holds more than ${maxFiles} files; refusing a partial inventory`), { code: 'INVENTORY_TOO_LARGE' });
         }
       }
     }
@@ -56,6 +59,21 @@ export async function hashInventory(dir, { maxFiles = DEFAULT_MAX_FILES, skipCac
   const result = { files, snapshotHash: combined.digest('hex') };
   if (skipCaches) result.skippedCaches = skippedCaches.sort();
   return result;
+}
+
+// Inventory for write detection: node_modules is hashed too. A tree too large with it falls back to the
+// source-only inventory and reports dependenciesCovered: false; includeDependencies: false asks for that
+// directly, so an after-run inventory compares like with like against a baseline that lacked dependencies.
+export const DEPENDENCIES_NOTE = 'node_modules was not inventoried (too many files); a write under it is not detected';
+export async function hashWriteInventory(dir, options = {}) {
+  if (options.includeDependencies !== false) {
+    try {
+      return { ...(await hashInventory(dir, { ...options, includeDependencies: true })), dependenciesCovered: true };
+    } catch (err) {
+      if (err.code !== 'INVENTORY_TOO_LARGE') throw err;
+    }
+  }
+  return { ...(await hashInventory(dir, { ...options, includeDependencies: false })), dependenciesCovered: false };
 }
 
 // Paths added, removed, or changed between two hashInventory().files maps, sorted.

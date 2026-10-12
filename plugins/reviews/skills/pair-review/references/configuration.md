@@ -17,8 +17,8 @@ account entitlements or dispatch a paid model call.
 1. Resolve `<skill-dir>` to the directory containing the loaded SKILL.md.
    Run `node "<skill-dir>/scripts/review-config.mjs" show`.
 2. For cross-review, run `catalog`. Ask for both reviewer providers, runtimes,
-   models, and optional effort. For pair-review, ask for two distinct
-   Claude-harness models and optional effort. Present the curated choices the
+   models, and optional effort. For pair-review, ask for the vendor
+   (Anthropic/Claude or OpenAI/Codex), two distinct models of that vendor and optional effort. Present the curated choices the
    `catalog` command returns (the only maintained list; do not copy a model
    list from these docs), then verify availability in the selected runtime
    (`codex debug models` for Codex). Claude must include Fable when its
@@ -27,7 +27,7 @@ account entitlements or dispatch a paid model call.
    If the user already supplied both choices, use them without asking again.
 3. Validate runtime support as described in
    [model-capabilities.md](model-capabilities.md). The helper validates structure
-   only. For pair-review check that aliases resolve to distinct Claude models;
+   only. For pair-review check that aliases resolve to distinct models of the chosen vendor;
    for cross-review check that the two selected provider IDs differ.
 4. Save using `setup`, then read back with `show`. State both models, effort,
    and the saved path. A first review request continues after setup; a setup-only
@@ -115,7 +115,7 @@ adversarial for cross-review). Pair-review accepts `--mode collaborate`,
 
 Explicit run values > saved preferences > effort/mode defaults.
 There is no built-in model default. Cross-review first setup needs both complete
-reviewer selections; pair-review needs two distinct Claude-harness model IDs.
+reviewer selections; pair-review needs two distinct model IDs from one vendor.
 Do not persist run overrides unless asked.
 
 ## During an active review

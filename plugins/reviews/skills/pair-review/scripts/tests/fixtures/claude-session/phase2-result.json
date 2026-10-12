@@ -1,0 +1,30 @@
+{
+  "modelRequested": "haiku",
+  "modelResolved": "claude-haiku-4-5-20251001",
+  "effortRequested": null,
+  "effortResolved": null,
+  "selectionNote": "modelResolved comes from system/init; effort is unverified",
+  "sessionId": "SESSION_1",
+  "threadId": "SESSION_1",
+  "usageSemantics": "per-call",
+  "host": null,
+  "transport": "cli",
+  "readOnly": {
+    "fileTools": "enforced",
+    "shell": "prompt-only",
+    "cwd": "worktree"
+  },
+  "isolated": true,
+  "worktreePath": "/fixture/worktree",
+  "isolationNote": "snapshot worktree",
+  "webAccess": false,
+  "status": "completed",
+  "usage": {
+    "source": "provider",
+    "input_tokens": 7,
+    "cached_input_tokens": 80,
+    "cache_write_input_tokens": 5,
+    "output_tokens": 9
+  },
+  "durationMs": 2000
+}

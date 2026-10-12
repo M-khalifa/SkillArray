@@ -1,10 +1,14 @@
 # Phase 3 — Scorecard
 
+> **With `review-run` you do not need this file for the normal path.** SKILL.md's Quickstart lists the commands in order. Read it when a
+> step fails, a seat must be replaced or resumed by hand, a scan or validation stops the run, or you dispatch without the sequencer.
+
 ## Contents
 
 - Coin flip and relabel to X/Y
 - Falsification pass (optional)
 - Spawn the fresh auditor
+- Auditor and verifier snapshot
 - Translate back and build the scorecard
 - Cache cleanup
 - Isolation cleanup
@@ -198,6 +202,8 @@ calls are summed). `falsification.verifiers_run` may be lower than
 
 ## Spawn the fresh auditor
 
+When neither seat raised a claim, `audit --prepare` writes an empty `phase3/findings.json` and skips the auditor; go straight to `build-manifest.mjs` and `build-report.mjs`.
+
 Spawn a genuinely new subagent with ONLY the items below — **never** a fork
 of the orchestrator's own conversation (e.g. an `Agent` tool call with
 `subagent_type: "fork"`, or any equivalent that inherits context): a fork
@@ -266,6 +272,26 @@ brief verbatim; both skills use that one list.
 State this limitation explicitly in the eventual report: the auditor is still
 the same model family as one or both reviewers (Claude), so this bounds but
 does not eliminate self-preference risk; it is not vendor-neutral adjudication.
+
+## Auditor and verifier snapshot
+
+The auditor and every verifier read the exact Phase 1 snapshot, never a later working-tree state.
+A CLI auditor or verifier gets a fresh worktree rebuilt from the Phase 1 fingerprint recorded in
+`run.json` (HEAD, the dirty diff, the untracked files). If the target no longer matches that
+fingerprint, the dispatch is refused (the drift rule): stop and report, never audit a changed
+target. The auditor never reads a reviewer's worktree, and no actor reads another actor's.
+`review-run.mjs audit --finish` checks the fingerprint before every auditor dispatch. Dispatch each CLI
+verifier with `claude-dispatch.mjs --run-dir "<run-dir>"`, which refuses a changed target before it builds the worktree.
+Give each CLI verifier its own dispatch folder, `<run-dir>/phase3/verifier-<n>/` (its brief goes there as
+`brief.txt` and its `result.json` is written beside the brief), so that `audit --finish` finds the
+`result.json` and removes the verifier's worktree whether or not the verifier is listed in `run.json`.
+
+`node "<skill-dir>/scripts/review-run.mjs" audit --run-dir "<run-dir>" --prepare` runs `flip` and
+`audit-prep` and prints the number of falsification-qualified claims, then stops so the verifiers
+can run. `--finish` builds the auditor brief (`--audit-depth` from `run.json`), dispatches a CLI
+auditor through `claude-dispatch.mjs`, then runs `translate`, `scorecard` and `clear-cache` and removes
+every actor's worktree. For a native auditor it prints the brief path instead; rerun it once
+`findings.audit.json` exists.
 
 ## Translate back and build the scorecard
 
@@ -366,6 +392,12 @@ target and `.git/worktrees/<name>/` is left behind as a stale entry. Recover
 with `git -C "<target-dir>" worktree prune`, and confirm with `git -C
 "<target-dir>" worktree list`.
 
+Every actor that ran in a worktree is cleaned up, not only seat B: each reviewer, the auditor and
+each verifier. Read `worktreePath` from every `result.json` of the run (`phase1/<role>/`,
+`phase2/<role>/`, the auditor's and each verifier's dispatch folder) and from `run.json`, remove each
+one with the commands above, then run `git -C "<target-dir>" worktree prune` once.
+`review-run.mjs audit --finish` does this as its last step and prints how many it removed.
+
 ## Manifest
 
 Write the manifest body (the fields in review-protocol.md's Manifest and final
@@ -384,6 +416,12 @@ file — never a single comma-joined value:
 ```text
 node "<skill-dir>/scripts/build-manifest.mjs" --in "<run-dir>/phase3/manifest-body.json" --out "<run-dir>/manifest.json" --task-packet "<run-dir>/task-packet.md" --phase1 "<run-dir>/phase1/original/A-findings.md" --phase1 "<run-dir>/phase1/original/B-findings.md" --phase2 "<run-dir>/phase2/peer-view-for-A.md" --phase2 "<run-dir>/phase2/peer-view-for-B.md" --findings "<run-dir>/phase3/findings.json" --falsification "<run-dir>/phase3/falsification-breakdown.json" --seat-transcript A=<seat A agentId> --seat-transcript auditor=<auditor agentId>
 ```
+
+With `--run-dir "<run-dir>"` (and no `--in`) `build-manifest` does all of this itself: it collects the packet, the untouched Phase 1
+copies, the peer views, `findings.json`, the verification files and every completed `result.json` (also the auditor's and the redaction
+rounds'), writes `<run-dir>/manifest.json`, and takes the remembered `--native-agent` ids as seat transcripts. `--init` writes only the
+minimal body (topology, mode, status, reviewers, exchange from `run.json`) to `phase3/manifest-body.json` so you can add what only you
+know and then run it with `--in`.
 
 Hash the untouched Phase 1 copies in `phase1/original/` (see the Phase 1
 completion gate), not the working files that Phase 2 appended rebuttals to:
@@ -458,6 +496,16 @@ evidence files with Git Bash, `git diff --output=<file>`, or
 
 ## Report
 
+**Build the report with the script.** Write `<run-dir>/phase3/report-notes.md` with `## Why` (one sentence) and
+`## Decisions needed` (a table: decision, options, recommended, what changes), and when they apply `## Finding status`
+(`- F4: fixed after the snapshot, not re-reviewed`), `## Open items` (gaps that are not findings) and `## Criteria source`
+(where and when the criteria text came from), then run
+`build-report.mjs --run-dir <run-dir>`. It prints the terminal report (colour only on a terminal, never when `NO_COLOR` is
+set) from `findings.json`, `manifest.json`, the task packet and the Phase 1 files: status, blockers, findings by severity,
+every packet criterion as issue found, not met or partial (no finding), no issue found or NOT VERIFIED, coverage, caveats and cost. IDs, counts and
+states are never retyped. `--out report.md` adds a plain copy for a ticket; `--html page.html` adds a standalone page,
+only when the user asks for it. The checklist below is what the report must cover; it says nothing the script already prints.
+
 Produce `manifest.json` per Manifest above (write the manifest body, then run `build-manifest.mjs` to stamp
 `run_id`/`hashes` — never author those two fields by hand). Lead with the
 manifest and whether both seats completed. Put any `unresolved-high-stakes`
@@ -504,7 +552,7 @@ changes.
 manifest covers the snapshot the seats read. To confirm fixes, run a new review
 on the fixed snapshot (new run directory and manifest) with the original
 findings listed in the task packet as hypotheses `H1, H2, ...` for the seats to
-confirm or refute. Resuming the original seats on the fixed code is a quicker
+confirm or refute. `build-recheck-packet.mjs --from-run <old-run> --since-diff <diff> --out <packet.md>` drafts that packet (the old findings as hypotheses, the changed files, FILL lines for what only you know). Resuming the original seats on the fixed code is a quicker
 check but not a review: they have seen each other's findings, so it is not
 independent. Keep its files and costs out of the original manifest, and say in
 the report who checked the fixes and how.
@@ -516,3 +564,9 @@ Differential) by a reviewer that took no part in the earlier rounds; say in the
 report whether it ran. When the report quotes the implementers' mutation
 checks, say what they prove: that the tests notice a change in the code, not
 that the behavior is right.
+
+**Read-only statement for CLI Claude seats.** For every CLI Claude seat, the auditor and each
+verifier, the report says: file tools are enforced (`fileTools: enforced`) and the shell is
+prompt-only (`shell: prompt-only`), so a shell can still read peer files and write by absolute
+path. `touchedFiles` in each `result.json`, checked against the real target after every actor,
+is the check. `review-run audit --finish` reads every verifier's `result.json` and attempt files and stops on a recorded write; a result that says `node_modules` was not inventoried (`touchedFilesNote`) is reported in the run line. The manifest records `readOnly` per actor, with `cwd` as `worktree` or `target`.

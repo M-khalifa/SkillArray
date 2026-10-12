@@ -267,7 +267,7 @@ test(
   }
 );
 
-test('setupIsolatedWorktree: copies tracked modifications and untracked files into a fresh worktree, and reuses it on a second call', async (t) => {
+test('setupIsolatedWorktree: copies tracked modifications and untracked files into a fresh worktree, and reuses it on a second call [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-worktree-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], dir); } catch {}
@@ -332,7 +332,7 @@ test('setupIsolatedWorktree: copies tracked modifications and untracked files in
   assert.deepEqual(remaining, [], '.git/worktrees/ must be empty after phase-3-scorecard.md\'s cleanup command');
 });
 
-test('setupIsolatedWorktree: a direct mutation inside the worktree itself is refused on reuse, even though the source repo never changed', async (t) => {
+test('setupIsolatedWorktree: a direct mutation inside the worktree itself is refused on reuse, even though the source repo never changed [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-worktree-mutation-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], dir); } catch {}
@@ -368,7 +368,7 @@ test('setupIsolatedWorktree: a direct mutation inside the worktree itself is ref
   );
 });
 
-test('setupIsolatedWorktree: a gitignored file created directly inside the worktree is NOT detected as contamination (documented limitation, not a bug)', async (t) => {
+test('setupIsolatedWorktree: a gitignored file created directly inside the worktree is NOT detected as contamination (documented limitation, not a bug) [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-worktree-ignored-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], dir); } catch {}
@@ -403,7 +403,7 @@ test('setupIsolatedWorktree: a gitignored file created directly inside the workt
   await assert.doesNotReject(fs.access(path.join(worktreeDir, 'tmp', 'poison.txt')));
 });
 
-test('setupIsolatedWorktree: a marker from before worktree-fingerprinting existed (missing the "worktree" field) fails closed instead of being trusted', async (t) => {
+test('setupIsolatedWorktree: a marker from before worktree-fingerprinting existed (missing the "worktree" field) fails closed instead of being trusted [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-worktree-old-marker-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], dir); } catch {}
@@ -452,7 +452,7 @@ async function makeSimpleRepo(dir, name, sentinel) {
   return target;
 }
 
-test('setupIsolatedWorktree: pointing a second, different repo at the same worktree path is refused, never served from the first repo\'s content', async (t) => {
+test('setupIsolatedWorktree: pointing a second, different repo at the same worktree path is refused, never served from the first repo\'s content [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-cross-repo-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], path.join(dir, 'r1')); } catch {}
@@ -476,7 +476,7 @@ test('setupIsolatedWorktree: pointing a second, different repo at the same workt
   );
 });
 
-test('setupIsolatedWorktree: editing the content of an already-untracked file is drift and is refused on reuse, even though the file list itself is unchanged', async (t) => {
+test('setupIsolatedWorktree: editing the content of an already-untracked file is drift and is refused on reuse, even though the file list itself is unchanged [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-untracked-drift-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], path.join(dir, 'target')); } catch {}
@@ -498,7 +498,7 @@ test('setupIsolatedWorktree: editing the content of an already-untracked file is
   assert.match(second.reason, /snapshot fingerprint mismatch/);
 });
 
-test('setupIsolatedWorktree: an unreadable/garbage snapshot marker fails closed instead of silently rebuilding over an existing worktree', async (t) => {
+test('setupIsolatedWorktree: an unreadable/garbage snapshot marker fails closed instead of silently rebuilding over an existing worktree [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-garbage-marker-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], path.join(dir, 'target')); } catch {}
@@ -521,7 +521,7 @@ test('setupIsolatedWorktree: an unreadable/garbage snapshot marker fails closed 
   );
 });
 
-test('setupIsolatedWorktree: an untracked nested git repository is skipped (not copied, never crashes) and reported in skippedDirs', async (t) => {
+test('setupIsolatedWorktree: an untracked nested git repository is skipped (not copied, never crashes) and reported in skippedDirs [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-nested-repo-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], path.join(dir, 'target')); } catch {}
@@ -546,7 +546,7 @@ test('setupIsolatedWorktree: an untracked nested git repository is skipped (not 
   assert.equal(second.reused, true);
 });
 
-test('setupIsolatedWorktree: a worktree removed by deleting its directory directly (scratchpad wipe before cleanup ran) leaves a stale .git/worktrees/ entry that "git worktree prune" clears', async (t) => {
+test('setupIsolatedWorktree: a worktree removed by deleting its directory directly (scratchpad wipe before cleanup ran) leaves a stale .git/worktrees/ entry that "git worktree prune" clears [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-prune-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
@@ -587,7 +587,7 @@ test('setupIsolatedWorktree: reports failure without throwing when the target is
   assert.match(result.reason, /snapshot fingerprint failed/);
 });
 
-test('setupIsolatedWorktree: a worktree left registered but never snapshotted is not silently treated as reused', async (t) => {
+test('setupIsolatedWorktree: a worktree left registered but never snapshotted is not silently treated as reused [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-poisoned-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], dir); } catch {}
@@ -625,7 +625,7 @@ test('setupIsolatedWorktree: a worktree left registered but never snapshotted is
   assert.equal(await fs.readFile(path.join(worktreeDir, 'untracked.txt'), 'utf8'), 'new file\n');
 });
 
-test('setupIsolatedWorktree: --cd pointing at a repository SUBDIRECTORY is refused with a clear reason, instead of silently building a corrupted worktree', async (t) => {
+test('setupIsolatedWorktree: --cd pointing at a repository SUBDIRECTORY is refused with a clear reason, instead of silently building a corrupted worktree [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-subdir-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
@@ -663,7 +663,7 @@ test('setupIsolatedWorktree: an ordinary pre-existing directory with no marker a
   );
 });
 
-test('setupIsolatedWorktree: a worktree belonging to a DIFFERENT repo (marker deleted by hand) is refused rather than destroyed and rebuilt from the new target', async (t) => {
+test('setupIsolatedWorktree: a worktree belonging to a DIFFERENT repo (marker deleted by hand) is refused rather than destroyed and rebuilt from the new target [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-crossrepo-nomark-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], path.join(dir, 'repoA')); } catch {}
@@ -711,7 +711,7 @@ test('setupIsolatedWorktree: a plain FILE sitting at the worktree path is refuse
   );
 });
 
-test('setupIsolatedWorktree: a worktree path that is merely a same-prefixed SIBLING of the target\'s git dir is refused, not misidentified as belonging to the target', async (t) => {
+test('setupIsolatedWorktree: a worktree path that is merely a same-prefixed SIBLING of the target\'s git dir is refused, not misidentified as belonging to the target [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-prefix-sibling-'));
   t.after(async () => {
     try { git(['worktree', 'remove', '--force', path.join(dir, 'worktree')], path.join(dir, 'repo')); } catch {}
@@ -734,7 +734,7 @@ test('setupIsolatedWorktree: a worktree path that is merely a same-prefixed SIBL
   assert.match(second.reason, /different repository/i);
 });
 
-test('setupIsolatedWorktree: B4 -- a target repo with a git submodule is refused outright, not silently worktree-copied with an empty submodule directory', async (t) => {
+test('setupIsolatedWorktree: B4 -- a target repo with a git submodule is refused outright, not silently worktree-copied with an empty submodule directory [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-submodule-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
@@ -750,7 +750,7 @@ test('setupIsolatedWorktree: B4 -- a target repo with a git submodule is refused
   await assert.rejects(fs.access(worktreeDir), 'no worktree should have been built at all');
 });
 
-test('setupIsolatedWorktree: an fs error during setup returns a structured failure, never throws', async (t) => {
+test('setupIsolatedWorktree: an fs error during setup returns a structured failure, never throws [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'isolate-fserror-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 

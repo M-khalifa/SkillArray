@@ -42,6 +42,9 @@ export async function preserveEarlierResult(resultPath) {
     if (await exists(target)) continue;
     await fs.rename(resultPath, target);
     if (await exists(stderrLog)) await fs.rename(stderrLog, path.join(dir, `result.attempt-${n}.stderr.log`));
+    // A worker that died never wrote the final stderr log; its live log is then the only record of the attempt.
+    const liveLog = path.join(dir, 'result.stderr.live.log');
+    if (await exists(liveLog)) await fs.rename(liveLog, path.join(dir, `result.attempt-${n}.stderr.live.log`));
     return target;
   }
 }

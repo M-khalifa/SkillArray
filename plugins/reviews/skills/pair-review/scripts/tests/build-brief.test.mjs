@@ -69,6 +69,9 @@ test('build phase1: the brief carries the seat header, the verbatim seat rules, 
   assert.match(text, /Last rule, easy to miss: never write a claim ID \(yours such as B3, or anyone else's\) inside an Evidence fence or inline code\.[^\n]*\n$/,
     'the own-ID rule closes the brief, after the packet');
   assert.match(text, /including one of your own\s+claims/, 'the protocol rule itself names the seat\'s own IDs');
+  assert.doesNotMatch(text, /## Model identity|Resolve settings before dispatch|--forbid-seats|Three label layers/, 'orchestrator-only text stays out of a seat brief');
+  assert.match(text, /Never name your own vendor, model, or runtime/, 'the seat identity rule is still there, in All seats');
+  assert.doesNotMatch(text, /each as its own claim/, 'one class-sweep rule, not two that contradict');
 });
 
 test('build phase1: --repo-only leaves the web rules out, and --output-path tells a full-tool seat to write its own file', async (t) => {
@@ -291,5 +294,46 @@ test('parseArgs: a path holding a shell variable a loop never expanded is refuse
   assert.throws(() => parseArgs(['--mode', 'delta', '--peer-view', 'C:\\run\\$VIEW.md', '--out', 'b.txt']), /--peer-view .* never expanded/);
   for (const ok of ['\\\\host\\C$\\run\\B-findings.md', 'C:\\run\\cost-$5\\B.md', 'C:\\run\\100%\\B.md', 'C:\\run\\B-findings.md']) {
     assert.equal(parseArgs([...base, '--output-path', ok]).outputPath, ok);
+  }
+});
+
+test('parseArgs: --channel accepts file and final-message, and refuses a contradiction with --output-path, an unknown value, the verifier mode and a missing value', () => {
+  const base = ['--mode', 'phase1', '--packet', 'p.md', '--seat', 'A', '--out', 'brief.txt'];
+  assert.equal(parseArgs(base).channel, null);
+  assert.equal(parseArgs([...base, '--channel', 'file', '--output-path', 'f.md']).channel, 'file');
+  assert.equal(parseArgs([...base, '--channel', 'final-message']).channel, 'final-message');
+  assert.throws(() => parseArgs([...base, '--channel', 'file']), /--channel file requires --output-path/);
+  assert.throws(() => parseArgs([...base, '--channel', 'final-message', '--output-path', 'f.md']), /--channel final-message cannot be combined with --output-path/);
+  assert.throws(() => parseArgs([...base, '--channel', 'stdout']), /--channel must be file or final-message/);
+  assert.throws(() => parseArgs([...base, '--channel']), /--channel requires a value/);
+  assert.throws(() => parseArgs(['--mode', 'verifier', '--claim', 'c', '--rebuttal', 'r', '--target-dir', 't', '--out', 'o', '--channel', 'final-message']), /--channel is not accepted by --mode verifier/);
+  assert.equal(parseArgs(['--mode', 'delta', '--peer-view', 'v.md', '--out', 'o', '--channel', 'file', '--output-path', 'f.md']).channel, 'file');
+});
+
+test('build: naming the channel never changes a brief byte, for each role that accepts it', async (t) => {
+  const dir = await tmp(t);
+  const packet = path.join(dir, 'task-packet.md');
+  const peer = path.join(dir, 'peer-view-for-A.md');
+  const audit = path.join(dir, 'audit-input');
+  const run = path.join(dir, 'run');
+  await fs.mkdir(audit);
+  await fs.mkdir(run);
+  await fs.writeFile(packet, '# Task\nReview x.js\n');
+  await fs.writeFile(peer, '## P1 — claim\nSeverity: LOW\n');
+  await fs.writeFile(path.join(audit, 'X-findings.md'), '# Seat X findings\n\n## No findings\n');
+  const roles = {
+    phase1: { mode: 'phase1', packet, seat: 'A' },
+    delta: { mode: 'delta', peerView: peer },
+    auditor: { mode: 'auditor', packet, auditDir: audit, targetDir: dir, runDir: run, auditDepth: 'light', sourceDirs: [] },
+  };
+  for (const [name, role] of Object.entries(roles)) {
+    const file = path.join(dir, `${name}-out.md`);
+    const unnamed = await build({ ...role, out: path.join(dir, `${name}-a.txt`), outputPath: null, channel: null });
+    const named = await build({ ...role, out: path.join(dir, `${name}-b.txt`), outputPath: null, channel: 'final-message' });
+    assert.equal(named, unnamed, `${name}: final-message`);
+    const unnamedFile = await build({ ...role, out: path.join(dir, `${name}-c.txt`), outputPath: file, channel: null });
+    const namedFile = await build({ ...role, out: path.join(dir, `${name}-d.txt`), outputPath: file, channel: 'file' });
+    assert.equal(namedFile, unnamedFile, `${name}: file`);
+    assert.ok(namedFile.includes(file) && !unnamed.includes(file), `${name}: only the file channel names a path`);
   }
 });

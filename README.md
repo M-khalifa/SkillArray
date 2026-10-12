@@ -1,7 +1,7 @@
 # SkillArray
 
-Claude Code skills I use to review code and documents with two AI models
-instead of one, plus a small skill for keeping engineering notes across
+Claude Code and Codex skills I use to review code and documents with two AI
+models instead of one, plus a small skill for keeping engineering notes across
 projects.
 
 ## Why I built it
@@ -23,10 +23,12 @@ didn't, with the reason.
 | Skill | What it does | Needs |
 |---|---|---|
 | `cross-review` | Two different providers (Claude plus Codex or an OpenCode model) review the same target and cross-examine each other | Node.js 22+, the Codex or OpenCode CLI |
-| `pair-review` | Same process with two different Claude models | Claude Code with access to two models, Node.js 22+ |
+| `pair-review` | Same process with two different models of one vendor (two Claude or two OpenAI models) | Claude Code with access to two models (or the Codex CLI for two OpenAI models), Node.js 22+ |
 | `shared-brain` | Search and save engineering notes across projects | An MCP knowledge backend, Python 3.11+ |
 
 ## Install
+
+Claude Code:
 
 ```text
 /plugin marketplace add M-khalifa/SkillArray
@@ -34,9 +36,62 @@ didn't, with the reason.
 /plugin install shared-brain@skill-array
 ```
 
+Codex: copy the skill folders `plugins/reviews/skills/cross-review` and
+`plugins/reviews/skills/pair-review` into `.agents/skills/` in the project (or into
+`~/.agents/skills/` for every project). The repository also carries a Codex plugin
+manifest (`plugins/reviews/.codex-plugin/plugin.json`) and marketplace file
+(`.agents/plugins/marketplace.json`). Their field names are copied from plugins in
+Codex's own curated marketplace; installing through them has not been tested yet.
+Both hosts need Node.js 22+. Run the skills from Claude Code; on a Codex host a pair-review of two native OpenAI models is a trial, and a Claude CLI seat
+(cross-review, a Claude pair) is a trial only after a session probe passes (see Hosts below).
+
 The first run asks which models to use. You can change that later with
 `/cross-review setup` or `/pair-review setup`, and see the current choice with
 `/cross-review config`.
+
+## Hosts
+
+Support is decided per actor (host, runtime, transport), not per host (`scripts/host-support.mjs`):
+supported, trial (needs `preflight.mjs --allow-trial`, recorded in `run.json` and the manifest) or
+unsupported (refused, no override). Claude Code: everything is supported except an OpenCode seat (trial).
+Codex host: native OpenAI agents (pair-review) and a single-call Claude CLI auditor are trial routes; a Claude CLI seat is a
+trial only after `preflight --probe-claude-session --yes-paid` proves its session survives (it did not in two `codex exec` runs and
+did in another launch path); a nested Codex CLI seat is unsupported.
+The skill picks the host from the tools it has, in this order, and `preflight.mjs --host`
+records the choice.
+
+| Order | Condition | Host |
+|---|---|---|
+| 1 | A valid `--host` value that does not contradict a tool family that is present | that value |
+| 2 | Both a Claude Code and a Codex agent tool family are present | ambiguous: asks you |
+| 3 | An agent-spawn tool and `SendMessage` | `claude-code` |
+| 4 | The Codex agent tool family (its tool names are not observed: pass `--host codex`) | `codex` |
+| 5 | None of the above | ambiguous: asks you |
+
+Environment markers such as `CODEX_THREAD_ID` and `CLAUDECODE` are hints only. On Claude Code,
+seat A runs as a native agent by default. On Codex, every Claude seat, the auditor and the
+verifiers run through `claude-dispatch.mjs`, and seat B of cross-review runs through
+`codex-dispatch.mjs` or `opencode-dispatch.mjs`. `pair-review` takes two distinct models of one
+vendor: two Claude models (started through `claude-dispatch.mjs` under Codex) or two OpenAI
+models (started through `codex-dispatch.mjs`). Each skill's `references/hosts/` folder has one file per host.
+
+### Codex sandbox
+
+The Codex `workspace-write` sandbox disables the network, and a bare `claude -p` run from a
+Codex shell left no session file in three trials. `claude-dispatch.mjs` run through Codex failed
+in 2 of 2 trials with no allow rule. With a user-added allow rule for the dispatcher, 1 of 4
+attempts completed; the others were killed with the Codex turn, failed on `--detach` (WMI access
+denied), or failed with ECONNREFUSED. There is no reliable route, so a Codex-host review is not
+supported. The skill never requests escalation, never sets a wider sandbox itself, and never
+bypasses a permission check. Details: each skill's `references/hosts/codex.md`.
+
+### Known unsupported cells
+
+- Cross-review on a Codex host, and a Claude pair on a Codex host: a trial only when the session probe passes. In two
+  `codex exec` runs a Claude CLI call left no session, so the exchange could not resume the seat; another Codex launch path kept
+  it. A nested Codex CLI start is blocked. The native OpenAI pair-review there is a trial that has completed one short run. See
+  each skill's `references/hosts/codex.md`.
+- The OpenCode seat is not verified end to end. A live trial (OpenCode 1.18.25, isolated worktree, two free models) ended twice with no final text after tool calls, and the dispatcher reported that as an error. A direct short OpenCode call returned the events the dispatcher parses.
 
 ## Using it
 
@@ -116,6 +171,12 @@ Needs Node.js 22 or 24, and Python 3.11 with PyYAML for shared-brain.
 ```text
 node scripts/release-check.mjs
 ```
+
+It also runs `node scripts/install-check.mjs`, which copies each skill into a scratch Claude
+Code layout (`.claude/skills`) and a scratch Codex layout (`.agents/skills`) and checks the
+copies. Before a documentation change, `node scripts/compare-baseline.mjs --base <rev>` checks
+that the briefs of an earlier revision still build byte for byte and that every documented
+rule is still present.
 
 That runs everything in order and stops at the first failure: file checks,
 the shared-file comparison, both skills' test suites, the benchmark tests and

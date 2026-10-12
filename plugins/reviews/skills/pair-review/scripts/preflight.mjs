@@ -24,17 +24,29 @@
 // anywhere in this file.
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { createReadStream, existsSync } from 'node:fs';
+import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildChildEnv } from './env-filter.mjs';
 import { diffInventories, hashInventory } from './snapshot-utils.mjs';
-import { killTree } from './spawn-utils.mjs';
+import { killTree, spawnCli } from './spawn-utils.mjs';
+import { RunDescriptorError, writeRunDescriptor, seatOutputDir } from './run-descriptor.mjs';
+import { evaluateSupport, hostStatusOf } from './host-support.mjs';
 
 class RelayError extends Error {}
+
+const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
+const HOSTS = ['claude-code', 'codex'];
+const LEAN_FLAGS = [
+  '--restricted', '--setting-sources', '--strict-mcp-config', '--disable-slash-commands', '--tools', '--add-dir',
+  '--allowedTools', '--permission-mode', '--append-system-prompt', '--resume', '--output-format', '--model',
+];
+const PROBE_MODEL = 'haiku';
+const HELP_TIMEOUT_MS = 30000;
 
 const DEFAULT_TIMEOUT_S = 1800;
 const DEFAULT_TAIL_LINES = 20;
@@ -55,15 +67,31 @@ function printUsageAndExit(code) {
   process.exit(code);
 }
 
+// The example matches the skill's own layout: a Claude seat A with a Codex seat B, or two Claude seats.
+const SAMPLE_SEAT_B = path.basename(path.dirname(SCRIPTS_DIR)) === 'pair-review'
+  ? '{"provider": "anthropic", "runtime": "claude", "model": "sonnet", "effort": "high", "transport": "native"}'
+  : '{"provider": "openai", "runtime": "codex", "model": "gpt-5.6-terra", "effort": "high", "transport": "cli"}';
+const SAMPLE_SEATS = [
+  '{',
+  '  "seatA": {"provider": "anthropic", "runtime": "claude", "model": "opus", "effort": null, "transport": "native"},',
+  `  "seatB": ${SAMPLE_SEAT_B},`,
+  '  "auditor": {"provider": "anthropic", "runtime": "claude", "model": "opus", "effort": null, "transport": "native"},',
+  '  "flags": {"auditDepth": "light", "falsification": false, "mode": "adversarial"}',
+  '}',
+].map((line) => `                     ${line}`).join('\n');
+
 const USAGE = `preflight.mjs — deterministic pre-flight evidence for a review target.
 
 Usage:
   node preflight.mjs --cd <path> [--exec "<command>"]... [--timeout <seconds>]
                  [--env-mode filtered|inherit] [--env-passthrough NAME,NAME]
+                 [--exec-in <path> "<command>"]...
                  [--out <path>] [--check-stale <snapshotHash>]
                  [--compact [--tail <lines>] [--log-dir <dir>]]
                  [--repo <path>]... [--fetch] [--watch-file <path>]...
                  [--source-snapshot <folder>=<repo>@<ref>]...
+  node preflight.mjs --host claude-code|codex --cd <path> --run-dir <dir> --seats <seats.json>
+                 [--matched-tools "<text>"] [--allow-trial] [--skip-codex-doctor] [--probe-claude-session] [--probe-dispatch [--yes-paid]]
 
 --cd <path>          Target directory. Required.
 --exec "<command>"   Opt in to Tier 2: run this shell command against --cd. May
@@ -75,7 +103,15 @@ Usage:
                      Runs through a filtered environment when --env-mode is
                      "filtered" (the default); --env-mode inherit passes the
                      full, unfiltered parent environment instead.
---timeout <seconds>  Per --exec command timeout. 0 means unlimited.
+--exec-in <path> "<command>"
+                     Tier 2 in another repository: run the command with <path> as the
+                     working directory. May repeat; commands for the same path share one
+                     snapshotHash taken at the start. Output: "tier2Repos", one entry per
+                     path { path, snapshotHash, snapshotHashAfter, targetChanged, results },
+                     so each repo's evidence is stale-checked with its own
+                     "--cd <path> --check-stale <hash>". Same opt-in as --exec; with --compact
+                     the command logs continue the command-N numbering after --exec's.
+--timeout <seconds>  Per --exec/--exec-in command timeout. 0 means unlimited.
                      Default: 1800 (matches the dispatchers' own default).
 --env-mode <mode>    "filtered" (default) or "inherit", same semantics as
                      codex-dispatch.mjs/opencode-dispatch.mjs.
@@ -89,6 +125,8 @@ Usage:
                      before citing old Tier 2 evidence as EXECUTED basis for a
                      live review. When given, no other tier runs; this flag is
                      standalone.
+--fail-on-command-error  Exit 4 (after writing the result) when any --exec / --exec-in command
+                     exited non-zero or timed out. Default: exit 0 whatever the commands did.
 --compact            Keep the result small enough to inline in a task packet:
                      each command's full stdout/stderr, and the Tier 1 git diff,
                      go to files under --log-dir, and the JSON keeps byte counts,
@@ -107,6 +145,8 @@ Usage:
 --repo <path>        Another repository the task packet reviews by path (may
                      repeat). Gets the same freshness record as --cd in "repos";
                      it is not part of snapshotHash and runs no Tier 2 command.
+                     With --host, its snapshotHash is also recorded in run.json (extraRepos) and
+                     review-run warns on stderr when it changes during the review.
 --source-snapshot <folder>=<repo>@<ref>
                      A plain export of another repository (git archive, a
                      downloaded tarball) the packet reviews (may repeat). It has
@@ -133,7 +173,44 @@ Usage:
                      watchedChangedUpstream field when no --watch-file lies in
                      that repository, and [] when its files have no upstream
                      changes.
+--host <host>        Host preflight: claude-code or codex. Needs --cd, --run-dir and --seats.
+                     Every actor is checked against the host's support table (host-support.mjs):
+                     an unsupported route is refused before run.json is written, with no override;
+                     a trial route is accepted only with --allow-trial and recorded in run.json.
+                     Checks the seats file, that this skill ships every dispatcher the
+                     seats need, and that "claude -p --help" lists every flag the Claude
+                     dispatcher uses (a read-only help call, no model call); then writes
+                     <run-dir>/run.json with the target fingerprint. Refuses to overwrite
+                     an existing run.json.
+--run-dir <dir>      Run directory that receives run.json (--host only).
+--seats <file>       JSON: {seatA, seatB, auditor, verifiers?, sourceDirs?, flags?} using the
+                     run descriptor's actor field names (--host only). flags defaults to
+                     {auditDepth: "light", falsification: false, mode: "adversarial"}.
+                     Each actor needs provider, runtime, model and transport ("native" or
+                     "cli"); effort may be null or omitted. role, sessionId, resultPath,
+                     worktreePath and outputDir are filled in.
+                     The model ids and effort in the example are placeholders: use your saved
+                     models (see review-config.mjs show).
+                     Example seats file:
+${SAMPLE_SEATS}
+--matched-tools <t>  Text naming the agent tools the orchestrator matched; recorded in run.json.
+--probe-dispatch     Print the one paid probe dispatch this check would run (cheapest model,
+                     lean flags). Nothing is run, and nothing is spent, without --yes-paid.
+--probe-claude-session  A Claude CLI seat on a Codex host is usable only if its session survives the call, which depends on how
+                     Codex was launched. This runs two small Claude Haiku calls (remember a nonce, then resume the session and
+                     recall it) and records the result in run.json; it needs --yes-paid and refuses the run when it fails.
+--yes-paid           Allow a paid check: with --probe-dispatch or --probe-claude-session, run the probe and record its cost under
+                     <run-dir>/probe/; with a Codex seat whose "codex doctor" sandbox row failed, run one small live "codex exec"
+                     (about 13k to 23k tokens) to see whether Codex can still run commands. Without it nothing paid runs.
+--skip-codex-doctor  With a Codex seat: do not run "codex doctor". By default it runs (local, free); when its sandbox row is failed
+                     the live probe needs --yes-paid, and the host preflight is refused when that probe fails, because every command a Codex seat starts is then rejected and the seat
+                     returns a "No findings" file without reviewing.
 -h, --help           Print this message and exit 0.
+
+With --out the JSON goes to the file and one summary line (hash, exit codes, targetChanged) to stdout.
+Keys of tier2 (and of each tier2Repos entry): snapshotHash, snapshotHashAfter, targetChanged, results[] (command,
+startedAt, finishedAt, durationMs, exitCode, timedOut, touchedFiles, stdout, stderr; with --compact each stream is
+{bytes, sha256, lineCount, tail, summary, matches, matchesTruncated, log}).
 
 Output (normal run, no --check-stale): { tier1: {...}, tier2: {...} | null,
 snapshotHash: string }. For a git repository the hash covers only the --cd
@@ -169,6 +246,7 @@ function parseArgs(argv) {
   const args = {
     cd: null,
     exec: [],
+    execIn: [],
     timeout: DEFAULT_TIMEOUT_S,
     envMode: 'filtered',
     envPassthrough: [],
@@ -181,6 +259,15 @@ function parseArgs(argv) {
     fetch: false,
     watchFiles: [],
     sourceSnapshots: [],
+    host: null,
+    runDir: null,
+    seats: null,
+    matchedTools: null,
+    probeDispatch: false,
+    yesPaid: false,
+    allowTrial: false,
+    skipCodexDoctor: false,
+    probeClaudeSession: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -191,7 +278,10 @@ function parseArgs(argv) {
     };
     if (tok === '--cd') args.cd = takeValue();
     else if (tok === '--exec') args.exec.push(takeValue());
-    else if (tok === '--timeout') {
+    else if (tok === '--exec-in') {
+      const dir = takeValue();
+      args.execIn.push({ dir, command: takeValue() });
+    } else if (tok === '--timeout') {
       const v = takeValue();
       if (!/^[0-9]+$/.test(v)) throw new RelayError('--timeout must be a whole number of seconds, 0 for unlimited');
       args.timeout = Number(v);
@@ -200,6 +290,7 @@ function parseArgs(argv) {
     else if (tok === '--out') args.out = takeValue();
     else if (tok === '--check-stale') args.checkStale = takeValue();
     else if (tok === '--compact') args.compact = true;
+    else if (tok === '--fail-on-command-error') args.failOnCommandError = true;
     else if (tok === '--tail') {
       const v = takeValue();
       if (!/^[0-9]+$/.test(v)) throw new RelayError('--tail must be a whole number of lines');
@@ -213,12 +304,29 @@ function parseArgs(argv) {
       if (!m || m[2].trim() === '') throw new RelayError(`--source-snapshot "${v}" must look like <folder>=<repo>@<commit or tag>, with no spaces in the ref, for example exports/svc=org/svc@b45981e`);
       args.sourceSnapshots.push({ dir: m[1], repo: m[2], ref: m[3] });
     }
+    else if (tok === '--host') args.host = takeValue();
+    else if (tok === '--run-dir') args.runDir = takeValue();
+    else if (tok === '--seats') args.seats = takeValue();
+    else if (tok === '--matched-tools') args.matchedTools = takeValue();
+    else if (tok === '--probe-dispatch') args.probeDispatch = true;
+    else if (tok === '--yes-paid') args.yesPaid = true;
+    else if (tok === '--allow-trial') args.allowTrial = true;
+    else if (tok === '--skip-codex-doctor') args.skipCodexDoctor = true;
+    else if (tok === '--probe-claude-session') args.probeClaudeSession = true;
     else if (tok === '--fetch') args.fetch = true;
     else if (tok === '--watch-file') args.watchFiles.push(takeValue());
     else if (tok === '-h' || tok === '--help') printUsageAndExit(0);
     else throw new RelayError(`unrecognized argument: ${tok}`);
   }
   if (!args.cd) throw new RelayError('--cd <path> is required');
+  if (args.host === null) {
+    const stray = ['runDir', 'seats', 'matchedTools'].filter((k) => args[k] !== null).concat(args.probeDispatch ? ['probeDispatch'] : [], args.yesPaid ? ['yesPaid'] : [], args.allowTrial ? ['allowTrial'] : [], args.skipCodexDoctor ? ['skipCodexDoctor'] : [], args.probeClaudeSession ? ['probeClaudeSession'] : []);
+    if (stray.length > 0) throw new RelayError('--run-dir, --seats, --matched-tools, --probe-dispatch, --probe-claude-session, --yes-paid, --allow-trial and --skip-codex-doctor are only accepted with --host');
+  } else {
+    if (args.execIn.length > 0 || args.exec.length > 0) throw new RelayError('--exec and --exec-in are not used with --host; run them in a separate preflight call without --host');
+    if (!HOSTS.includes(args.host)) throw new RelayError(`--host must be one of ${HOSTS.join(', ')}, got "${args.host}"`);
+    if (!args.runDir || !args.seats) throw new RelayError('--host requires --run-dir and --seats');
+  }
   if (args.compact && !args.logDir) {
     if (!args.out) throw new RelayError('--compact needs --log-dir (or --out, which defaults it to "<--out>.logs")');
     args.logDir = `${args.out}.logs`;
@@ -664,6 +772,30 @@ async function checkStale(cd, snapshotHash) {
   return { stale: current !== snapshotHash, currentSnapshotHash: current };
 }
 
+// One stdout line for a run written to --out, so the hash and exit codes can be read without opening the JSON.
+// "0 (152 passed)": the exit code, then the last summary line the command printed when the compact output kept one.
+function commandOutcome(r) {
+  const code = r.timedOut ? 'timeout' : r.exitCode;
+  const line = Array.isArray(r.stdout?.summary) ? r.stdout.summary.at(-1) : null;
+  return typeof line === 'string' && line.trim() !== '' ? `${code} (${line.trim().slice(0, 50)})` : String(code);
+}
+
+export function summaryLine(result, out) {
+  const tiers = [['tier2', result.tier2], ...(result.tier2Repos ?? []).map((r) => [`tier2Repos ${r.path}`, r])]
+    .filter(([, t]) => t)
+    .map(([label, t]) => `${label}: ${t.results.length} command(s), exit ${t.results.map(commandOutcome).join(', ')}, targetChanged ${t.targetChanged}`);
+  const changed = Array.isArray(result.tier1?.changedFiles) ? result.tier1.changedFiles : null;
+  const untracked = String(result.tier1?.status ?? '').split(/\r?\n/).filter((l) => l.startsWith('?? ')).map((l) => l.slice(3).trim());
+  // git status shows a new folder as one "?? dir/" entry; the count is of files, like the changed-file count.
+  // A name git quotes ("sp ace.txt") is compared without its quotes; an entry that still matches no file counts as one.
+  const bare = untracked.map((u) => u.replace(/^"(.*)"$/, '$1'));
+  const untrackedFiles = changed === null ? untracked.length : bare.reduce((n, u) => n + Math.max(1, changed.filter((f) => (u.endsWith('/') ? f.startsWith(u) : f === u)).length), 0);
+  const more = untracked.length > 5 ? ', +' + (untracked.length - 5) + ' more' : '';
+  const untrackedText = untracked.length > 0 ? ' (' + untrackedFiles + ' untracked: ' + untracked.slice(0, 5).join(', ') + more + ')' : '';
+  const changedText = changed === null ? '' : '; ' + changed.length + ' changed file(s)' + untrackedText;
+  return `preflight: wrote ${out}; snapshotHash ${result.snapshotHash}${changedText}${tiers.length > 0 ? `; ${tiers.join('; ')}` : '; no Tier 2 command'}`;
+}
+
 async function run(args) {
   const cdAbs = path.resolve(args.cd);
   let cdStat;
@@ -676,6 +808,11 @@ async function run(args) {
     throw new RelayError(`--cd "${cdAbs}" is not a directory`);
   }
 
+  for (const { dir } of args.execIn ?? []) {
+    const abs = path.resolve(dir);
+    const st = await stat(abs).catch((err) => { throw new RelayError(`--exec-in "${abs}" does not exist or is not accessible: ${err.message}`); });
+    if (!st.isDirectory()) throw new RelayError(`--exec-in "${abs}" is not a directory`);
+  }
   const clearedLogs = args.compact ? await clearOwnLogs(args.logDir) : [];
   // A plain folder is hashed file by file; do it once for Tier 1 and the snapshot hash.
   const inventory = (await isGitRepo(cdAbs)) ? null : await hashInventory(cdAbs);
@@ -699,6 +836,37 @@ async function run(args) {
     if (args.compact) tier2 = await compactTier2(tier2, args);
   }
 
+  // Each --exec-in directory is its own target: own snapshotHash, own touchedFiles, own staleness check.
+  const tier2Repos = [];
+  const groups = new Map();
+  for (const { dir, command } of args.execIn ?? []) {
+    const abs = path.resolve(dir);
+    if (!groups.has(abs)) groups.set(abs, []);
+    groups.get(abs).push(command);
+  }
+  let logOffset = tier2?.results.length ?? 0;
+  for (const [abs, commands] of groups) {
+    let st;
+    try {
+      st = await stat(abs);
+    } catch (err) {
+      throw new RelayError(`--exec-in "${abs}" does not exist or is not accessible: ${err.message}`);
+    }
+    if (!st.isDirectory()) throw new RelayError(`--exec-in "${abs}" is not a directory`);
+    let repoTier2 = await runTier2({ cd: abs, commands, timeout: args.timeout, envMode: args.envMode, envPassthrough: args.envPassthrough });
+    if (args.compact) repoTier2 = await compactTier2(repoTier2, args, logOffset);
+    logOffset += commands.length;
+    tier2Repos.push({ path: abs, ...repoTier2 });
+  }
+
+  let execInChangedTarget = false;
+  if (tier2Repos.length > 0) {
+    const reviewedHash = tier2 ? tier2.snapshotHashAfter : snapshotHash;
+    execInChangedTarget = (await computeSnapshotHash(cdAbs)) !== reviewedHash;
+    if (execInChangedTarget) {
+      process.stderr.write(`preflight: WARNING: an --exec-in command changed files under --cd ${cdAbs}; its snapshotHash is stale (--check-stale will say so). Rerun, and keep --exec-in commands inside their own folder.${String.fromCharCode(10)}`);
+    }
+  }
   const repos = [await repoFreshness(cdAbs, { role: 'cd', fetch: args.fetch })];
   for (const repo of args.repos ?? []) repos.push(await repoFreshness(repo, { role: 'repo', fetch: args.fetch }));
   const outside = await watchUpstreamChanges(repos, args.watchFiles ?? []);
@@ -712,6 +880,8 @@ async function run(args) {
   }
 
   const result = { tier1: args.compact ? await compactTier1(tier1, args) : tier1, tier2, snapshotHash, repos };
+  if (tier2Repos.length > 0) result.tier2Repos = tier2Repos;
+  if (execInChangedTarget) result.execInChangedTarget = true;
   if (outside.length > 0) result.watchFilesOutsideRepos = outside;
   if ((args.sourceSnapshots ?? []).length > 0) result.sourceSnapshots = await recordSourceSnapshots(args.sourceSnapshots);
   if (clearedLogs.length > 0) result.clearedEarlierLogs = clearedLogs.sort();
@@ -791,13 +961,13 @@ function streamSummary(text, tailLines) {
 }
 
 // Full streams go to --log-dir; the JSON keeps only what a reader needs to judge and verify them.
-async function compactTier2(tier2, { logDir, tail }) {
+async function compactTier2(tier2, { logDir, tail }, logOffset = 0) {
   const dir = path.resolve(logDir);
   await mkdir(dir, { recursive: true });
   const results = [];
   for (const [i, r] of tier2.results.entries()) {
-    const stdoutLog = path.join(dir, `command-${i + 1}.stdout.log`);
-    const stderrLog = path.join(dir, `command-${i + 1}.stderr.log`);
+    const stdoutLog = path.join(dir, `command-${logOffset + i + 1}.stdout.log`);
+    const stderrLog = path.join(dir, `command-${logOffset + i + 1}.stderr.log`);
     await writeFile(stdoutLog, r.stdout, 'utf8');
     await writeFile(stderrLog, r.stderr, 'utf8');
     const { stdout, stderr, ...rest } = r;
@@ -808,6 +978,339 @@ async function compactTier2(tier2, { logDir, tail }) {
     });
   }
   return { snapshotHash: tier2.snapshotHash, snapshotHashAfter: tier2.snapshotHashAfter, targetChanged: tier2.targetChanged, compact: true, results };
+}
+
+// Both families present and no usable --host is ambiguous; inherited env markers only add a hint to the error.
+function resolveHost({ toolsClaudeCode = false, toolsCodex = false, hostFlag = null, interactive = false, env = process.env } = {}) {
+  if (hostFlag !== null && hostFlag !== undefined && !HOSTS.includes(hostFlag)) {
+    throw new RelayError(`--host must be one of ${HOSTS.join(', ')}, got "${hostFlag}"`);
+  }
+  const contradicts = (hostFlag === 'codex' && toolsClaudeCode && !toolsCodex) || (hostFlag === 'claude-code' && toolsCodex && !toolsClaudeCode);
+  if (hostFlag && !contradicts) return hostFlag;
+  if (toolsClaudeCode && !toolsCodex) return 'claude-code';
+  if (toolsCodex && !toolsClaudeCode) return 'codex';
+  if (interactive) return 'ambiguous';
+  const hints = [env.CODEX_THREAD_ID ? 'CODEX_THREAD_ID is set' : null, env.CLAUDECODE ? 'CLAUDECODE is set' : null].filter(Boolean);
+  const why = toolsClaudeCode && toolsCodex ? 'both a Claude Code and a Codex agent tool family are present' : 'no agent tool family was recognised';
+  throw new RelayError(`the host is ambiguous (${why}); pass --host claude-code or --host codex${hints.length > 0 ? ` (hint only, never decisive: ${hints.join(', ')})` : ''}`);
+}
+
+const DISPATCHER_FOR_RUNTIME = { claude: 'claude-dispatch.mjs', codex: 'codex-dispatch.mjs', opencode: 'opencode-dispatch.mjs' };
+
+function seatRuntimes(seats) {
+  return new Set([seats.seatA, seats.seatB, seats.auditor, ...(Array.isArray(seats.verifiers) ? seats.verifiers : [])].map((actor) => actor?.runtime));
+}
+
+function missingDispatchers(seats, scriptsDir) {
+  const needed = [...seatRuntimes(seats)].map((runtime) => DISPATCHER_FOR_RUNTIME[runtime]).filter(Boolean);
+  return needed.filter((name) => !existsSync(path.join(scriptsDir, name)));
+}
+
+function leanFlagGaps(helpText) {
+  return LEAN_FLAGS.filter((flag) => !new RegExp(`(?<![A-Za-z0-9-])${flag}(?![A-Za-z0-9-])`).test(helpText));
+}
+
+function claudeHelp() {
+  return new Promise((resolve, reject) => {
+    const child = spawnCli('claude', ['-p', '--help'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let text = '';
+    const timer = setTimeout(() => { killTree(child); reject(new RelayError(`"claude -p --help" did not finish within ${HELP_TIMEOUT_MS / 1000} s`)); }, HELP_TIMEOUT_MS);
+    child.stdout.on('data', (d) => { text += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { text += d.toString('utf8'); });
+    child.on('error', (err) => { clearTimeout(timer); reject(new RelayError(`could not start "claude -p --help": ${err.message}`)); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, text }); });
+  });
+}
+
+const CODEX_DOCTOR_TIMEOUT_MS = 60000;
+
+// "codex doctor" prints one row per check; a failed sandbox row means exec_command is rejected in every read-only seat.
+export function codexSandboxFailure(doctorText) {
+  const row = /^\s*\u2717\s+sandbox\b.*$/m.exec(doctorText);
+  return row ? row[0].trim() : null;
+}
+
+function codexDoctor() {
+  return new Promise((resolve) => {
+    let text = '';
+    let child;
+    try {
+      child = spawnCli('codex', ['doctor', '--summary', '--no-color'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ ran: false, text: err.message });
+      return;
+    }
+    const timer = setTimeout(() => { killTree(child); resolve({ ran: false, text: `did not finish within ${CODEX_DOCTOR_TIMEOUT_MS / 1000} s` }); }, CODEX_DOCTOR_TIMEOUT_MS);
+    child.stdout.on('data', (d) => { text += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { text += d.toString('utf8'); });
+    child.on('error', (err) => { clearTimeout(timer); resolve({ ran: false, text: err.message }); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      // A failed check makes doctor exit 1; that output is still read, and only a non-zero exit with no failed sandbox row is "skipped".
+      if (code !== 0 && !codexSandboxFailure(text)) resolve({ ran: false, text: `"codex doctor" exited ${code}${text.trim() === '' ? '' : `: ${text.trim().split(/\r?\n/).slice(-1)[0].slice(0, 100)}`}` });
+      else if (text.trim() === '') resolve({ ran: false, text: '"codex doctor" printed nothing' });
+      else resolve({ ran: true, text });
+    });
+  });
+}
+
+const CODEX_PROBE_TIMEOUT_MS = 120000;
+const EXEC_FAILED_RE = /exec_command failed|failed to create unified exec process|CreateProcess \{/gi;
+
+// "codex doctor" keeps printing an earlier sandbox failure after it is repaired, so a failed row is confirmed by one small
+// read-only "codex exec" that must read a nonce back from a temp file (about 13k tokens).
+export async function codexSandboxProbe() {
+  const dir = await mkdtemp(path.join(tmpdir(), 'codex-sandbox-probe-'));
+  const nonce = `probe-${randomBytes(6).toString('hex')}`;
+  try {
+    await writeFile(path.join(dir, 'codex-probe.txt'), nonce, 'utf8');
+    const prompt = `Run the command: ${process.platform === 'win32' ? 'type' : 'cat'} codex-probe.txt . Reply with only the file content.`;
+    return await new Promise((resolve) => {
+      let text = '';
+      const child = spawnCli('codex', ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '-C', dir, '-'], { env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+      const timer = setTimeout(() => { killTree(child); resolve({ ok: false, text: `did not finish within ${CODEX_PROBE_TIMEOUT_MS / 1000} s` }); }, CODEX_PROBE_TIMEOUT_MS);
+      child.stdout.on('data', (d) => { text += d.toString('utf8'); });
+      child.stderr.on('data', (d) => { text += d.toString('utf8'); });
+      child.on('error', (err) => { clearTimeout(timer); resolve({ ok: false, text: err.message }); });
+      child.on('close', () => { clearTimeout(timer); resolve({ ok: text.includes(nonce), text }); });
+      child.stdin.on('error', () => {});
+      child.stdin.end(prompt);
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function computeFingerprint(cd) {
+  const snapshotHash = await computeSnapshotHash(cd);
+  if (!(await isGitRepo(cd))) return { head: null, diffSha256: null, untrackedSha256: null, snapshotHash };
+  const head = (await runCapture('git', ['rev-parse', 'HEAD'], cd)).stdout.toString('utf8').trim();
+  const diff = await runCapture('git', ['diff', 'HEAD', '--binary', '--relative', '--', '.'], cd);
+  const untracked = await runCapture('git', ['ls-files', '--others', '--exclude-standard', '-z'], cd);
+  const rels = untracked.stdout.toString('utf8').split('\0').filter((p) => p.length > 0 && !p.endsWith('/')).sort();
+  const lines = [];
+  for (const rel of rels) lines.push(`${rel}:${await sha256OfFile(path.join(cd, rel))}`);
+  return { head, diffSha256: sha256(diff.stdout), untrackedSha256: sha256(Buffer.from(lines.join('\n'))), snapshotHash };
+}
+
+async function readSeatsFile(file) {
+  let data;
+  try {
+    let text = await readFile(path.resolve(file), 'utf8');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    data = JSON.parse(text);
+  } catch (err) {
+    throw new RelayError(`--seats ${file} cannot be read as JSON: ${err.message}`);
+  }
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new RelayError(`--seats ${file} must hold one JSON object`);
+  for (const key of ['seatA', 'seatB', 'auditor']) {
+    if (data[key] === null || typeof data[key] !== 'object' || Array.isArray(data[key])) throw new RelayError(`--seats ${file}: "${key}" must be an object`);
+  }
+  if (data.verifiers !== undefined && !Array.isArray(data.verifiers)) throw new RelayError(`--seats ${file}: "verifiers" must be an array`);
+  return data;
+}
+
+// A Claude CLI or OpenCode seat builds a worktree that fingerprints and copies the whole repository holding --cd, so a run
+// folder there (not git-ignored) breaks the Phase 2 reuse and is copied into the seat's snapshot. Returns that folder, or null.
+async function runFolderInRepo(cdAbs, runDir, seats) {
+  const actors = [seats.seatA, seats.seatB, seats.auditor, ...(Array.isArray(seats.verifiers) ? seats.verifiers : [])];
+  const opencode = actors.some((a) => a?.runtime === 'opencode');
+  if (!opencode && !actors.some((a) => a?.runtime === 'claude' && a?.transport === 'cli')) return null;
+  if (!(await isGitRepo(cdAbs))) return null;
+  for (const dir of [runDir, `${runDir}-audit-input`, ...(opencode ? [`${runDir}-worktree`] : [])]) {
+    // Exit 0: ignored; 1: inside the repository and not ignored; 128: outside it. A file path inside the folder is probed, not the folder
+    // (it need not exist): with CRLF line endings and a blank line in .gitignore, git reports every folder path as ignored.
+    if ((await runCapture('git', ['check-ignore', '-q', '--', path.join(dir, 'run.json')], cdAbs)).code === 1) return dir;
+  }
+  return null;
+}
+
+function actorWithDefaults(actor, role, outputDir) {
+  if (actor === null || typeof actor !== 'object' || Array.isArray(actor)) return actor;
+  return { role, effort: null, sessionId: null, resultPath: null, worktreePath: null, outputDir, ...actor };
+}
+
+function planProbe({ cdAbs, runDir }) {
+  const dir = path.join(runDir, 'probe');
+  const argv = ['--brief', path.join(dir, 'brief.txt'), '--cd', cdAbs, '--model', PROBE_MODEL, '--out-dir', path.join(dir, 'out'), '--no-isolate', '--timeout', '120'];
+  const plan = [`node ${path.join(SCRIPTS_DIR, 'claude-dispatch.mjs')} ${argv.join(' ')}`];
+  return { plan, argv, dir };
+}
+
+// Two small Claude calls from this launch path: remember a nonce, then resume the session and recall it. A session that was not
+// persisted fails the second call with "No conversation found", which is exactly what a seat's Phase 2 resume would hit.
+async function runClaudeSessionProbe({ cdAbs, runDir }) {
+  const dir = path.join(runDir, 'probe-session');
+  const nonce = `nonce${createHash('sha256').update(String(Date.now()) + String(process.pid)).digest('hex').slice(0, 10)}`;
+  const call = async (name, text, extra) => {
+    const folder = path.join(dir, name);
+    await mkdir(path.join(folder, 'out'), { recursive: true });
+    await writeFile(path.join(folder, 'brief.txt'), text, 'utf8');
+    const argv = [path.join(SCRIPTS_DIR, 'claude-dispatch.mjs'), '--brief', path.join(folder, 'brief.txt'), '--cd', cdAbs, '--model', PROBE_MODEL, '--out-dir', path.join(folder, 'out'), '--no-isolate', '--timeout', '180', ...extra];
+    const child = await new Promise((resolve) => {
+      const proc = spawn(process.execPath, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let err = '';
+      proc.stderr.on('data', (d) => { err += d.toString('utf8'); });
+      proc.stdout.resume();
+      proc.on('close', (code) => resolve({ code, err }));
+    });
+    let record = null;
+    try {
+      record = JSON.parse(await readFile(path.join(folder, 'result.json'), 'utf8'));
+    } catch {
+      record = null;
+    }
+    return { child, record };
+  };
+  const first = await call('remember', `Remember this nonce: ${nonce}. Reply with only the word stored. Do not use any tool.\n`, []);
+  if (first.child.code !== 0 || first.record?.status !== 'completed' || !first.record.sessionId) {
+    return { ok: false, detail: `the first call did not complete (exit ${first.child.code}): ${(first.record?.error ?? first.child.err).trim().slice(0, 300)}` };
+  }
+  const second = await call('recall', 'What nonce did I ask you to remember? Reply with only the nonce. Do not use any tool.\n', ['--session', first.record.sessionId]);
+  const answer = String(second.record?.finalMessage ?? '');
+  if (second.child.code !== 0 || second.record?.status !== 'completed' || !answer.includes(nonce)) {
+    return { ok: false, sessionId: first.record.sessionId, detail: `the session ${first.record.sessionId} was not resumable: ${(second.record?.error ?? second.child.err ?? answer).trim().slice(0, 300) || 'no answer'}` };
+  }
+  return { ok: true, sessionId: first.record.sessionId, at: new Date().toISOString() };
+}
+
+async function hostPreflight(args) {
+  const host = resolveHost({ hostFlag: args.host, interactive: false });
+  const skill = path.basename(path.dirname(SCRIPTS_DIR));
+  if (skill !== 'cross-review' && skill !== 'pair-review') throw new RelayError(`this script's skill folder "${skill}" is not cross-review or pair-review`);
+  const cdAbs = path.resolve(args.cd);
+  const cdStat = await stat(cdAbs).catch((err) => { throw new RelayError(`--cd "${cdAbs}" does not exist or is not accessible: ${err.message}`); });
+  if (!cdStat.isDirectory()) throw new RelayError(`--cd "${cdAbs}" is not a directory`);
+  const runDir = path.resolve(args.runDir);
+  const runFile = path.join(runDir, 'run.json');
+  if (await access(runFile).then(() => true, () => false)) throw new RelayError(`${runFile} already exists; refusing to overwrite a run descriptor`);
+  const seats = await readSeatsFile(args.seats);
+  const missing = missingDispatchers(seats, SCRIPTS_DIR);
+  if (missing.length > 0) throw new RelayError(`host ${host} refused: ${skill}'s scripts folder lacks ${missing.join(', ')}`);
+  const inRepo = await runFolderInRepo(cdAbs, runDir, seats);
+  if (inRepo) throw new RelayError(`host ${host} refused: "${inRepo}" is inside the git repository that holds --cd and is not git-ignored; a Claude CLI or OpenCode seat snapshots that whole repository, so the run's own files would break the Phase 2 resume and be copied into the seat's snapshot. Put the run folder (and the evidence and work folders) outside the repository, or in a folder the repository ignores; nothing was run`);
+  const usesClaude = seatRuntimes(seats).has('claude');
+  if (usesClaude) {
+    const help = await claudeHelp();
+    if (help.code !== 0) throw new RelayError(`"claude -p --help" exited ${help.code}: ${help.text.trim().slice(0, 300)}`);
+    const gaps = leanFlagGaps(help.text);
+    if (gaps.length > 0) throw new RelayError(`"claude -p --help" does not list: ${gaps.join(', ')}; update the Claude CLI before running a review through claude-dispatch`);
+  }
+  let codexDoctorStatus = 'not needed';
+  let doctorFailure = null;
+  if (seatRuntimes(seats).has('codex') && args.skipCodexDoctor) codexDoctorStatus = 'skipped (--skip-codex-doctor)';
+  else if (seatRuntimes(seats).has('codex')) {
+    const doctor = await codexDoctor();
+    codexDoctorStatus = doctor.ran ? 'ok' : `skipped (${doctor.text.trim().slice(0, 120)})`;
+    doctorFailure = doctor.ran ? codexSandboxFailure(doctor.text) : null;
+  }
+  const fingerprint = await computeFingerprint(cdAbs);
+  const extraRepos = [];
+  for (const repo of args.repos) {
+    const abs = path.resolve(repo);
+    const st = await stat(abs).catch((err) => { throw new RelayError(`--repo "${abs}" does not exist or is not accessible: ${err.message}`); });
+    if (!st.isDirectory()) throw new RelayError(`--repo "${abs}" is not a directory`);
+    // Windows paths compare without case: "c:\repo" given as --repo is the --cd target itself.
+    const same = process.platform === 'win32' ? abs.toLowerCase() === cdAbs.toLowerCase() : abs === cdAbs;
+    if (!same) extraRepos.push({ dir: abs, snapshotHash: await computeSnapshotHash(abs) });
+  }
+  const descriptor = {
+    skill,
+    skillDir: path.dirname(SCRIPTS_DIR),
+    targetDir: cdAbs,
+    host,
+    flags: { auditDepth: 'light', falsification: false, mode: 'adversarial', ...(seats.flags ?? {}) },
+    fingerprint,
+    ...(seats.sourceDirs ? { sourceDirs: seats.sourceDirs } : {}),
+    ...(extraRepos.length > 0 ? { extraRepos } : {}),
+    ...(args.matchedTools !== null ? { matchedTools: args.matchedTools } : {}),
+    seatA: actorWithDefaults(seats.seatA, 'A', path.join(runDir, 'phase1', 'seat-A')),
+    seatB: actorWithDefaults(seats.seatB, 'B', path.join(runDir, 'phase1', 'seat-B')),
+    auditor: actorWithDefaults(seats.auditor, 'auditor', `${runDir}-audit-input`),
+    verifiers: (seats.verifiers ?? []).map((v, i) => actorWithDefaults(v, `verifier-${i + 1}`, path.join(runDir, 'phase3', `verifier-${i + 1}`))),
+  };
+  const support = evaluateSupport(descriptor);
+  const refused = support.filter((row) => row.status === 'unsupported');
+  if (refused.length > 0) {
+    throw new RelayError(`host ${host} refused: ${refused.map((row) => `actor "${row.role}" (${row.runtime}, ${row.transport}): ${row.reason}`).join('; ')}`);
+  }
+  const needsProbe = support.filter((row) => row.status === 'probe');
+  let probeEvidence = null;
+  if (needsProbe.length > 0) {
+    if (!args.probeClaudeSession) {
+      throw new RelayError(`host ${host}: ${needsProbe.map((row) => `actor "${row.role}" (${row.runtime}, ${row.transport}): ${row.reason}`).join('; ')}`);
+    }
+    if (!args.yesPaid) {
+      throw new RelayError('--probe-claude-session would make two small paid Claude Haiku calls (remember a nonce, resume and recall it); nothing was run. Add --yes-paid to run it.');
+    }
+    await mkdir(runDir, { recursive: true });
+    probeEvidence = await runClaudeSessionProbe({ cdAbs, runDir });
+    if (!probeEvidence.ok) {
+      throw new RelayError(`host ${host} refused: a Claude CLI seat cannot be resumed from this launch path: ${probeEvidence.detail}`);
+    }
+    for (const row of needsProbe) {
+      row.status = 'trial';
+      row.probe = { ok: true, sessionId: probeEvidence.sessionId, at: probeEvidence.at };
+    }
+  }
+  const trial = support.filter((row) => row.status === 'trial');
+  if (trial.length > 0 && !args.allowTrial) {
+    throw new RelayError(`host ${host}: ${trial.map((row) => `actor "${row.role}" (${row.runtime}, ${row.transport}) is a trial route: ${row.reason}`).join('; ')}; pass --allow-trial to write run.json for a trial`);
+  }
+  if (doctorFailure) {
+    if (!args.yesPaid) {
+      throw new RelayError(`host ${host}: "codex doctor" reports a failed sandbox (${doctorFailure}). One live read-only probe (a small paid "codex exec", about 13k to 23k tokens) shows whether Codex can still run commands; nothing was run. Add --yes-paid to run it, or --skip-codex-doctor to skip this check.`);
+    }
+    const probe = await codexSandboxProbe();
+    if (!probe.ok) throw new RelayError(`host ${host} refused: "codex doctor" reports a failed sandbox (${doctorFailure}) and a live read-only probe could not run a command (${probe.text.trim().split(/\r?\n/).slice(-1)[0].slice(0, 160)}); a Codex seat would return "No findings" without reviewing. Repair or reinstall the Codex CLI (run "codex doctor"), or pass --skip-codex-doctor to run anyway`);
+    const failed = (probe.text.match(EXEC_FAILED_RE) ?? []).length;
+    codexDoctorStatus = failed > 0
+      ? `unstable (doctor sandbox row failed; the probe ran a command but logged ${failed} exec_command failure(s))`
+      : 'ok (doctor sandbox row failed, a live read-only probe ran a command)';
+    if (failed > 0) process.stderr.write(`preflight: WARNING: the Codex sandbox is intermittent (${failed} exec_command failure(s) during the probe even though it passed); a long Codex review can still lose commands. Phase 1 fails a Codex seat that returns "No findings" after failed commands.${String.fromCharCode(10)}`);
+  }
+  descriptor.support = support.map(({ role, runtime, transport, status, probe }) => ({ role, runtime, transport, status, ...(probe ? { probe } : {}) }));
+  let written;
+  try {
+    written = await writeRunDescriptor(runDir, descriptor);
+  } catch (err) {
+    if (err instanceof RunDescriptorError) throw new RelayError(err.message);
+    throw err;
+  }
+  if (!existsSync(path.join(runDir, 'task-packet.md'))) {
+    process.stderr.write(`preflight: WARNING: ${path.join(runDir, 'task-packet.md')} not found; run.json is written, so write the packet there before "review-run phase1 --start" (no need to rerun this command)${String.fromCharCode(10)}`);
+  }
+  const result = { host, skill, runJson: written, fingerprint, leanFlags: usesClaude ? 'ok' : 'not needed', codexDoctor: codexDoctorStatus, hostStatus: hostStatusOf(support), matchedTools: args.matchedTools };
+  if (args.probeDispatch) {
+    const probe = planProbe({ cdAbs, runDir });
+    result.probe = { ran: false, wouldRun: probe.plan };
+    if (args.yesPaid) result.probe = { ...result.probe, ...(await executeProbe(probe)) };
+  }
+  return result;
+}
+
+async function executeProbe({ argv, dir }) {
+  await mkdir(path.join(dir, 'out'), { recursive: true });
+  await writeFile(path.join(dir, 'brief.txt'), 'Reply with the single word ok.\n', 'utf8');
+  const child = await new Promise((resolve) => {
+    const proc = spawn(process.execPath, [path.join(SCRIPTS_DIR, 'claude-dispatch.mjs'), ...argv], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    proc.stderr.on('data', (d) => { err += d.toString('utf8'); });
+    proc.stdout.resume();
+    proc.on('close', (code) => resolve({ code, err }));
+  });
+  let record = null;
+  try {
+    record = JSON.parse(await readFile(path.join(dir, 'result.json'), 'utf8'));
+  } catch {
+    record = null;
+  }
+  if (child.code !== 0 || record?.status !== 'completed') {
+    throw new RelayError(`the paid probe dispatch failed (exit ${child.code}): ${(record?.error ?? child.err).trim().slice(0, 300)}`);
+  }
+  const cost = { costUsd: record.costUsd ?? null, usage: record.usage ?? null, modelResolved: record.modelResolved ?? null, status: record.status };
+  await writeFile(path.join(dir, 'cost.json'), `${JSON.stringify(cost, null, 2)}\n`, 'utf8');
+  return { ran: true, cost };
 }
 
 async function main() {
@@ -825,6 +1328,11 @@ async function main() {
     throw err;
   }
   try {
+    if (args.host !== null) {
+      process.stdout.write(`${JSON.stringify(await hostPreflight(args), null, 2)}
+`);
+      return;
+    }
     if (args.checkStale !== null) {
       const cdAbs = path.resolve(args.cd);
       const result = await checkStale(cdAbs, args.checkStale);
@@ -844,8 +1352,16 @@ async function main() {
     const text = JSON.stringify(result, null, 2) + '\n';
     if (args.out) {
       await writeFile(args.out, text, 'utf8');
+      process.stdout.write(`${summaryLine(result, args.out)}\n`);
     } else {
       process.stdout.write(text);
+    }
+    if (args.failOnCommandError) {
+      const failed = [result.tier2, ...(result.tier2Repos ?? [])].flatMap((t) => t?.results ?? []).filter((r) => r.timedOut || r.exitCode !== 0);
+      if (failed.length > 0) {
+        process.stderr.write(`preflight: ${failed.length} command(s) failed or timed out: ${failed.map((r) => r.command).join(' | ').slice(0, 300)}\n`);
+        process.exit(4);
+      }
     }
   } catch (err) {
     if (err instanceof RelayError) {
@@ -860,10 +1376,15 @@ const isDirectRun =
   typeof process.argv[1] === 'string' &&
   import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectRun) {
+  // A reader that stops early (head, Select-Object -First) closes the pipe: the rest of the output is dropped, the exit code stays.
+  process.stdout.on('error', (err) => {
+    if (err.code === 'EPIPE') return;
+    throw err;
+  });
   main().catch((err) => {
     process.stderr.write(`preflight.mjs: unexpected failure: ${err.stack || err}\n`);
     process.exit(1);
   });
 }
 
-export { parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };
+export { resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, hostPreflight, parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };

@@ -15,8 +15,9 @@ seats are told to look for in Phase 1.
 Under any profile, a confirmed defect pattern is reported at every location it
 actually occurs, not only the first instance found — once a seat confirms a
 pattern (a lens question above answered "no" with real evidence), it sweeps
-the rest of the target for the same pattern and reports each occurrence as
-its own claim.
+the rest of the target for the same pattern and follows the Class sweep rule
+in review-protocol.md: one claim lists every location, split only when the
+sites differ in severity or in the fix.
 
 Selecting a profile is orchestrator judgment based on the target, stated once
 at dispatch (e.g. in the task packet both seats receive), not asked of the

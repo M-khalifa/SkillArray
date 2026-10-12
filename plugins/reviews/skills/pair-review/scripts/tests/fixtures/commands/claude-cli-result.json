@@ -1,0 +1,76 @@
+{
+  "threadId": null,
+  "sessionId": "02f988dd-4220-4e48-b029-813a674c99c4",
+  "touchedFiles": [],
+  "modelRequested": "opus",
+  "effortRequested": null,
+  "modelResolved": "claude-opus-5-5",
+  "effortResolved": null,
+  "selectionNote": "modelResolved comes from system/init; the stream does not verify effective effort.",
+  "isolated": false,
+  "worktreePath": null,
+  "isolationNote": "non-git target; running in the target directory",
+  "readOnly": {
+    "fileTools": "enforced",
+    "shell": "prompt-only",
+    "cwd": "target"
+  },
+  "host": null,
+  "transport": "cli",
+  "webAccess": false,
+  "usageSemantics": "per-call",
+  "usage": {
+    "input_tokens": 8,
+    "cached_input_tokens": 45122,
+    "cache_write_input_tokens": 10201,
+    "output_tokens": 1881,
+    "reasoning_tokens": null,
+    "estimated_cost_usd": null,
+    "source": "provider",
+    "raw": {
+      "input_tokens": 8,
+      "cache_creation_input_tokens": 10201,
+      "cache_read_input_tokens": 45122,
+      "output_tokens": 1881,
+      "output_tokens_details": {
+        "thinking_tokens": 0
+      },
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 10201,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 2,
+          "output_tokens": 43,
+          "cache_read_input_tokens": 14440,
+          "cache_creation_input_tokens": 1469,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1469
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+    }
+  },
+  "costUsd": 0.1282844,
+  "status": "completed",
+  "startedAt": "2026-10-09T13:41:12.632Z",
+  "finishedAt": "2026-10-09T13:42:58.777Z",
+  "durationMs": 106145,
+  "timeoutS": 240,
+  "envMode": "filtered",
+  "detached": true,
+  "workerPid": 840,
+  "workerStartedAt": "2026-10-09T13:41:12.321Z",
+  "workerStartToken": null
+}

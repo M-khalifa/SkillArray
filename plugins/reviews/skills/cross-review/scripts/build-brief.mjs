@@ -14,12 +14,12 @@ const USAGE = `build-brief.mjs — assemble a brief from the task packet and the
 
 Usage:
   node build-brief.mjs --mode phase1   --packet <task-packet.md> --seat A|B --out <file>
-                       [--output-path <file>] [--repo-only]
+                       [--output-path <file>] [--repo-only] [--channel file|final-message]
   node build-brief.mjs --mode delta    --peer-view <peer-view-for-X.md> --out <file>
-                       [--output-path <file>]
+                       [--output-path <file>] [--channel file|final-message]
   node build-brief.mjs --mode auditor  --packet <task-packet.md> --audit-dir <dir> --target-dir <dir>
                        --run-dir <dir> --out <file> [--output-path <file>] [--source-dir <dir>]...
-                       [--audit-depth light|full]
+                       [--audit-depth light|full] [--channel file|final-message]
   node build-brief.mjs --mode verifier --claim <file> --rebuttal <file> --target-dir <dir> --out <file>
                        [--source-dir <dir>]...
 
@@ -27,6 +27,10 @@ Usage:
                 counts. Use it for a full-tool reader (the harness seat, the auditor); a CLI seat
                 in a read-only sandbox cannot write it, so omit the flag and capture its reply.
 --repo-only     Leave the Web verification rules out (the task disabled web verification).
+--channel       The role's output channel. "file": the reader writes its result to --output-path (a Claude
+                seat or the auditor). "final-message": the dispatcher captures the reply (a Codex or
+                OpenCode seat). Without it the channel follows --output-path, as before; "file" without
+                --output-path, "final-message" with it, and --mode verifier are refused.
 --run-dir       Auditor mode: the review's run directory. The brief is refused when --audit-dir,
                 --out or --output-path is inside it, or when the task packet names it or a path
                 inside it (for example a pre-flight log path), since any of these would point the
@@ -41,7 +45,7 @@ Usage:
                 protocol. Pass the same value to blind-relabel.mjs translate.
 
 All rule text comes from references/review-protocol.md, the one file both review skills
-share: "All seats" and "Rebuttal instruction" (Standard seat instructions), "Model identity",
+share: "All seats" and "Rebuttal instruction" (Standard seat instructions),
 "Evidence and findings", "Web verification: reviewer rules", "Auditor instructions", the
 chosen "Audit depth" section, and "Falsification pass". A missing section is an error, never a silently shorter brief.
 `;
@@ -53,11 +57,11 @@ const UNEXPANDED_VAR = /\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$(?:env:)?[A-Za-z_][A-Za-z
 function parseArgs(argv) {
   const args = { mode: null, packet: null, seat: null, out: null, outputPath: null, repoOnly: false,
     peerView: null, auditDir: null, targetDir: null, runDir: null, claim: null, rebuttal: null, sourceDirs: [],
-    auditDepth: null };
+    auditDepth: null, channel: null };
   const flags = { '--mode': 'mode', '--packet': 'packet', '--seat': 'seat', '--out': 'out',
     '--output-path': 'outputPath', '--peer-view': 'peerView', '--audit-dir': 'auditDir',
     '--target-dir': 'targetDir', '--run-dir': 'runDir', '--claim': 'claim', '--rebuttal': 'rebuttal',
-    '--audit-depth': 'auditDepth' };
+    '--audit-depth': 'auditDepth', '--channel': 'channel' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') { process.stdout.write(USAGE); process.exit(0); }
@@ -65,7 +69,7 @@ function parseArgs(argv) {
     if (!Object.hasOwn(flags, a) && a !== '--source-dir') throw new RelayError(`unrecognized argument: ${a}`);
     const v = argv[++i];
     if (v === undefined || v.startsWith('--')) throw new RelayError(`${a} requires a value`);
-    const unexpanded = a === '--mode' || a === '--seat' || a === '--audit-depth' ? null : UNEXPANDED_VAR.exec(v);
+    const unexpanded = a === '--mode' || a === '--seat' || a === '--audit-depth' || a === '--channel' ? null : UNEXPANDED_VAR.exec(v);
     if (unexpanded) throw new RelayError(`${a} "${v}" contains "${unexpanded[0]}", a shell variable that was never expanded; pass the real path`);
     if (a === '--source-dir') args.sourceDirs.push(v);
     else args[flags[a]] = v;
@@ -79,6 +83,12 @@ function parseArgs(argv) {
     if (!args[key]) throw new RelayError(`--mode ${args.mode} requires --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`);
   }
   if (args.seat && !['A', 'B'].includes(args.seat)) throw new RelayError('--seat must be A or B');
+  if (args.channel !== null) {
+    if (!['file', 'final-message'].includes(args.channel)) throw new RelayError('--channel must be file or final-message');
+    if (args.mode === 'verifier') throw new RelayError('--channel is not accepted by --mode verifier; a verifier always replies in its final message');
+    if (args.channel === 'file' && !args.outputPath) throw new RelayError('--channel file requires --output-path, the file the reader writes');
+    if (args.channel === 'final-message' && args.outputPath) throw new RelayError('--channel final-message cannot be combined with --output-path; the dispatcher captures the reply');
+  }
   if (args.auditDepth !== null && args.mode !== 'auditor') throw new RelayError('--audit-depth is only accepted by --mode auditor');
   if (args.mode === 'auditor') args.auditDepth ??= 'light';
   if (args.auditDepth !== null && !['light', 'full'].includes(args.auditDepth)) throw new RelayError('--audit-depth must be light or full');
@@ -132,8 +142,8 @@ async function buildPhase1(args, protocol) {
       ? ' Counts: number of claims and the count per severity. Create the file early with its header line and add each ' +
         'finding as soon as you confirm it, so the orchestrator can report progress; the file counts as complete only after your "written" reply.'
       : ''),
+    // "## Model identity" is not copied: its seat rules are in "All seats", the rest is the orchestrator's.
     extractSection(protocol, '### All seats'),
-    extractSection(protocol, '## Model identity'),
     extractSection(protocol, '## Evidence and findings: reviewer-authored fields'),
   ];
   if (!args.repoOnly) parts.push(extractSection(protocol, '### Web verification: reviewer rules'));
