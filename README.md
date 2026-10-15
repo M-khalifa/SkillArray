@@ -32,14 +32,15 @@ Claude Code:
 
 ```text
 /plugin marketplace add M-khalifa/SkillArray
-/plugin install reviews@skill-array
-/plugin install shared-brain@skill-array
+/plugin install pair-review@skillarray
+/plugin install cross-review@skillarray
+/plugin install shared-brain@skillarray
 ```
 
-Codex: copy the skill folders `plugins/reviews/skills/cross-review` and
-`plugins/reviews/skills/pair-review` into `.agents/skills/` in the project (or into
-`~/.agents/skills/` for every project). The repository also carries a Codex plugin
-manifest (`plugins/reviews/.codex-plugin/plugin.json`) and marketplace file
+Codex: copy the skill folders `plugins/cross-review/skills/cross-review` and
+`plugins/pair-review/skills/pair-review` into `.agents/skills/` in the project (or into
+`~/.agents/skills/` for every project). The repository also carries Codex plugin
+manifests (`plugins/pair-review/.codex-plugin/plugin.json`, `plugins/cross-review/.codex-plugin/plugin.json`) and a marketplace file
 (`.agents/plugins/marketplace.json`). Their field names are copied from plugins in
 Codex's own curated marketplace; installing through them has not been tested yet.
 Both hosts need Node.js 22+. Run the skills from Claude Code; on a Codex host a pair-review of two native OpenAI models is a trial, and a Claude CLI seat
@@ -81,11 +82,11 @@ The Codex `workspace-write` sandbox disables the network, and a bare `claude -p`
 Codex shell left no session file in three trials. `claude-dispatch.mjs` run through Codex failed
 in 2 of 2 trials with no allow rule. With a user-added allow rule for the dispatcher, 1 of 4
 attempts completed; the others were killed with the Codex turn, failed on `--detach` (WMI access
-denied), or failed with ECONNREFUSED. There is no reliable route, so a Codex-host review is not
-supported. The skill never requests escalation, never sets a wider sandbox itself, and never
+denied), or failed with ECONNREFUSED. Because no route has proved reliable, a Codex-host review runs only
+on the trial routes listed above. The skill never requests escalation, never sets a wider sandbox itself, and never
 bypasses a permission check. Details: each skill's `references/hosts/codex.md`.
 
-### Known unsupported cells
+### Known limits: trial and unverified routes
 
 - Cross-review on a Codex host, and a Claude pair on a Codex host: a trial only when the session probe passes. In two
   `codex exec` runs a Claude CLI call left no session, so the exchange could not resume the seat; another Codex launch path kept
@@ -152,8 +153,8 @@ limitations.
 
 ```text
 SkillArray/
-|-- plugins/reviews/skills/cross-review/   the cross-review skill
-|-- plugins/reviews/skills/pair-review/    the pair-review skill
+|-- plugins/cross-review/skills/cross-review/   the cross-review skill
+|-- plugins/pair-review/skills/pair-review/    the pair-review skill
 |-- plugins/shared-brain/                  the notes skill
 |-- bench/                                 benchmark tooling (not installed)
 |-- docs/                                  design notes

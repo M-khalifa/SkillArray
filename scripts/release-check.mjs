@@ -13,13 +13,15 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const node = process.execPath;
+// Debian and Ubuntu ship python3 with no "python" command.
+const python = process.platform === "win32" ? "python" : "python3";
 
 const steps = [
   { label: "repository parity validation", cwd: root, cmd: node, args: ["scripts/validate-repository.mjs"] },
   { label: "install check (Claude Code and Codex layouts)", cwd: root, cmd: node, args: ["scripts/install-check.mjs"] },
   {
     label: "pair-review package validation",
-    cwd: path.join(root, "plugins/reviews/skills/pair-review"),
+    cwd: path.join(root, "plugins/pair-review/skills/pair-review"),
     cmd: node,
     args: ["scripts/validate-package.mjs"],
   },
@@ -29,20 +31,20 @@ const steps = [
     // isolate that specific failing file with its own --test-concurrency=1
     // step rather than reintroducing blanket serialization here.
     label: "pair-review test suite",
-    cwd: path.join(root, "plugins/reviews/skills/pair-review"),
+    cwd: path.join(root, "plugins/pair-review/skills/pair-review"),
     cmd: node,
     args: ["--test"],
   },
   {
     label: "cross-review package validation",
-    cwd: path.join(root, "plugins/reviews/skills/cross-review"),
+    cwd: path.join(root, "plugins/cross-review/skills/cross-review"),
     cmd: node,
     args: ["scripts/validate-package.mjs"],
   },
   {
     // See the pair-review test suite step above for why this runs parallel now.
     label: "cross-review test suite",
-    cwd: path.join(root, "plugins/reviews/skills/cross-review"),
+    cwd: path.join(root, "plugins/cross-review/skills/cross-review"),
     cmd: node,
     args: ["--test"],
   },
@@ -73,13 +75,13 @@ const steps = [
   {
     label: "shared-brain scan_memory.py compiles",
     cwd: root,
-    cmd: "python",
+    cmd: python,
     args: ["-m", "py_compile", "plugins/shared-brain/skills/shared-brain/scripts/scan_memory.py"],
   },
   {
     label: "shared-brain default profile validates",
     cwd: root,
-    cmd: "python",
+    cmd: python,
     args: [
       "plugins/shared-brain/skills/shared-brain/scripts/scan_memory.py",
       "--check-profile",
@@ -89,7 +91,7 @@ const steps = [
   {
     label: "shared-brain example-engineering profile validates",
     cwd: root,
-    cmd: "python",
+    cmd: python,
     args: [
       "plugins/shared-brain/skills/shared-brain/scripts/scan_memory.py",
       "--check-profile",
@@ -238,8 +240,8 @@ function main() {
     // only for an actual release certification, not every plain
     // release-check invocation during development.
     for (const [skillDir, label] of [
-      [path.join(root, "plugins/reviews/skills/pair-review"), "pair-review"],
-      [path.join(root, "plugins/reviews/skills/cross-review"), "cross-review"],
+      [path.join(root, "plugins/pair-review/skills/pair-review"), "pair-review"],
+      [path.join(root, "plugins/cross-review/skills/cross-review"), "cross-review"],
     ]) {
       if (!checkPackagedArtifact(skillDir, label)) {
         process.stderr.write(`\nrelease-check: FAILED at "${label} packaged-artifact smoke test" -- fix this before releasing.\n`);

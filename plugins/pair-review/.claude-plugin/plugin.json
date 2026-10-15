@@ -1,0 +1,8 @@
+{
+  "name": "pair-review",
+  "description": "Two distinct models from one vendor review the same code, design or document blind, exchange their findings, and a fresh auditor settles each one: execution-gated, identity-blinded, evidence-graded.",
+  "version": "1.1.0",
+  "author": {
+    "name": "Mahmoud Khalifa"
+  }
+}

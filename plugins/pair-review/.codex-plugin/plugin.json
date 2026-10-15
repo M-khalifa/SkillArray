@@ -1,0 +1,26 @@
+{
+  "name": "pair-review",
+  "version": "1.1.0",
+  "description": "Two distinct models from one vendor review the same code, design or document blind, exchange their findings, and a fresh auditor settles each one: execution-gated, identity-blinded, evidence-graded.",
+  "author": {
+    "name": "Mahmoud Khalifa"
+  },
+  "license": "MIT",
+  "keywords": [
+    "review",
+    "pair-review",
+    "code-review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Pair Review",
+    "shortDescription": "Review code and documents with two models from one vendor, then cross-examine the findings",
+    "longDescription": "pair-review runs two reviewers on the same target, exchanges their findings with identities hidden, and settles each finding with a fresh auditor. It produces findings.json, a scorecard and a manifest. A review run from a Codex host is a trial route in 1.1.0 (see references/hosts/codex.md); Claude Code is the primary host.",
+    "developerName": "Mahmoud Khalifa",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}

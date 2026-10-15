@@ -1,0 +1,26 @@
+{
+  "name": "cross-review",
+  "version": "1.1.0",
+  "description": "Two reviewers from different vendors review the same code, design or document blind, cross-examine each other's findings, and a fresh auditor settles each one: execution-gated, identity-blinded, refutation-asymmetric.",
+  "author": {
+    "name": "Mahmoud Khalifa"
+  },
+  "license": "MIT",
+  "keywords": [
+    "review",
+    "cross-review",
+    "code-review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Cross Review",
+    "shortDescription": "Review code and documents with two models from different vendors, then cross-examine the findings",
+    "longDescription": "cross-review runs two reviewers on the same target, exchanges their findings with identities hidden, and settles each finding with a fresh auditor. It produces findings.json, a scorecard and a manifest. A review run from a Codex host is a trial route in 1.1.0 (see references/hosts/codex.md); Claude Code is the primary host.",
+    "developerName": "Mahmoud Khalifa",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}

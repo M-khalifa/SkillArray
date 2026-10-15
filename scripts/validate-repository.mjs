@@ -49,11 +49,12 @@ async function main() {
   }
 
   const marketplace = await readJson(".claude-plugin/marketplace.json");
-  assert(marketplace.name === "skill-array", "unexpected marketplace name");
+  assert(marketplace.name === "skillarray", "unexpected marketplace name");
   assert(Array.isArray(marketplace.plugins), "marketplace plugins must be an array");
 
   const expectedPlugins = new Map([
-    ["reviews", "./plugins/reviews"],
+    ["pair-review", "./plugins/pair-review"],
+    ["cross-review", "./plugins/cross-review"],
     ["shared-brain", "./plugins/shared-brain"],
   ]);
   assert(marketplace.plugins.length === expectedPlugins.size, "unexpected plugin count");
@@ -62,26 +63,23 @@ async function main() {
     await requireFile(path.join(plugin.source, ".claude-plugin", "plugin.json"));
   }
 
-  const reviews = await readJson("plugins/reviews/.claude-plugin/plugin.json");
-  assert(reviews.name === "reviews", "unexpected reviews plugin name");
-  assert(typeof reviews.version === "string" && reviews.version.length > 0, "reviews plugin.json must declare a version");
-
-  {
-    // The Codex manifest and marketplace sit beside the Claude Code ones and must agree with them.
-    const codex = await readJson("plugins/reviews/.codex-plugin/plugin.json");
-    assert(codex.name === "reviews", "Codex plugin.json: unexpected plugin name");
-    assert(
-      codex.version === reviews.version,
-      `Codex plugin.json version ${codex.version} differs from the Claude Code plugin version ${reviews.version}`,
-    );
-    assert(codex.skills === "./skills/", "Codex plugin.json: skills must be ./skills/");
-    const codexMarketplace = await readJson(".agents/plugins/marketplace.json");
-    assert(Array.isArray(codexMarketplace.plugins), "Codex marketplace plugins must be an array");
-    const entry = codexMarketplace.plugins.find((plugin) => plugin.name === "reviews");
-    assert(
-      entry && entry.source && entry.source.path === "./plugins/reviews",
-      "Codex marketplace: the reviews entry must point at ./plugins/reviews",
-    );
+  // Each review skill ships as its own plugin, with a Codex manifest and marketplace entry that agree with it.
+  // Both carry one version, the one CHANGELOG's top released header names.
+  const codexMarketplace = await readJson(".agents/plugins/marketplace.json");
+  assert(Array.isArray(codexMarketplace.plugins), "Codex marketplace plugins must be an array");
+  let reviews = null;
+  for (const skill of ["pair-review", "cross-review"]) {
+    const plugin = await readJson(`plugins/${skill}/.claude-plugin/plugin.json`);
+    assert(plugin.name === skill, `plugins/${skill}: unexpected plugin name ${plugin.name}`);
+    assert(typeof plugin.version === "string" && plugin.version.length > 0, `${skill} plugin.json must declare a version`);
+    reviews ??= plugin;
+    assert(plugin.version === reviews.version, `${skill} plugin.json version ${plugin.version} differs from ${reviews.version}`);
+    const codex = await readJson(`plugins/${skill}/.codex-plugin/plugin.json`);
+    assert(codex.name === skill, `${skill} Codex plugin.json: unexpected plugin name`);
+    assert(codex.version === plugin.version, `${skill} Codex plugin.json version ${codex.version} differs from ${plugin.version}`);
+    assert(codex.skills === "./skills/", `${skill} Codex plugin.json: skills must be ./skills/`);
+    const entry = codexMarketplace.plugins.find((p) => p.name === skill);
+    assert(entry && entry.source && entry.source.path === `./plugins/${skill}`, `Codex marketplace: the ${skill} entry must point at ./plugins/${skill}`);
   }
 
   {
@@ -108,11 +106,11 @@ async function main() {
   }
 
   const pairVersion = await readSkillVersion(
-    "plugins/reviews/skills/pair-review/SKILL.md",
+    "plugins/pair-review/skills/pair-review/SKILL.md",
     "pair-review",
   );
   const crossVersion = await readSkillVersion(
-    "plugins/reviews/skills/cross-review/SKILL.md",
+    "plugins/cross-review/skills/cross-review/SKILL.md",
     "cross-review",
   );
   assert(pairVersion === reviews.version, "pair-review version differs from plugin version");
@@ -123,7 +121,7 @@ async function main() {
     // protection, predating --isolate's real-prevention worktree redirect.
     const capabilities = (
       await readFile(
-        await requireFile("plugins/reviews/skills/cross-review/references/model-capabilities.md"),
+        await requireFile("plugins/cross-review/skills/cross-review/references/model-capabilities.md"),
       )
     ).toString("utf8");
     assert(
@@ -142,7 +140,7 @@ async function main() {
     // free-prose "Peer response" example values instead of review-protocol.md's closed enum.
     const scorecard = (
       await readFile(
-        await requireFile("plugins/reviews/skills/cross-review/references/phase-3-scorecard.md"),
+        await requireFile("plugins/cross-review/skills/cross-review/references/phase-3-scorecard.md"),
       )
     ).toString("utf8");
     assert(
@@ -170,7 +168,7 @@ async function main() {
     // pair-review's phase 3 must clean up every actor's worktree the same way cross-review's does.
     const scorecard = (
       await readFile(
-        await requireFile("plugins/reviews/skills/pair-review/references/phase-3-scorecard.md"),
+        await requireFile("plugins/pair-review/skills/pair-review/references/phase-3-scorecard.md"),
       )
     ).toString("utf8");
     assert(
@@ -185,7 +183,7 @@ async function main() {
 
   for (const skill of ["cross-review", "pair-review"]) {
     // Each SKILL.md carries the host table and links both host files, which must exist.
-    const skillDir = `plugins/reviews/skills/${skill}`;
+    const skillDir = `plugins/${skill}/skills/${skill}`;
     const entry = (await readFile(await requireFile(`${skillDir}/SKILL.md`))).toString("utf8");
     assert(/^## Host table\s*$/m.test(entry), `${skill} SKILL.md: missing the "## Host table" heading`);
     for (const host of ["claude-code", "codex"]) {
@@ -202,14 +200,14 @@ async function main() {
     // git worktree bookkeeping under the target's own .git/worktrees/, which
     // review-protocol.md and model-capabilities.md previously never mentioned.
     const protocol = (
-      await readFile(await requireFile("plugins/reviews/skills/cross-review/references/review-protocol.md"))
+      await readFile(await requireFile("plugins/cross-review/skills/cross-review/references/review-protocol.md"))
     ).toString("utf8");
     assert(
       /\.git\/worktrees/.test(protocol),
       "review-protocol.md: must document that --isolate still writes into the target's .git/worktrees/",
     );
     const capabilities = (
-      await readFile(await requireFile("plugins/reviews/skills/cross-review/references/model-capabilities.md"))
+      await readFile(await requireFile("plugins/cross-review/skills/cross-review/references/model-capabilities.md"))
     ).toString("utf8");
     assert(
       /\.git\/worktrees/.test(capabilities),
@@ -227,11 +225,11 @@ async function main() {
     // command line in these three files (a bare unquoted line, not prose describing scan in
     // general) must also mention --forbid-seats on the same or a directly adjacent line.
     const forbidSeatsFiles = [
-      "plugins/reviews/skills/cross-review/references/phase-2-cross-examination.md",
-      "plugins/reviews/skills/cross-review/references/phase-3-scorecard.md",
-      "plugins/reviews/skills/pair-review/SKILL.md",
-      "plugins/reviews/skills/pair-review/references/phase-2-cross-examination.md",
-      "plugins/reviews/skills/pair-review/references/phase-3-scorecard.md",
+      "plugins/cross-review/skills/cross-review/references/phase-2-cross-examination.md",
+      "plugins/cross-review/skills/cross-review/references/phase-3-scorecard.md",
+      "plugins/pair-review/skills/pair-review/SKILL.md",
+      "plugins/pair-review/skills/pair-review/references/phase-2-cross-examination.md",
+      "plugins/pair-review/skills/pair-review/references/phase-3-scorecard.md",
     ];
     for (const file of forbidSeatsFiles) {
       const content = (await readFile(await requireFile(file))).toString("utf8");
@@ -336,17 +334,39 @@ async function main() {
     "CHANGELOG.md",
   ]) {
     const pair = await readFile(
-      await requireFile(path.join("plugins/reviews/skills/pair-review", file)),
+      await requireFile(path.join("plugins/pair-review/skills/pair-review", file)),
     );
     const cross = await readFile(
-      await requireFile(path.join("plugins/reviews/skills/cross-review", file)),
+      await requireFile(path.join("plugins/cross-review/skills/cross-review", file)),
     );
     assert(pair.equals(cross), `${file}: pair-review and cross-review copies differ`);
   }
 
+  // Every pair-review script also ships in cross-review, byte for byte, so a new shared module needs no list entry.
+  const scriptFiles = async (skill) => {
+    const base = path.join(root, "plugins", skill, "skills", skill, "scripts");
+    const found = [];
+    const walk = async (dir) => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) await walk(path.join(dir, entry.name));
+        else found.push(path.relative(base, path.join(dir, entry.name)).split(path.sep).join("/"));
+      }
+    };
+    await walk(base);
+    return { base, found: found.sort() };
+  };
+  const crossScripts = await scriptFiles("cross-review");
+  const pairScripts = await scriptFiles("pair-review");
+  for (const file of pairScripts.found) {
+    assert(crossScripts.found.includes(file), `scripts/${file} is in pair-review but not in cross-review`);
+    const pair = await readFile(path.join(pairScripts.base, file));
+    const cross = await readFile(path.join(crossScripts.base, file));
+    assert(pair.equals(cross), `scripts/${file}: pair-review and cross-review copies differ`);
+  }
+
   // The two skills' test fixtures: the same files, byte for byte.
   const fixtureFiles = async (skill) => {
-    const base = path.join(root, "plugins/reviews/skills", skill, "scripts/tests/fixtures");
+    const base = path.join(root, "plugins", skill, "skills", skill, "scripts/tests/fixtures");
     const found = [];
     await requireFile(path.relative(root, base));
     const walk = async (dir) => {
@@ -372,8 +392,8 @@ async function main() {
 
   // Each installed skill folder ships the release notes, so a user can see what changed.
   const rootChangelog = await readFile(await requireFile("CHANGELOG.md"));
-  const skillChangelog = await readFile(await requireFile("plugins/reviews/skills/cross-review/CHANGELOG.md"));
-  assert(rootChangelog.equals(skillChangelog), "plugins/reviews/skills/*/CHANGELOG.md must be a copy of CHANGELOG.md");
+  const skillChangelog = await readFile(await requireFile("plugins/cross-review/skills/cross-review/CHANGELOG.md"));
+  assert(rootChangelog.equals(skillChangelog), "plugins/*/skills/*/CHANGELOG.md must be a copy of CHANGELOG.md");
 
   console.log("SkillArray: repository metadata and shared review files passed");
 }

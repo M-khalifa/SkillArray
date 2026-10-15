@@ -32,7 +32,7 @@ function git(cwd, ...args) {
 }
 
 function skillDir(root, skill) {
-  return path.join(root, 'plugins', 'reviews', 'skills', skill);
+  return path.join(root, 'plugins', skill, 'skills', skill);
 }
 
 function put(root, skill, rel, text) {

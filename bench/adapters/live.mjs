@@ -32,7 +32,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { spawnCli, killTree } from '../../plugins/reviews/skills/cross-review/scripts/codex-dispatch.mjs';
+import { spawnCli, killTree } from '../../plugins/cross-review/skills/cross-review/scripts/codex-dispatch.mjs';
 
 // Provisional -- matches codex-dispatch.mjs's own default, for the same
 // reason: no measured live-run duration data exists yet.
@@ -275,7 +275,7 @@ async function runCodexAlone({ packet, runDir }) {
   // additional escaping is needed here.
   const dispatchScript = path.resolve(
     THIS_FILE_DIR,
-    '../../plugins/reviews/skills/cross-review/scripts/codex-dispatch.mjs'
+    '../../plugins/cross-review/skills/cross-review/scripts/codex-dispatch.mjs'
   );
   const env = stripAnthropicKey(process.env);
   const { code, stderr } = await spawnCapture(

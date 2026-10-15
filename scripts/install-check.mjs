@@ -81,7 +81,7 @@ function runCase(args, scratch, layout, testCase) {
   mkdirSync(target, { recursive: true });
   const problems = [];
   for (const skill of testCase.skills) {
-    const source = path.join(args.root, "plugins", "reviews", "skills", skill);
+    const source = path.join(args.root, "plugins", skill, "skills", skill);
     const installed = path.join(target, skill);
     cpSync(source, installed, { recursive: true, filter: (from) => !SKIPPED.has(path.basename(from)) });
     const validate = spawnSync(process.execPath, ["scripts/validate-package.mjs"], { cwd: installed, encoding: "utf8" });

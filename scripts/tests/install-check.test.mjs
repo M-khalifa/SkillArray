@@ -19,7 +19,7 @@ function tempDir(t, prefix) {
 function makeRoot(t, validators = {}) {
   const root = tempDir(t, 'install-check-root-');
   for (const skill of SKILLS) {
-    const dir = path.join(root, 'plugins', 'reviews', 'skills', skill);
+    const dir = path.join(root, 'plugins', skill, 'skills', skill);
     mkdirSync(path.join(dir, 'scripts'), { recursive: true });
     mkdirSync(path.join(dir, 'references'), { recursive: true });
     writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${skill}\n---\n`);

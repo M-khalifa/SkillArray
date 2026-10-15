@@ -9,7 +9,8 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const SKILLS = ["cross-review", "pair-review"];
-const SKILLS_REL = "plugins/reviews/skills";
+// Each skill ships as its own plugin: plugins/<skill>/skills/<skill>.
+const skillRel = (skill) => `plugins/${skill}/skills/${skill}`;
 const MIN_ITEM = 20;
 const SHOWN_ITEM = 120;
 const MAX_LINES = 50;
@@ -68,7 +69,7 @@ function resolveRev(root, rev) {
 
 function extractBase(root, commit, workDir) {
   const tarFile = path.join(workDir, "base.tar");
-  const archive = git(root, ["archive", "--format=tar", "-o", tarFile, commit, SKILLS_REL]);
+  const archive = git(root, ["archive", "--format=tar", "-o", tarFile, commit, ...SKILLS.map(skillRel)]);
   if (archive.status !== 0) {
     throw new Error(`git archive ${commit} failed: ${(archive.stderr || "").trim()}`);
   }
@@ -146,7 +147,7 @@ function compareBriefs(baseSkills, workSkills, workDir) {
       for (const [side, skillsDir] of [["base", baseSkills], ["work", workSkills]]) {
         const outDir = path.join(workDir, "out", side, skill);
         mkdirSync(outDir, { recursive: true });
-        outs[side] = buildBrief(path.join(skillsDir, skill), spec, path.join(outDir, `${spec.name}.txt`));
+        outs[side] = buildBrief(path.join(skillsDir, ...skillRel(skill).split("/")), spec, path.join(outDir, `${spec.name}.txt`));
       }
       compared++;
       for (const side of ["base", "work"]) {
@@ -265,8 +266,8 @@ function checkCoverage(baseSkills, workSkills, dropsFile) {
   const missing = [];
   let checked = 0;
   for (const skill of SKILLS) {
-    const baseDir = path.join(baseSkills, skill);
-    const workText = docFiles(path.join(workSkills, skill))
+    const baseDir = path.join(baseSkills, ...skillRel(skill).split("/"));
+    const workText = docFiles(path.join(workSkills, ...skillRel(skill).split("/")))
       .map((f) => normalise(stripBom(readFileSync(f, "utf8"))))
       .join("\n");
     for (const file of docFiles(baseDir)) {
@@ -299,8 +300,8 @@ function run(args) {
   }
   const workDir = mkdtempSync(path.join(os.tmpdir(), "compare-baseline-"));
   try {
-    const baseSkills = path.join(extractBase(args.root, commit, workDir), ...SKILLS_REL.split("/"));
-    const workSkills = path.join(args.root, ...SKILLS_REL.split("/"));
+    const baseSkills = extractBase(args.root, commit, workDir);
+    const workSkills = args.root;
     const briefs = compareBriefs(baseSkills, workSkills, workDir);
     const coverage = checkCoverage(baseSkills, workSkills, args.drops);
     const lines = [...briefs.failures];
