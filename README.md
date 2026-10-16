@@ -24,7 +24,6 @@ didn't, with the reason.
 |---|---|---|
 | `cross-review` | Two different providers (Claude plus Codex or an OpenCode model) review the same target and cross-examine each other | Node.js 22+, the Codex or OpenCode CLI |
 | `pair-review` | Same process with two different models of one vendor (two Claude or two OpenAI models) | Claude Code with access to two models (or the Codex CLI for two OpenAI models), Node.js 22+ |
-| `shared-brain` | Search and save engineering notes across projects | An MCP knowledge backend, Python 3.11+ |
 
 ## Install
 
@@ -34,7 +33,6 @@ Claude Code:
 /plugin marketplace add M-khalifa/SkillArray
 /plugin install pair-review@skillarray
 /plugin install cross-review@skillarray
-/plugin install shared-brain@skillarray
 ```
 
 Codex: copy the skill folders `plugins/cross-review/skills/cross-review` and
@@ -155,7 +153,6 @@ limitations.
 SkillArray/
 |-- plugins/cross-review/skills/cross-review/   the cross-review skill
 |-- plugins/pair-review/skills/pair-review/    the pair-review skill
-|-- plugins/shared-brain/                  the notes skill
 |-- bench/                                 benchmark tooling (not installed)
 |-- docs/                                  design notes
 `-- scripts/                               repository checks
@@ -167,7 +164,7 @@ identical.
 
 ## Running the checks
 
-Needs Node.js 22 or 24, and Python 3.11 with PyYAML for shared-brain.
+Needs Node.js 22 or 24.
 
 ```text
 node scripts/release-check.mjs
@@ -180,8 +177,7 @@ that the briefs of an earlier revision still build byte for byte and that every 
 rule is still present.
 
 That runs everything in order and stops at the first failure: file checks,
-the shared-file comparison, both skills' test suites, the benchmark tests and
-the shared-brain profile checks. `--release` also refuses uncommitted changes
+the shared-file comparison, both skills' test suites, and the benchmark tests. `--release` also refuses uncommitted changes
 and tests each skill from a clean copy. CI runs the review skills on Windows,
 Linux and macOS.
 

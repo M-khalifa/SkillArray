@@ -13,8 +13,6 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const node = process.execPath;
-// Debian and Ubuntu ship python3 with no "python" command.
-const python = process.platform === "win32" ? "python" : "python3";
 
 const steps = [
   { label: "repository parity validation", cwd: root, cmd: node, args: ["scripts/validate-repository.mjs"] },
@@ -70,32 +68,6 @@ const steps = [
       "bench/tests/run-comparison.test.mjs",
       "bench/tests/union.test.mjs",
       "bench/tests/live-adapter.test.mjs",
-    ],
-  },
-  {
-    label: "shared-brain scan_memory.py compiles",
-    cwd: root,
-    cmd: python,
-    args: ["-m", "py_compile", "plugins/shared-brain/skills/shared-brain/scripts/scan_memory.py"],
-  },
-  {
-    label: "shared-brain default profile validates",
-    cwd: root,
-    cmd: python,
-    args: [
-      "plugins/shared-brain/skills/shared-brain/scripts/scan_memory.py",
-      "--check-profile",
-      "plugins/shared-brain/skills/shared-brain/profiles/default.yml",
-    ],
-  },
-  {
-    label: "shared-brain example-engineering profile validates",
-    cwd: root,
-    cmd: python,
-    args: [
-      "plugins/shared-brain/skills/shared-brain/scripts/scan_memory.py",
-      "--check-profile",
-      "plugins/shared-brain/skills/shared-brain/profiles/example-engineering.yml",
     ],
   },
 ];

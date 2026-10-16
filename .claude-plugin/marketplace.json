@@ -1,6 +1,6 @@
 {
   "name": "skillarray",
-  "description": "Evidence-grounded Claude Code skills for multi-model review, cross-vendor verification, and shared engineering knowledge.",
+  "description": "Evidence-grounded Claude Code skills for multi-model review and cross-vendor verification.",
   "owner": {
     "name": "Mahmoud Khalifa"
   },
@@ -14,11 +14,6 @@
       "name": "cross-review",
       "description": "Two reviewers from different vendors review the same code, design or document blind, cross-examine each other's findings, and a fresh auditor settles each one: execution-gated, identity-blinded, refutation-asymmetric.",
       "source": "./plugins/cross-review"
-    },
-    {
-      "name": "shared-brain",
-      "description": "A shared, cross-project engineering knowledge store: search, capture, and migrate durable lessons via an MCP backend. Separate opt-in plugin, not installed automatically with the review skills.",
-      "source": "./plugins/shared-brain"
     }
   ]
 }

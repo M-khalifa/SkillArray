@@ -55,7 +55,6 @@ async function main() {
   const expectedPlugins = new Map([
     ["pair-review", "./plugins/pair-review"],
     ["cross-review", "./plugins/cross-review"],
-    ["shared-brain", "./plugins/shared-brain"],
   ]);
   assert(marketplace.plugins.length === expectedPlugins.size, "unexpected plugin count");
   for (const plugin of marketplace.plugins) {
