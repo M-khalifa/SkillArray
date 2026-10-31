@@ -505,3 +505,4 @@ Suggested fix: phase-1-independent-passes.md completion gate: after `validate` p
 - Stray `scripts/result.json` (a gitignored artifact dated Sep 12 from a manual run) is cosmetic and not raised.
 
 Web fetches/searches used: 0
+Blocked: none

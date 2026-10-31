@@ -7,10 +7,22 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   expandTagRange, parseArgs, isBlocker, shortTitle, compactTokens, seatCostRow, perCallNewInput, costTableLines, packetCriteria, criteriaGroup, buildCriteria, notesSections,
-  parseOutcome, packetTicketMap, noteKinds, findingStatus, costNote, parseVerdict, buildTickets, groupFindings, renderChat, buildReport, renderText, renderMarkdown, renderHtml, loadRun, headingTags,
+  parseOutcome, packetTicketMap, noteKinds, findingStatus, costNote, parseVerdict, buildTickets, groupFindings, renderChat, buildReport, renderText, renderMarkdown, renderHtml, loadRun, headingTags, outcomeOf, diffHunks, whereInChange,
 } from '../build-report.mjs';
 
-const SCRIPT = fileURLToPath(new URL('../build-report.mjs', import.meta.url));
+// The step in-process, as the script was run: env holds the variables set (or, undefined, removed) for the call.
+async function runCli(args, env = {}) {
+  const { runStep } = await import('../build-report.mjs');
+  const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+  const put = (vars) => { for (const [k, v] of Object.entries(vars)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
+  put(env);
+  try {
+    const r = await runStep(args);
+    return { status: r.code, stdout: r.stdout, stderr: r.stderr };
+  } finally {
+    put(saved);
+  }
+}
 const NL = String.fromCharCode(10);
 const lines = (...l) => l.join(NL) + NL;
 
@@ -27,7 +39,7 @@ const SEAT_A = lines(
   '# Seat A findings', '', '## A1 [AC-6040-1] Blank type becomes Unknown', 'Severity: LOW', '',
   '## Checks performed', '- [AC-6040-2]: ran the synthetic payload, no issue.', '', '## Rebuttals (from B) of A claims', 'x',
 );
-const SEAT_B = lines('# Seat B findings', '', '## No findings', '', '## Checks performed', '- H1: confirmed by static read.');
+const SEAT_B = lines('# Seat B findings', '', '## No findings', '', '- H1: confirmed by static read.', 'Blocked: none');
 
 const MANIFEST = {
   status: 'completed', mode: 'adversarial', topology: 'cross-vendor', run_id: 'abcdef123456',
@@ -60,6 +72,9 @@ test('shortTitle: first sentence, cut at a clause break or word boundary, never 
   const t = shortTitle({ summary: noClause });
   assert.ok(t.length <= 110 && t.endsWith('...') && !/\bwor\.\.\.$/.test(t), t);
   assert.equal(shortTitle({ title: 'Given title', summary: 'x' }), 'Given title');
+  // Round 5: a colon inside "${env:X}" or "C:\" is no clause break.
+  const env = 'Two Windows spellings of a home-folder path, ${env:USERPROFILE} and %HOMEDRIVE%%HOMEPATH%, are not expanded by expandPathVars, so the guard misses them.';
+  assert.ok(shortTitle({ summary: env }).startsWith('Two Windows spellings of a home-folder path, ${env:USERPROFILE} and'), shortTitle({ summary: env }));
 });
 
 test('compactTokens and seatCostRow: both usage shapes in the same columns, unknown when missing, no estimates', () => {
@@ -104,6 +119,50 @@ test('buildCriteria: issue found beats checked beats NOT VERIFIED; a tag nobody 
   assert.equal(buildCriteria(new Map(), [], new Map(), {}), null);
 });
 
+test('buildReport: a withdrawn HIGH is counted as withdrawn, not in the HIGH bar or header; an accepted drift is a caveat', () => {
+  const report = buildReport({
+    findingsDoc: { audit_depth: 'full', findings: [finding({ id: 'F1', severity: 'HIGH', final_state: 'settled-refuted' }), finding({ id: 'F2', severity: 'HIGH', origins: ['B1'] })] },
+    manifest: { ...MANIFEST, drift_accepted: [{ at: '2026-10-16T14:25:00Z', files: ['vsiclient/collectors/ContosoV4Api.py'] }] }, packetText: '', seatTexts: {},
+  });
+  assert.equal(report.counts.high, 1);
+  assert.equal(report.counts.withdrawn, 1);
+  const chat = renderChat(report);
+  assert.match(chat, /HIGH +█+ +1\n/);
+  assert.match(renderMarkdown(report), /\*\*Findings:\*\* 2 \(0 critical, 1 high, 0 medium, 0 low, 1 withdrawn\)/);
+  assert.ok(report.caveats.some((c) => /changed after Phase 1 .*--accept-drift \(vsiclient\/collectors\/ContosoV4Api\.py\)/.test(c)), report.caveats.join('\n'));
+  // Every finding withdrawn: no severity bar, so no empty code block in chat.
+  const allGone = buildReport({ findingsDoc: { audit_depth: 'full', findings: [finding({ id: 'F1', severity: 'HIGH', final_state: 'settled-refuted' })] }, manifest: MANIFEST, packetText: '', seatTexts: {} });
+  assert.doesNotMatch(renderChat(allGone), /```\n```/);
+  // Every output ends with one line naming the skill, the version that ran (the manifest's) and the project page.
+  const stamped = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, skill_version: '9.8.7' }, packetText: '', seatTexts: {} });
+  assert.deepEqual({ ...stamped.generator, skill: 'x' }, { skill: 'x', version: '9.8.7', url: 'https://github.com/M-khalifa/SkillArray' });
+  const line = /Reviewed with (pair|cross)-review 9\.8\.7 \(SkillArray, MIT license\): https:\/\/github\.com\/M-khalifa\/SkillArray/;
+  for (const text of [renderText(stamped), renderMarkdown(stamped), renderChat(stamped)]) assert.match(text.trimEnd().split('\n').at(-1), line);
+  assert.equal(renderChat(stamped, { all: true }).match(new RegExp(line.source, 'g')).length, 1, 'chat --all prints it once, from the markdown part');
+  assert.match(renderHtml(stamped), /<footer class="meta">Reviewed with (pair|cross)-review 9\.8\.7 \(SkillArray, MIT license\): <a href="https:\/\/github\.com\/M-khalifa\/SkillArray">/);
+  assert.match(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: '', seatTexts: {} }).generator.version, /^\d+\.\d+\.\d+$/, 'without a manifest version, this copy\'s SKILL.md version');
+  const blind = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, seat_blind_lines: { B: ['- H2: pytest failed: No usable temporary directory found. PARTIAL'] } }, packetText: '', seatTexts: {} });
+  assert.ok(blind.caveats.some((c) => /^Seat B may have reviewed blind: .*No usable temporary directory/.test(c)), blind.caveats.join('\n'));
+  const refused = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, status: 'incomplete', format_refused: { A: ['no "## Checks performed" heading after the claims'] } }, packetText: '', seatTexts: {} });
+  const blockedSeat = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, status: 'incomplete', blocked_no_findings: ['B'] }, packetText: '', seatTexts: {} });
+  assert.ok(blockedSeat.caveats.some((c) => /^Seat B wrote "No findings" but says it was blocked/.test(c)), blockedSeat.caveats.join('\n'));
+  assert.ok(refused.caveats.some((c) => /^Seat A's findings file was refused by the format check again after its one rewrite \(no "## Checks performed" heading after the claims\), so this is not a two-seat review\.$/.test(c)), refused.caveats.join('\n'));
+  const open =buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, stop_incomplete: ['seat B (phase1)', 'auditor (audit)'] }, packetText: '', seatTexts: {} });
+  assert.ok(open.caveats.some((c) => /^Stopped after its answer, but its output stayed open: seat B \(phase1\), auditor \(audit\)\. .*check the process list/.test(c)), open.caveats.join('\n'));
+});
+
+test('chat: under a light audit the CHECKED line says how many agreed findings were not re-checked, so 0 confirmed is not read as a failure', () => {
+  const nc = { result: 'NOT_CHECKED', basis: null, evidence: null };
+  const report = buildReport({ findingsDoc: { audit_depth: 'light', findings: [finding({ id: 'F1', severity: 'LOW', auditor_check: nc }), finding({ id: 'F2', severity: 'LOW', origins: ['B1'], auditor_check: nc })] }, manifest: MANIFEST, packetText: '', seatTexts: {} });
+  assert.match(renderChat(report), /CHECKED +0 of 2 findings confirmed by the auditor; 2 not re-checked \(light audit\)/);
+  // With many findings the line is cut at 100 characters: the unresolved and withdrawn counts come first and stay.
+  const many = [...Array.from({ length: 12 }, (_, i) => finding({ id: `F${i + 1}`, severity: 'LOW', origins: [`A${i + 1}`], auditor_check: nc })),
+    ...Array.from({ length: 3 }, (_, i) => finding({ id: `F${13 + i}`, severity: 'LOW', origins: [`B${i + 1}`], final_state: 'unresolved-low-stakes', auditor_check: nc })),
+    ...Array.from({ length: 2 }, (_, i) => finding({ id: `F${16 + i}`, severity: 'LOW', origins: [`B${i + 4}`], final_state: 'settled-refuted' }))];
+  const big = renderChat(buildReport({ findingsDoc: { audit_depth: 'light', findings: many }, manifest: MANIFEST, packetText: '', seatTexts: {} }));
+  assert.match(big, /CHECKED +\d+ of 15 findings confirmed by the auditor; 3 unresolved \(F13 F14 F15\); 2 withdrawn/);
+});
+
 test('buildReport: severity order, blockers, counts, status and caveats', () => {
   const report = buildReport({
     findingsDoc: {
@@ -118,7 +177,7 @@ test('buildReport: severity order, blockers, counts, status and caveats', () => 
   assert.equal(report.status, 'INCOMPLETE');
   assert.deepEqual(report.findings.map((f) => f.id), ['F10', 'F1', 'F2', 'F3'], 'HIGH first, then LOW by number');
   assert.deepEqual(report.blockers.sort(), ['F10', 'F3']);
-  assert.deepEqual(report.counts, { critical: 0, high: 1, medium: 0, low: 3, other: 0 });
+  assert.deepEqual(report.counts, { critical: 0, high: 1, medium: 0, low: 3, other: 0, withdrawn: 0 });
   assert.equal(report.criteria, null);
   assert.equal(report.coverage.lightNote, 'agreed claims were not re-checked by the auditor');
   assert.ok(report.caveats.some((c) => /incomplete/.test(c)));
@@ -174,7 +233,6 @@ test('parseArgs: --run-dir is required; --color is validated; unknown flags are 
   assert.throws(() => parseArgs([]), /--run-dir/);
   assert.throws(() => parseArgs(['--run-dir', 'x', '--color', 'blue']), /--color/);
   assert.throws(() => parseArgs(['--run-dir', 'x', '--wat']), /unrecognized/);
-  assert.equal(parseArgs(['--help']).help, true);
   assert.equal(parseArgs(['--run-dir', 'x', '--html', 'r.html']).html, 'r.html');
 });
 
@@ -194,7 +252,7 @@ async function makeRun(t, { manifest = MANIFEST, notes = true } = {}) {
 
 test('CLI: prints the terminal report by default and writes no file unless asked', async (t) => {
   const dir = await makeRun(t);
-  const r = spawnSync(process.execPath, [SCRIPT, '--run-dir', dir], { encoding: 'utf8', env: { ...process.env, NO_COLOR: '1' } });
+  const r = await runCli(['--run-dir', dir], { NO_COLOR: '1' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /STATUS COMPLETE/);
   assert.match(r.stdout, /Why: From the notes file\./);
@@ -207,7 +265,7 @@ test('CLI: --out, --json and --html write the optional files; --color always for
   const out = path.join(dir, 'r.md');
   const html = path.join(dir, 'r.html');
   const json = path.join(dir, 'r.json');
-  const r = spawnSync(process.execPath, [SCRIPT, '--run-dir', dir, '--out', out, '--html', html, '--json', json, '--color', 'always'], { encoding: 'utf8' });
+  const r = await runCli(['--run-dir', dir, '--out', out, '--html', html, '--json', json, '--color', 'always']);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /\x1b\[/);
   assert.match(await fs.readFile(out, 'utf8'), /^# Review report: COMPLETE/);
@@ -215,21 +273,47 @@ test('CLI: --out, --json and --html write the optional files; --color always for
   assert.equal(JSON.parse(await fs.readFile(json, 'utf8')).blockers[0], 'F1');
 });
 
-test('CLI: a run with no manifest says status and cost are unknown; a missing findings file is an error', async (t) => {
+test('CLI: a run with no manifest says status and cost are unknown; a missing findings file with a seat file missing too is an error', async (t) => {
   const dir = await makeRun(t, { manifest: null });
   const report = await loadRun(dir);
-  assert.equal(report.status, 'INCOMPLETE');
-  assert.match(report.caveats[0], /manifest\.json was not found/);
+  // An audited run reported before its manifest is NOT FINAL in every format, never COMPLETE or INCOMPLETE.
+  assert.equal(report.status, 'NOT FINAL');
+  assert.match(report.caveats[0], /^manifest\.json is not built yet, so this report is not final .*: run review-run manifest, then the report again\.$/);
+  assert.ok(!report.caveats.some((c) => /was not found|The review is incomplete/.test(c)), report.caveats.join(' | '));
+  assert.match(renderChat(report), /^> \*\*REVIEW NOT FINAL /);
+  assert.match(renderText(report), /STATUS NOT FINAL/);
+  assert.match(renderMarkdown(report), /^# Review report: NOT FINAL/);
+  assert.match(renderHtml(report), /<span class="status incomplete">NOT FINAL<\/span>/);
+  const jsonOut = path.join(dir, 'report.json');
+  assert.equal((await runCli(['--run-dir', dir, '--json', jsonOut])).status, 0);
+  assert.equal(JSON.parse(await fs.readFile(jsonOut, 'utf8')).status, 'NOT FINAL');
+  await fs.rm(jsonOut);
   await fs.rm(path.join(dir, 'phase3', 'findings.json'));
-  const r = spawnSync(process.execPath, [SCRIPT, '--run-dir', dir], { encoding: 'utf8' });
+  // Two finished seat files (each closing section with its Blocked: line).
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## A1 [AC-6040-1] x', 'Severity: LOW', 'Same shape elsewhere: none found', '', '## Checks performed', '- [AC-6040-2]: ok.', 'Blocked: none'));
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), lines('# Seat B findings', '', '## No findings', '', 'Blocked: none'));
+  const phase1 = await runCli(['--run-dir', dir]);
+  assert.equal(phase1.status, 0, 'both seat files: the Phase 1 report');
+  const phase1Report = await loadRun(dir);
+  assert.equal(phase1Report.status, 'INCOMPLETE', 'no findings.json and no manifest stays INCOMPLETE');
+  assert.match(phase1Report.caveats[0], /manifest\.json was not found/);
+  // A refused auditor file waiting for its rewrite: the report says the audit is pending, not that the run stopped before it.
+  await fs.writeFile(path.join(dir, 'phase3', 'prompt-auditor-fix.txt'), 'Your audit file was refused.\n');
+  const pending = await loadRun(dir);
+  assert.equal(pending.status, 'INCOMPLETE');
+  assert.match(pending.caveats[0], /^The auditor's file was refused and review-run audit --finish has not passed since \(phase3\/prompt-auditor-fix\.txt\)/);
+  assert.match(renderChat(pending), /> Caveat: The auditor's file was refused/);
+  await fs.rm(path.join(dir, 'phase3', 'prompt-auditor-fix.txt'));
+  await fs.rm(path.join(dir, 'phase1', 'B-findings.md'));
+  const r = await runCli(['--run-dir', dir]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /cannot read findings/);
 });
 
-test('zero-claim run: with no findings.json and no claim in either seat file the report still prints the criteria; a claim without findings.json is still an error', async (t) => {
+test('zero-claim run: with no findings.json and no claim in either seat file the report still prints the criteria; a claim without findings.json gives the Phase 1 report', async (t) => {
   const dir = await makeRun(t);
   await fs.rm(path.join(dir, 'phase3', 'findings.json'));
-  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## No findings', '', '## Checks performed', '- [AC-6040-1]: ran it, no issue.', '- [AC-6040-2]: ran it, no issue.', '- [AC-6040-3]: ran it, no issue.'));
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## No findings', '', '- [AC-6040-1]: ran it, no issue.', '- [AC-6040-2]: ran it, no issue.', '- [AC-6040-3]: ran it, no issue.'));
   const report = await loadRun(dir);
   assert.equal(report.total, 0);
   assert.equal(report.criteria.criteriaCount, 3);
@@ -237,14 +321,74 @@ test('zero-claim run: with no findings.json and no claim in either seat file the
   assert.equal(report.coverage.auditDepth, 'not run (no claims)');
   assert.equal(report.coverage.lightNote, null);
   assert.ok(report.caveats.some((c) => /Neither seat raised a claim, so no auditor ran/.test(c)));
+  // Mac round 4 F1: without findings.json the zero-claim step that checks the target did not run, whatever the manifest says.
+  assert.equal(report.status, 'INCOMPLETE');
+  assert.ok(report.caveats.some((c) => /phase3\/findings\.json is missing, so the zero-claim step .* did not run/.test(c)));
+  assert.ok(!report.caveats.some((c) => /the target was still checked/.test(c)));
   const text = renderText(report);
   assert.match(text, /No findings\./);
   assert.match(text, /AC-6040-2 +no issue found \(A\)/);
   assert.match(text, /Audit depth: not run \(no claims\)/);
+  // Linux round linux-r5 A2: an older run (no brief stating the Blocked: and Same shape rules) is read without them.
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## A1 [AC-6040-1] x', 'Severity: LOW', '', '## Checks performed', '- [AC-6040-2]: ok.'));
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), lines('# Seat B findings', '', '## No findings', '', '- [AC-6040-1]: ok.'));
+  assert.equal((await loadRun(dir)).findings.length, 1, 'linux-r5 A2: an older run\'s finished files are reported');
+  // Linux round linux-r6 B1: the protocol's wording quoted inside the frozen packet is no rule of that run.
+  await fs.writeFile(path.join(dir, 'phase1', 'brief-A.txt'), 'Older brief text.\n\n# Task packet (frozen)\n\nThe new protocol says: `Blocked: none` (nothing after it). `Same shape elsewhere:` is required in every claim.\n\nLast rule, easy to miss: never write a claim ID inside a fence.\n');
+  assert.equal((await loadRun(dir)).findings.length, 1, 'linux-r6 B1: a rule quoted in the packet');
+  // Windows round win-r6 B1: the packet quotes the closing reminder too, before the rules it quotes.
+  await fs.writeFile(path.join(dir, 'phase1', 'brief-A.txt'), 'Older brief text.\n\n# Task packet (frozen)\n\nQuote: "Last rule, easy to miss" ends the brief. The new protocol says: `Blocked: none` (nothing after it). `Same shape elsewhere:` is required in every claim.\n\nLast rule, easy to miss: never write a claim ID inside a fence.\n');
+  assert.equal((await loadRun(dir)).findings.length, 1, 'win-r6 B1: the quoted reminder');
+  // Windows round win-r6 A2: an older run that writes "blocked:" elsewhere or marks its Blocked line is not refused for it.
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## A1 [AC-6040-1] x', 'Severity: LOW', 'The service log said blocked: retry later.', '', '## Checks performed', '- [AC-6040-2]: ok.', '- **Blocked:** none'));
+  assert.equal((await loadRun(dir)).findings.length, 1, 'win-r6 A2: an older run\'s other Blocked wording');
+  // Linux round linux-r6 B2: an older run is excused the Blocked: rule only, not a structural problem.
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## A1 [AC-6040-1] x', 'Severity: LOW', '', '## Checks performed', '- [AC-6040-2]: ok.', '', '## Checks performed', '- again'));
+  await assert.rejects(loadRun(dir), /cannot read findings/, 'linux-r6 B2: a second closing section');
+  await fs.rm(path.join(dir, 'phase1', 'brief-A.txt'));
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## A1 [AC-6040-1] x', 'Severity: LOW', '', '## Checks performed', '- [AC-6040-2]: ok.'));
+  // This run's brief states both rules.
+  // Windows round win-r5 B3: only the protocol's wording of a rule counts, not the word in a quoted log.
+  await fs.writeFile(path.join(dir, 'phase1', 'brief-A.txt'), 'Task packet: captured output:\nBlocked: service: connection refused\n');
+  assert.equal((await loadRun(dir)).findings.length, 1, 'win-r5 B3: a quoted Blocked: line is no rule');
+  await fs.writeFile(path.join(dir, 'phase1', 'brief-A.txt'), 'End with `Blocked: none` (nothing after it). `Same shape elsewhere:` is required in every claim.\n');
+  // Field feedback S8: a run stopped after Phase 1 reports each seat's own claims, marked as neither cross-examined nor audited.
+  const finishedA =lines('# Seat A findings', '', '## A1 [AC-6040-1] Blank type becomes Unknown', 'Severity: LOW', 'Same shape elsewhere: none found', '', '## Checks performed', '- [AC-6040-2]: ran the synthetic payload, no issue.', 'Blocked: none');
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), finishedA);
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), lines('# Seat B findings', '', '## No findings', '', '- [AC-6040-1]: ran it, no issue.', 'Blocked: none'));
+  const stopped = await loadRun(dir);
+  assert.equal(stopped.status, 'INCOMPLETE');
+  assert.ok(stopped.total > 0, 'field feedback S8: seat A\'s claims are listed');
+  assert.ok(stopped.findings.every((f) => /^A\d+$/.test(f.id) && f.state === 'phase1-only' && f.severity !== 'UNKNOWN' && f.title !== ''), JSON.stringify(stopped.findings));
+  assert.ok(stopped.caveats.some((c) => /stopped before the audit: these are each seat's own Phase 1 claims/.test(c)));
+  // Linux round linux-r3 B3 and Windows round win-r3 A2, B4: a seat file still being written (no closing section) is not
+  // reported as that seat's claims.
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## A1 [AC-6040-1] Blank type becomes Unknown', 'Severity: LOW', '', '## A2 [AC-6040-1] cut off here'));
+  await assert.rejects(loadRun(dir), /cannot read findings/, 'win-r3 A2: an unfinished seat file');
+  // Linux round linux-r4 B3: the closing heading alone (no Blocked: line yet) is still a file being written.
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), finishedA.replace(/\nBlocked: none\n?$/, '\n'));
+  await assert.rejects(loadRun(dir), /cannot read findings/, 'linux-r4 B3: the closing heading alone');
+  // Windows round win-r5 B1: an unclosed fence after the closing lines is a file still being written.
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), `${finishedA}\`\`\`\nstill writing\n`);
+  await assert.rejects(loadRun(dir), /cannot read findings/, 'win-r5 B1: an unclosed fence');
+  // Linux round linux-r5 B2: the zero-finding path too: "## No findings" without its Blocked: line is a file being written.
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), lines('# Seat A findings', '', '## No findings', ''));
+  await assert.rejects(loadRun(dir), /cannot read findings/, 'linux-r5 B2: an unfinished zero-finding file');
   await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), SEAT_A);
-  await assert.rejects(loadRun(dir), /cannot read findings/);
   await fs.rm(path.join(dir, 'phase1', 'A-findings.md'));
   await assert.rejects(loadRun(dir), /cannot read findings/, 'a missing seat file is not a zero-claim run');
+  // Restructure round 1 F1: a run stopped by a seat file refused after its one rewrite has no findings.json; it renders INCOMPLETE.
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), SEAT_A);
+  await fs.writeFile(path.join(dir, 'phase1', 'format-refused.json'), JSON.stringify({ B: ['no "## Checks performed" heading after the claims'] }));
+  const manifest = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8'));
+  await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify({ ...manifest, status: 'incomplete', format_refused: { B: ['no "## Checks performed" heading after the claims'] } }));
+  const refused = await loadRun(dir);
+  assert.equal(refused.status, 'INCOMPLETE');
+  assert.equal(refused.total, 0);
+  assert.ok(refused.caveats.some((c) => /Seat B's findings file was refused by the format check again after its one rewrite/.test(c)), refused.caveats.join(' | '));
+  // Restructure round 2 F11: the FILES line names only files that exist.
+  assert.equal(refused.files.findings, null);
+  assert.doesNotMatch(renderText(refused), /phase3\/findings\.json/);
 });
 
 test('zero-claim run: a findings.json written by audit --prepare (zero_claims) gives the same caveat and depth', () => {
@@ -323,6 +467,23 @@ test('parseOutcome: refuted, partly, mixed and confirmed words on a Checks perfo
   assert.equal(parseOutcome(null), null);
 });
 
+test('hypotheses: a standing finding tagged to a hypothesis confirms it, even when both seats wrote REFUTED for it', () => {
+  const packet = lines('- [H1] The new paging loop can stop early.');
+  const seatA = lines('## B1 — [H1] paging stops after a short page', '## Checks performed', '- H1: REFUTED (no early stop found in the main path).');
+  const seatB = lines('## Checks performed', '- H1: refuted.');
+  const findingsDoc = { findings: [finding({ id: 'F6', severity: 'HIGH', origins: ['B1'], title: '[H1] paging stops after a short page' })] };
+  const report = buildReport({ findingsDoc, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB } });
+  const h1 = report.criteria.rows.find((r) => r.tag === 'H1');
+  assert.deepEqual(h1.findings, ['F6']);
+  assert.equal(h1.verdict, 'confirmed');
+  assert.equal(report.criteria.hypothesisStats.refuted, 0);
+  // Closing round 2: when a seat found it only partly there, the finding may prove just the broken part: it stays partly.
+  for (const [a, b] of [['PARTLY CONFIRMED', 'PARTLY CONFIRMED'], ['PARTLY CONFIRMED', 'REFUTED'], ['CONFIRMED for one case, REFUTED for the other', 'CONFIRMED']]) {
+    const partly = buildReport({ findingsDoc, manifest: MANIFEST, packetText: packet, seatTexts: { A: lines('## B1 — [H1] paging stops after a short page', '## Checks performed', `- H1: ${a}.`), B: lines('## Checks performed', `- H1: ${b}.`) } });
+    assert.equal(partly.criteria.rows.find((r) => r.tag === 'H1').verdict, 'partly', `${a} / ${b}`);
+  }
+});
+
 test('hypotheses: the outcome each seat wrote is shown, a refuted one is called out, an unclear one says so', () => {
   const packet = lines('- [H1] One.', '- [H2] Two.', '- [H3] Three.', '- [H10] Ten.', '- [H5] Five.');
   const seatA = lines('## Checks performed', '- H1: confirmed by static read.', '- H2: disproved by the omitted-tier case.', '- H3: ran the fixture.', '- H10: confirmed.', '- H5: refuted.');
@@ -336,12 +497,16 @@ test('hypotheses: the outcome each seat wrote is shown, a refuted one is called 
   assert.equal(by.H3.verdict, 'unparsed');
   assert.deepEqual(by.H10.seats, ['A'], 'H1 does not match inside H10, nor H10 inside H1');
   assert.equal(report.criteria.hypothesisStats.refuted, 1);
+  // The auditor rules on findings only, so a split hypothesis has no third verdict: one caveat says so.
+  assert.deepEqual(report.caveats.filter((c) => /seats disagree; the auditor rules on findings/.test(c)), ["H2: the seats disagree; the auditor rules on findings, not hypotheses, so no one decided between them: read both seats' lines for it."]);
   const text = renderText(report);
   assert.match(text, /HYPOTHESES \(5\)  1 REFUTED \| 1 seats disagree \| 2 confirmed \| 1 outcome not parsed/);
   assert.match(text, /H2 +SPLIT: A refuted, B confirmed/);
   assert.match(text, /H3 +A outcome not parsed/);
   assert.match(renderMarkdown(report), /- Hypotheses: 1 REFUTED, 1 seats disagree, 2 confirmed, 1 outcome not parsed/);
-  assert.match(renderHtml(report), /<span class="chip high">Refuted<\/span>/);
+  // A refuted hypothesis (the suspected defect is gone) is good news; a confirmed one is the red chip.
+  assert.match(renderHtml(report), /<span class="chip ok">Refuted<\/span>/);
+  assert.match(renderHtml(report), /<span class="chip high">Confirmed<\/span>/);
 });
 
 test('tag matching uses word boundaries: AC-6040-1 is not found inside AC-6040-10', () => {
@@ -522,14 +687,14 @@ test('review fixes 2: a refuted claim on a tag nobody listed is still no issue f
 
 test('CLI colour: FORCE_COLOR colours captured output, NO_COLOR wins over it, --color never wins over both', async (t) => {
   const dir = await makeRun(t);
-  const run = (args, env) => spawnSync(process.execPath, [SCRIPT, '--run-dir', dir, ...args], { encoding: 'utf8', env: { ...process.env, NO_COLOR: '', FORCE_COLOR: '', ...env } });
+  const run = (args, env) => runCli(['--run-dir', dir, ...args], { NO_COLOR: '', FORCE_COLOR: '', ...env });
   const esc = String.fromCharCode(27);
-  assert.equal(run([], { FORCE_COLOR: '1' }).stdout.includes(esc), true, 'FORCE_COLOR=1 colours output that is not a terminal');
-  assert.equal(run([], { FORCE_COLOR: '0' }).stdout.includes(esc), false, 'FORCE_COLOR=0 is off');
-  assert.equal(run([], {}).stdout.includes(esc), false, 'captured output is plain by default');
-  assert.equal(run([], { FORCE_COLOR: '1', NO_COLOR: '1' }).stdout.includes(esc), false, 'NO_COLOR wins over FORCE_COLOR');
-  assert.equal(run(['--color', 'never'], { FORCE_COLOR: '1' }).stdout.includes(esc), false, '--color never wins');
-  assert.equal(run(['--color', 'always'], {}).stdout.includes(esc), true, '--color always colours captured output');
+  assert.equal((await run([], { FORCE_COLOR: '1' })).stdout.includes(esc), true, 'FORCE_COLOR=1 colours output that is not a terminal');
+  assert.equal((await run([], { FORCE_COLOR: '0' })).stdout.includes(esc), false, 'FORCE_COLOR=0 is off');
+  assert.equal((await run([], {})).stdout.includes(esc), false, 'captured output is plain by default');
+  assert.equal((await run([], { FORCE_COLOR: '1', NO_COLOR: '1' })).stdout.includes(esc), false, 'NO_COLOR wins over FORCE_COLOR');
+  assert.equal((await run(['--color', 'never'], { FORCE_COLOR: '1' })).stdout.includes(esc), false, '--color never wins');
+  assert.equal((await run(['--color', 'always'], {})).stdout.includes(esc), true, '--color always colours captured output');
 });
 const CHAT_FIXTURE = () => buildReport({
   findingsDoc: { findings: [
@@ -586,7 +751,7 @@ test('chat: the exact layout for a small run (a drift check)', () => {
     '- CRITERION    AC-6040-1  findings F1',
     '- NOT VERIFIED 1 of 3 criteria',
     '  VERDICTS     0 met, 1 partial, 0 not met, 1 no issue found; 1 with findings',
-    '  HYPOTHESES   1 confirmed',
+    '- CONFIRMED    H1',
     '```',
   ];
   const out = renderChat(CHAT_FIXTURE());
@@ -616,8 +781,24 @@ test('chat: no colour codes, no emoji, code lines within 100 characters, severit
   }
   assert.match(renderChat(runs[0]), /^HIGH {5}/m, 'a severity is a word in the bars');
   assert.match(renderChat(runs[1]), /^> \*\*REVIEW INCOMPLETE \u00b7 no blockers \u00b7 no findings\*\*/);
-  assert.match(renderChat(runs[2]), /- FIX NOW {6}\(\+7 more\)/, 'more than five blockers are counted, not listed');
+  const blockers = renderChat(runs[2]).split(String.fromCharCode(10)).filter((l) => l.startsWith('- FIX NOW'));
+  assert.equal(blockers.length, 12, 'every blocker has its own row');
+  assert.ok(blockers.some((l) => /\bF12\b/.test(l)) && !blockers.some((l) => /more\)/.test(l)), 'none is hidden behind "(+N more)"');
   assert.match(renderChat(runs[3]), /^> Caveat: /m, 'the zero-claim caveat is kept');
+});
+
+test('chat: an unresolved HIGH finding (low stakes too) is a decision under DECIDE, not a FIX NOW row', () => {
+  const report = buildReport({
+    findingsDoc: { findings: [
+      finding({ id: 'F1', severity: 'HIGH', final_state: 'unresolved-low-stakes', summary: 'Seats still disagree.' }),
+      finding({ id: 'F2', severity: 'HIGH', summary: 'Agreed blocker.' }),
+    ] },
+    manifest: MANIFEST,
+  });
+  const out = renderChat(report).split(String.fromCharCode(10));
+  assert.ok(out.some((l) => l.startsWith('- DECIDE') && /\bF1\b/.test(l)), out.join(String.fromCharCode(10)));
+  assert.ok(!out.some((l) => l.startsWith('- FIX NOW') && /\bF1\b/.test(l)));
+  assert.ok(out.some((l) => l.startsWith('- FIX NOW') && /\bF2\b/.test(l)));
 });
 
 test('chat: withdrawn claims, a checked-but-not-fully-confirmed audit, and --all', () => {
@@ -640,19 +821,19 @@ test('chat: withdrawn claims, a checked-but-not-fully-confirmed audit, and --all
 
 test('CLI: --format chat prints the chat layout, --all needs it, a bad format is refused', async (t) => {
   const dir = await makeRun(t);
-  const r = spawnSync(process.execPath, [SCRIPT, '--run-dir', dir, '--format', 'chat'], { encoding: 'utf8' });
+  const r = await runCli(['--run-dir', dir, '--format', 'chat']);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^> \*\*REVIEW COMPLETE/);
   assert.equal(r.stdout.includes(String.fromCharCode(27)), false);
-  const all = spawnSync(process.execPath, [SCRIPT, '--run-dir', dir, '--format', 'chat', '--all'], { encoding: 'utf8' });
+  const all = await runCli(['--run-dir', dir, '--format', 'chat', '--all']);
   assert.match(all.stdout, /^## Cost/m);
-  assert.throws(() => parseArgs(['--run-dir', 'x', '--all']), /--all is only used with --format chat/);
+  assert.equal(parseArgs(['--run-dir', 'x', '--all']).all, true, 'accepted with every format; only chat changes');
   assert.throws(() => parseArgs(['--run-dir', 'x', '--format', 'pdf']), /--format must be text or chat/);
 });
 test('chat: the banner blocker count is the report blocker count; decide items are named apart; odd ids stay within the line', () => {
   const decideOnly = renderChat(buildReport({ findingsDoc: { findings: [finding({ id: 'F2', severity: 'LOW', final_state: 'unresolved-high-stakes' })] }, manifest: MANIFEST }));
   assert.ok(decideOnly.includes('> **REVIEW COMPLETE '+String.fromCharCode(183)+' 1 blocker '+String.fromCharCode(183)+' 1 to decide (F2) '+String.fromCharCode(183)+' 1 finding**'), 'an unresolved-high-stakes finding is a blocker in every format');
-  assert.match(decideOnly, /1 of 1 findings confirmed by the auditor; 1 unresolved \(not settled\)/);
+  assert.match(decideOnly, /1 of 1 findings confirmed by the auditor; 1 unresolved \(F2\)/);
   const mixed = renderChat(buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH' }), finding({ id: 'F2', severity: 'LOW', final_state: 'unresolved-high-stakes' })] }, manifest: MANIFEST }));
   assert.ok(mixed.includes('2 blockers (fix F1 first) '+String.fromCharCode(183)+' 1 to decide (F2)'));
   const odd = renderChat(buildReport({
@@ -689,10 +870,10 @@ test('chat: report-notes drive the groups (needs decision, fixed after the snaps
   assert.ok(out.includes('| Fixed, not re-reviewed | F2 | 1 |'));
   assert.ok(out.split(String.fromCharCode(10)).includes('**Decisions needed**'));
   assert.match(out, /- F1: delete or keep/);
-  assert.ok(out.includes('> **REVIEW COMPLETE ' + String.fromCharCode(183) + ' 2 blockers (F2 marked in the report notes) ' + String.fromCharCode(183) + ' 1 to decide (F1)'));
-  assert.match(out, /^ {2}CHECKED {6}5 of 5 findings confirmed by the auditor; 1 unresolved \(not settled\); 1 withdrawn/m);
+  assert.ok(out.includes('> **REVIEW COMPLETE ' + String.fromCharCode(183) + ' 2 blockers (F2 marked fixed in the report notes, not fix now) ' + String.fromCharCode(183) + ' 1 to decide (F1)'));
+  assert.match(out, /^ {2}CHECKED {6}5 of 5 findings confirmed by the auditor; 1 unresolved \(F4\); 1 withdrawn/m);
   const bare = renderChat(buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'LOW' })] }, manifest: MANIFEST, notesText: ['## Decisions needed', '', '- pick one', ''].join(String.fromCharCode(10)) }));
-  assert.ok(bare.includes('| Decide | see Decisions needed below | 0 |'));
+  assert.ok(bare.includes('| Decide | see Decisions needed below | - |'), 'a count of 0 next to a written decision read as no decision (field: website)');
 });
 
 test('criteria verdicts: MET, PARTIAL and NOT MET are read from a bullet line or a bold table cell, the worst seat wins, and the chat line counts them', () => {
@@ -701,8 +882,8 @@ test('criteria verdicts: MET, PARTIAL and NOT MET are read from a bullet line or
   assert.equal(parseVerdict('| AC-9 | **PARTIAL** | x |'), 'PARTIAL');
   assert.equal(parseVerdict('- AC-9: ran it, not met by the old build'), null, 'lower case prose is not a verdict');
   const packet = lines('# Packet', '## Acceptance criteria', '- [AC-1] one', '- [AC-2] two', '- [AC-3] three', '- [AC-4] four');
-  const seatA = lines('# A', '', '## No findings', '', '## Checks performed', '- AC-1 MET: ran it', '- AC-2 PARTIAL: live run missing', '- AC-3 MET: read it');
-  const seatB = lines('# B', '', '## No findings', '', '## Checks performed', '| Criterion | Verdict | Evidence |', '|---|---|---|', '| AC-1 | **MET** | x |', '| AC-3 | **NOT MET** | y |');
+  const seatA = lines('# A', '', '## No findings', '', '- AC-1 MET: ran it', '- AC-2 PARTIAL: live run missing', '- AC-3 MET: read it');
+  const seatB = lines('# B', '', '## No findings', '', '| Criterion | Verdict | Evidence |', '|---|---|---|', '| AC-1 | **MET** | x |', '| AC-3 | **NOT MET** | y |');
   const report = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB } });
   const cs = report.criteria.criteriaStats;
   assert.deepEqual([cs.met, cs.partial, cs.notMet, cs.notVerified], [1, 1, 1, 1]);
@@ -715,8 +896,8 @@ test('criteria verdicts: MET, PARTIAL and NOT MET are read from a bullet line or
 
 test('ticket verdicts: GO / NO GO after the ticket id, a NO GO from either seat wins, the verdict that ends a line is taken, no ticket lines means no ticket rows', () => {
   const packet = lines('# P', '## Acceptance criteria', '- [AC-6048-1] a', '- [AC-6049-1] b', '- [AC-6040-1] c', '- [AC-6041-1] d', '- Tickets: 6048=AC-6048-1; 6049=AC-6049-1; 6040=AC-6040-1; 6041=AC-6041-1');
-  const seatA = lines('# A', '', '## No findings', '', '## Checks performed', '- AC-6048-1 MET: x', '- 6048: GO.', '- 6049: GO', '- 6041: GO for a staged rollout. Non-blocking: later.');
-  const seatB = lines('# B', '', '## No findings', '', '## Checks performed', '6048: GO - fine', '6049: NO GO \u2014 live run missing', '6040: GO for the drive-type half. History half GO for staging');
+  const seatA = lines('# A', '', '## No findings', '', '- AC-6048-1 MET: x', '- 6048: GO.', '- 6049: GO', '- 6041: GO for a staged rollout. Non-blocking: later.');
+  const seatB = lines('# B', '', '## No findings', '', '6048: GO - fine', '6049: NO GO \u2014 live run missing', '6040: GO for the drive-type half. History half GO for staging');
   const report = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB } });
   const byId = Object.fromEntries(report.criteria.tickets.map((t) => [t.id, t]));
   assert.equal(byId['6048'].verdict, 'GO');
@@ -735,7 +916,7 @@ test('ticket verdicts: GO / NO GO after the ticket id, a NO GO from either seat 
 
 test('criteria verdicts: a sentence that mentions the tag earlier in Checks performed does not hide the verdict row', () => {
   const packet = lines('# P', '## Acceptance criteria', '- [AC-8] eight', '- [AC-9] nine');
-  const seat = lines('# B', '', '## No findings', '', '## Checks performed', '- **Probe:** AC-8 and AC-9 were exercised with a stale page.', '', '| Criterion | Verdict | Evidence |', '|---|---|---|', '| AC-8 | **NOT MET** | later page lacks metadata |', '| AC-9 | **PARTIAL** | one stale page |', '', '6049: NO GO - AC-8 fails');
+  const seat = lines('# B', '', '## No findings', '', '- **Probe:** AC-8 and AC-9 were exercised with a stale page.', '', '| Criterion | Verdict | Evidence |', '|---|---|---|', '| AC-8 | **NOT MET** | later page lacks metadata |', '| AC-9 | **PARTIAL** | one stale page |', '', '6049: NO GO - AC-8 fails');
   const report = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: SEAT_B, B: seat } });
   const cs = report.criteria.criteriaStats;
   assert.deepEqual([cs.met, cs.partial, cs.notMet], [0, 1, 1]);
@@ -750,9 +931,9 @@ test('cost: a native agent row with no output tokens gets a lower-bound note in 
   assert.equal(costNote([{ seat: 'seat B', output: 5, calls: 2 }]), null);
 });
 
-test('cost: every format with a cost table says once that session probes and earlier failed attempts are not counted', () => {
+test('cost: every format with a cost table says once that session probes and earlier failed attempts are not counted, and why there is no dollar figure', () => {
   const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST });
-  const scope = /The cost covers the completed review calls; session probes and earlier failed attempts are not counted\./g;
+  const scope = /The cost covers the completed review calls in tokens; session probes and earlier failed attempts are not counted\. No dollar figure is shown: no price table ships with the skill\./g;
   for (const out of [renderText(report, { color: false }), renderMarkdown(report), renderHtml(report), renderChat(report, { all: true })]) assert.equal(out.match(scope)?.length, 1);
   assert.doesNotMatch(renderChat(report), scope, 'the short chat report has no cost table');
 });
@@ -761,7 +942,7 @@ test('cost: a Claude seat that reports input and cache write apart gets a Cache 
   const usage = { A: { input_tokens: 1000, cache_creation_input_tokens: 90000, new_input_tokens: 91000, context_reread_tokens: 500000, calls: 5, output_tokens: null }, B: { input_tokens: 2000, cached_input_tokens: 500, output_tokens: 10 } };
   const report = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, seat_usage: usage } });
   const a = report.cost.find((r) => r.seat === 'seat A');
-  assert.deepEqual([a.newInput, a.cacheWrite], [1000, 90000]);
+  assert.deepEqual([a.newInput, a.cacheWrite], [91000, 90000], 'new input is everything not read from the cache, the cache write included');
   assert.match(renderText(report, { color: false }), /Cache write/);
   assert.match(renderMarkdown(report), /\| Seat \| New input \| Cache write \| Cache read/);
   assert.match(renderHtml(report), /<th>Cache write<\/th>/);
@@ -774,12 +955,83 @@ test('chat: a blocker the notes mark pre-existing stays in the blocker count, as
     findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH' }), finding({ id: 'F2', severity: 'HIGH' })] },
     manifest: MANIFEST,
     notesText: ['## Finding status', '- F2: pre-existing, not from this diff', ''].join(String.fromCharCode(10)),
+    changeDiffs: [{ name: 'since.diff', text: '--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n' }],
   });
   const out = renderChat(report);
-  assert.ok(out.includes('2 blockers (fix F1 first; F2 marked in the report notes)'));
+  assert.ok(out.includes('2 blockers (fix F1 first; F2 marked pre-existing in the report notes, not fix now)'));
   assert.match(renderText(report), /Blockers: 2/);
   assert.ok(out.includes('| Pre-existing | F2 | 1 |'));
   assert.match(out, /^ {2}PRE-EXISTING 1 not caused by this change: F2/m);
+});
+
+test('a finding marked pre-existing whose evidence is on lines the change added stays in Fix now, with a caveat', () => {
+  const report = buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', evidence: ['x.py:1'] }), finding({ id: 'F2', severity: 'HIGH', evidence: ['x.py:90'] })] },
+    manifest: MANIFEST,
+    notesText: ['## Finding status', '- F1: pre-existing', '- F2: pre-existing', ''].join(String.fromCharCode(10)),
+    changeDiffs: [{ name: 'since.diff', text: '--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n' }],
+  });
+  const g = groupFindings(report);
+  assert.deepEqual([g.fixNow.map((f) => f.id), g.preExisting.map((f) => f.id)], [['F1'], ['F2']]);
+  assert.ok(report.caveats.includes('F1 is marked pre-existing in the report notes, but its evidence is on lines the change added, so it stays where its severity puts it.'));
+  assert.ok(!report.caveats.some((c) => c.startsWith('F2 is marked pre-existing')));
+  // Fix review R1: another package's Reporter.py matched only by file name does not overrule the notes.
+  const other = buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', evidence: ['HITACHI_DEVICE/Reporter.py:11'] })] },
+    manifest: MANIFEST,
+    notesText: ['## Finding status', '- F1: pre-existing', ''].join(String.fromCharCode(10)),
+    changeDiffs: [{ name: 'since.diff', text: '--- a/CONTOSO_V4_DEVICE/Reporter.py\n+++ b/CONTOSO_V4_DEVICE/Reporter.py\n@@ -10 +10,2 @@\n a\n+b\n' }],
+  });
+  assert.equal(other.findings[0].where.byName, true);
+  assert.deepEqual(groupFindings(other).preExisting.map((f) => f.id), ['F1']);
+  assert.ok(!other.caveats.some((c) => c.includes('so it stays where its severity puts it')));
+  assert.ok(other.caveats.includes('F1 is marked pre-existing in the report notes; its evidence matches lines the change added only by file name (HITACHI_DEVICE/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py), so check it is not the same file.'));
+  // Round 2 F2: a bare name that one changed file in a folder has is a guess too.
+  const bare = buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', evidence: ['Reporter.py:11'] })] },
+    manifest: MANIFEST,
+    notesText: ['## Finding status', '- F1: pre-existing', ''].join(String.fromCharCode(10)),
+    changeDiffs: [{ name: 'since.diff', text: '--- a/CONTOSO_V4_DEVICE/Reporter.py\n+++ b/CONTOSO_V4_DEVICE/Reporter.py\n@@ -10 +10,2 @@\n a\n+b\n' }],
+  });
+  assert.equal(bare.findings[0].where.byName, true);
+  assert.deepEqual(groupFindings(bare).preExisting.map((f) => f.id), ['F1']);
+});
+
+test('field run: the seats\' own "Pre-existing: yes" groups a non-blocker as pre-existing; a "no", an author note, added lines, a blocker or no change diff keep it', () => {
+  const diff = [{ name: 'since.diff', text: '--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n' }];
+  const f = (id, pre, extra = {}) => finding({ id, severity: 'MEDIUM', evidence: ['x.py:90'], pre_existing: pre, ...extra });
+  const report = buildReport({
+    findingsDoc: { findings: [
+      f('F1', ['A1: yes']),
+      f('F2', ['A2: yes', 'B2: no']),
+      f('F3', ['A3: yes'], { evidence: ['x.py:1'] }),
+      f('F4', ['A4: yes'], { severity: 'HIGH' }),
+      f('F5', ['A5: yes']),
+      f('F6', ['A6: unknown']),
+    ] },
+    manifest: MANIFEST,
+    notesText: ['## Finding status', '- F5: fixed in abc123', ''].join(String.fromCharCode(10)),
+    changeDiffs: diff,
+  });
+  const g = groupFindings(report);
+  assert.deepEqual(g.preExisting.map((x) => x.id), ['F1'], 'only F1: F2 has a "no", F3 is on added lines, F4 is a blocker, F5 has an author note, F6 is unknown');
+  assert.deepEqual(g.fixNow.map((x) => x.id), ['F4']);
+  assert.deepEqual(g.fixed.map((x) => x.id), ['F5']);
+  const noDiff = buildReport({ findingsDoc: { findings: [f('F1', ['A1: yes'])] }, manifest: MANIFEST });
+  assert.deepEqual(groupFindings(noDiff).preExisting, [], 'without a change diff the word means nothing');
+});
+
+test('field website: with no change diff, "pre-existing" in the notes does not move a finding out of Fix now, and a caveat says why', () => {
+  const report = buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH' }), finding({ id: 'F2', severity: 'HIGH' })] },
+    manifest: MANIFEST,
+    notesText: ['## Finding status', '- F1: pre-existing: older than yesterday', '- F2: pre-existing, not from this diff', ''].join(String.fromCharCode(10)),
+  });
+  const g = groupFindings(report);
+  assert.deepEqual(g.fixNow.map((f) => f.id), ['F1', 'F2']);
+  assert.deepEqual(g.preExisting, []);
+  assert.ok(report.caveats.includes('F1, F2 are marked pre-existing in the report notes, but this report has no change diff (since.diff in the run folder, or --change-diff), so nothing tells what the change was; they stay where their severity puts them.'));
+  assert.ok(renderChat(report).includes('2 blockers (fix F1, F2 first)'));
 });
 
 test('review fixes: NO-GO is not GO, a negated or future status is not "fixed", a tag is never its own verdict, status lines with bold ids or several ids are read', () => {
@@ -802,11 +1054,11 @@ test('review fixes: NO-GO is not GO, a negated or future status is not "fixed", 
 test('review fixes: a Claude CLI seat keeps input, cache read and cache write apart; the COVERED line counts criteria without a verdict; the CHECKED line stays within 100 characters', () => {
   assert.deepEqual(
     seatCostRow('seat A', { input_tokens: 50, cached_input_tokens: 800000, cache_write_input_tokens: 90000, output_tokens: 4000 }, { anthropic: true }),
-    { seat: 'seat A', newInput: 50, cacheWrite: 90000, cacheRead: 800000, output: 4000, calls: null },
+    { seat: 'seat A', newInput: 90050, cacheWrite: 90000, cacheRead: 800000, output: 4000, calls: null },
   );
   assert.equal(seatCostRow('seat B', { input_tokens: 851000, cached_input_tokens: 750000, output_tokens: 6000 }).newInput, 101000, 'Codex input still includes the cached part');
   const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [AC-2] two', '- [AC-3] three');
-  const seat = lines('# A', '', '## No findings', '', '## Checks performed', '- AC-1 MET: x', '- AC-2: looked, no verdict word', '- AC-3: looked too');
+  const seat = lines('# A', '', '## No findings', '', '- AC-1 MET: x', '- AC-2: looked, no verdict word', '- AC-3: looked too');
   const out = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: SEAT_B } }));
   assert.match(out, /^ {2}COVERED {6}3 of 3 criteria checked by a seat\n {2}VERDICTS {5}1 met, 0 partial, 0 not met, 2 no issue found$/m);
   const many = [
@@ -835,7 +1087,7 @@ test('live-run fixes: a claim heading that names its criterion bare counts as th
   assert.ok(report.caveats.some((c) => c.includes('Criterion AC-2 (seat B): the seat wrote NOT MET or reported a failing check')));
   assert.match(renderChat(report), /^- FAILING {6}1 criterion reports a failing check with no verdict and no finding$/m);
   assert.match(renderText(report), /AC-2 +failing check reported, no finding tagged \(B\)/, 'the row does not say "no issue found"');
-  assert.deepEqual(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: SEAT_B, B: lines('# B', '', '## No findings', '', '## Checks performed', '- AC-1: does not fail, sumTo(4) is right.', '- AC-2: no failure seen.') } }).criteria.rows.map((r) => r.failedSeats), [[], []], 'negated phrases are not failures');
+  assert.deepEqual(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: SEAT_B, B: lines('# B', '', '## No findings', '', '- AC-1: does not fail, sumTo(4) is right.', '- AC-2: no failure seen.') } }).criteria.rows.map((r) => r.failedSeats), [[], []], 'negated phrases are not failures');
 });
 
 test('live-run fixes: the auditor and its cache write come from actors[]; a Claude per-call new input is its own input, not input minus cache', () => {
@@ -843,9 +1095,9 @@ test('live-run fixes: the auditor and its cache write come from actors[]; a Clau
   const manifest = { ...MANIFEST, seat_usage: {}, actors: [{ role: 'auditor', model_resolved: 'claude-sonnet-5-5', usage }], reviewers: [{ role: 'A', provider: 'anthropic', usage, usage_per_call: [usage, { ...usage, input_tokens: 4 }] }] };
   const report = buildReport({ findingsDoc: { findings: [] }, manifest });
   const aud = report.cost.find((r) => r.seat === 'auditor');
-  assert.deepEqual([aud.newInput, aud.cacheWrite, aud.cacheRead, aud.output], [6, 18341, 44568, 1343]);
+  assert.deepEqual([aud.newInput, aud.cacheWrite, aud.cacheRead, aud.output], [18347, 18341, 44568, 1343]);
   const seatA = report.cost.find((r) => r.seat === 'seat A');
-  assert.deepEqual(seatA.perCall, [6, 4]);
+  assert.deepEqual(seatA.perCall, [18347, 18345]);
   assert.deepEqual(perCallNewInput([{ input_tokens: 900, cached_input_tokens: 800 }]), [100], 'Codex input still includes the cached part');
 });
 
@@ -869,14 +1121,28 @@ test('vsi feedback: the markdown report omits an unwritten Why instead of printi
   assert.match(renderMarkdown({ ...report, why: 'One sentence.' }), /\*\*Why:\*\* One sentence\./);
 });
 
-test('chat: a refuted hypothesis gets its own red line; confirmed ones are counted, the rest named by tag', () => {
+test('chat: a confirmed hypothesis is the red line, a refuted one is good news (+ when all are refuted), the rest named by tag', () => {
   const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [H1] a', '- [H2] b', '- [H3] c', '- [H4] d');
-  const seat = lines('# A', '', '## No findings', '', '## Checks performed', '- H1: REFUTED by the new test.', '- H2: CONFIRMED.', '- H3: PARTLY CONFIRMED, one path remains.', '- H4: looked at it, no outcome word.');
+  const seat = lines('# A', '', '## No findings', '', '- H1: REFUTED by the new test.', '- H2: CONFIRMED.', '- H3: PARTLY CONFIRMED, one path remains.', '- H4: looked at it, no outcome word.');
   const out = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: SEAT_B } }));
   assert.match(out, /^- SPLIT {8}H1 \(A refuted, B confirmed\)$/m);
-  const both = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: lines('# B', '', '## No findings', '', '## Checks performed', '- H1: REFUTED too.') } }));
-  assert.match(both, /^- REFUTED {6}H1$/m);
-  assert.match(out, /^ {2}HYPOTHESES {3}H3 partly confirmed, H4 outcome not parsed, 1 confirmed$/m);
+  const both = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: lines('# B', '', '## No findings', '', '- H1: REFUTED too.') } }));
+  assert.match(both, /^ {2}REFUTED {6}H1$/m, 'refuted is not a red line');
+  const onlyH1 = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [H1] a');
+  const allRefuted = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: onlyH1, seatTexts: { A: lines('# A', '', '## Checks performed', '- H1: REFUTED.'), B: lines('# B', '', '## Checks performed', '- H1: REFUTED too.') } }));
+  assert.match(allRefuted, /^\+ REFUTED {6}H1$/m, 'every hypothesis refuted: the good outcome');
+  // The terminal report paints all-refuted green and a confirmed hypothesis red.
+  const green = renderText(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: onlyH1, seatTexts: { A: lines('# A', '', '## Checks performed', '- H1: REFUTED.') } }), { color: true });
+  assert.match(green, /HYPOTHESES \(1\)[^\n]*\x1b\[32m1 REFUTED/);
+  const red = renderText(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: onlyH1, seatTexts: { A: lines('# A', '', '## Checks performed', '- H1: CONFIRMED.') } }), { color: true });
+  assert.match(red, /HYPOTHESES \(1\)[^\n]*\x1b\[31m/);
+  // The HTML page uses the same colours: a confirmed hypothesis is a red chip, a refuted one green.
+  const html = (verdict) => renderHtml(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: onlyH1, seatTexts: { A: lines('# A', '', '## Checks performed', `- H1: ${verdict}.`) } }));
+  assert.match(html('CONFIRMED'), /<span class="chip high">Confirmed<\/span>/);
+  assert.match(html('REFUTED'), /<span class="chip ok">Refuted<\/span>/);
+  assert.match(out, /^- CONFIRMED {4}H2$/m);
+  assert.match(out, /^ {2}HYPOTHESES {3}H3 partly confirmed, H4 outcome not parsed$/m);
+  assert.doesNotMatch(out, /^- REFUTED/m);
 });
 
 test('chat: a severity the auditor changed is shown with the auditor reason, three at most', () => {
@@ -892,7 +1158,7 @@ test('chat: a severity the auditor changed is shown with the auditor reason, thr
 
 test('vocabulary: a criterion a seat marked NOT MET or PARTIAL with no finding is never labelled "no issue found" in text, markdown or html', () => {
   const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [AC-2] two', '- [AC-3] three');
-  const seat = lines('# A', '', '## No findings', '', '## Checks performed', '- AC-1 NOT MET: the loop is off by one', '- AC-2 PARTIAL: live run missing', '- AC-3 MET: ok');
+  const seat = lines('# A', '', '## No findings', '', '- AC-1 NOT MET: the loop is off by one', '- AC-2 PARTIAL: live run missing', '- AC-3 MET: ok');
   const report = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: SEAT_B } });
   const md = renderMarkdown(report);
   assert.match(md, /AC-1 .*NOT MET, no finding tagged \(A\)/);
@@ -958,13 +1224,13 @@ test('self-review fixes: only lines that start with a tag count for it; a mentio
   assert.deepEqual(numbered.criteria.rows.map((r) => r.status), ['clean', 'not-verified'], 'a numbered line belongs to the tag after the number');
 });
 
-test('self-review fixes: failure words on a line with a verdict are not a failing check; without a verdict the row says so', () => {
+test('self-review fixes: failure words on a line with a verdict are not a failing check; without a verdict the row says so', async () => {
   const run = (line) => buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: lines('- [AC-4] x'), seatTexts: { A: lines('## Checks performed', line), B: '' } });
   for (const line of ['- AC-4: verified that a failed step exits 1 and a broken pipe exits 0. MET', '- AC-4: --fail-on-command-error exits 4. MET', '- AC-4: a path that cannot be read is skipped. MET']) {
-    const r = run(line).criteria.rows[0];
+    const r = (await run(line)).criteria.rows[0];
     assert.deepEqual([r.failedSeats, r.doubt], [[], []], line);
   }
-  const noVerdict = run('- AC-4: fails in one case, see below');
+  const noVerdict = await run('- AC-4: fails in one case, see below');
   assert.deepEqual(noVerdict.criteria.rows[0].failedSeats, ['A']);
   assert.match(renderText(noVerdict), /AC-4 +failing check reported, no finding tagged \(A\)/);
   assert.match(renderMarkdown(noVerdict), /failing check reported, no finding tagged \(A\)/);
@@ -1045,7 +1311,7 @@ test('self-review fixes: byte-order marks, a table-row status, a null id, a mixe
   await fs.writeFile(path.join(dir, 'phase3', 'findings.json'), `${bom}{"findings":[]}`);
   await fs.writeFile(path.join(dir, 'manifest.json'), `${bom}${JSON.stringify(MANIFEST)}`);
   await fs.writeFile(path.join(dir, 'phase3', 'report-notes.md'), `${bom}${lines('## Why', 'Because of the BOM.')}`);
-  const r = spawnSync(process.execPath, [SCRIPT, '--run-dir', dir], { encoding: 'utf8', env: { ...process.env, NO_COLOR: '1' } });
+  const r = await runCli(['--run-dir', dir], { NO_COLOR: '1' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Why: Because of the BOM\./);
   assert.deepEqual([...findingStatus(lines('| F1 | fixed after snapshot |', '- F2: fixed', '| F3 | pre-existing | extra |'))], [['F1', 'fixed after snapshot'], ['F2', 'fixed'], ['F3', 'pre-existing']]);
@@ -1054,15 +1320,56 @@ test('self-review fixes: byte-order marks, a table-row status, a null id, a mixe
   assert.equal(mixed.criteria.rows[0].verdict, 'partly', 'a mixed outcome is partly, not refuted');
   const cost = buildReport({ findingsDoc: { findings: [] }, manifest: { status: 'completed', actors: [{ role: 'auditor', provider: 'anthropic', model_requested: 'opus', usage: { input_tokens: 6, cached_input_tokens: 44568, cache_write_input_tokens: 18341, output_tokens: 1343, source: 'summed-per-call' } }], reviewers: [{ role: 'B', provider: 'opencode', usage: { input_tokens: 19907, cached_input_tokens: 1792, cache_write_input_tokens: 0, output_tokens: 4, calls: 1 } }, { role: 'A', provider: 'openai', usage: { input_tokens: 2269954, cached_input_tokens: 2009344, cache_write_input_tokens: 0, output_tokens: 35791 } }] } }).cost;
   const row = (seat) => cost.find((x) => x.seat === seat);
-  assert.deepEqual([row('auditor').newInput, row('auditor').cacheWrite], [6, 18341], 'a Claude auditor with a short model alias');
+  assert.deepEqual([row('auditor').newInput, row('auditor').cacheWrite], [18347, 18341], 'a Claude auditor with a short model alias');
   assert.deepEqual([row('seat B').newInput, row('seat B').cacheRead], [19907, 1792], 'OpenCode reports input without the cache');
   assert.equal(row('seat A').newInput, 260610, 'Codex input still includes the cache');
 });
 
-test('self-review fixes: a reader that closes stdout early keeps the exit code and the requested files', async (t) => {
+test('a hypothesis worded "Confirm it is fixed" has its outcomes flipped, so REFUTED still means the defect is gone', () => {
+  const packet = lines('- [H1] Previous finding F1: the cache is never cleared. Confirm it is fixed.', '- [H2] the cache is never cleared on reload.');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: lines('## Checks performed', '- H1: CONFIRMED, the clear runs now.', '- H2: REFUTED.'), B: lines('## Checks performed', '- H1: CONFIRMED.', '- H2: REFUTED.') } });
+  const by = Object.fromEntries(report.criteria.rows.map((r) => [r.tag, r]));
+  assert.equal(by.H1.verdict, 'refuted', 'fix-worded CONFIRMED means fixed');
+  assert.deepEqual(by.H1.outcomes, { A: 'REFUTED', B: 'REFUTED' });
+  assert.equal(by.H2.verdict, 'refuted', 'a defect-worded hypothesis is not flipped');
+  assert.equal(report.criteria.hypothesisStats.confirmed, 0);
+  const caveats = renderChat(report, { all: true });
+  assert.match(caveats, /H1 was worded "Confirm it is fixed"/);
+  assert.doesNotMatch(caveats, /H2 was worded/);
+  const open = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: lines('## Checks performed', '- H1: REFUTED, the clear still never runs.'), B: lines('## Checks performed', '- H1: REFUTED.') } });
+  assert.equal(open.criteria.rows[0].verdict, 'confirmed', 'fix-worded REFUTED means the defect is still there');
+  // Fix review R5: a packet that defines CONFIRMED asked for the defect's side, so nothing is flipped.
+  const defined = lines('In `## Checks performed`, end each hypothesis line with CONFIRMED (the previous defect is still there), REFUTED (it is gone) or PARTLY CONFIRMED; the report prints that outcome.', packet);
+  const current = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: defined, seatTexts: { A: lines('## Checks performed', '- H1: CONFIRMED, still broken.'), B: lines('## Checks performed', '- H1: CONFIRMED.') } });
+  assert.equal(current.criteria.rows.find((r) => r.tag === 'H1').verdict, 'confirmed');
+  assert.ok(!current.caveats.some((c) => c.includes('Confirm it is fixed')));
+});
+
+test('round 2 F3: the seats\' brief decides the "Confirm it is fixed" flip, read from phase1/brief-A.txt by loadRun', async (t) => {
+  const packet = lines('- [H1] Previous finding F1: the cache is never cleared. Confirm it is fixed.');
+  const seats = { A: lines('## Checks performed', '- H1: CONFIRMED, still broken.'), B: lines('## Checks performed', '- H1: CONFIRMED.') };
+  const today = 'end a hypothesis line with CONFIRMED (the defect it names exists), REFUTED\n  (it does not)';
+  assert.equal(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: seats, briefText: today }).criteria.rows[0].verdict, 'confirmed', 'a current brief: no flip, even with a packet that does not define it');
+  assert.equal(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: seats, briefText: 'an old brief' }).criteria.rows[0].verdict, 'refuted', 'a 1.1.0 brief: flipped');
   const dir = await makeRun(t);
+  await fs.writeFile(path.join(dir, 'task-packet.md'), packet);
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), seats.A);
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), seats.B);
+  await fs.writeFile(path.join(dir, 'phase1', 'brief-A.txt'), today);
+  assert.equal((await loadRun(dir)).criteria.rows[0].verdict, 'confirmed');
+  // Round 3 F1: a CLI first seat keeps its brief at phase1/A/brief.txt.
+  await fs.rm(path.join(dir, 'phase1', 'brief-A.txt'));
+  assert.equal((await loadRun(dir)).criteria.rows[0].verdict, 'refuted', 'no brief: the packet decides');
+  await fs.mkdir(path.join(dir, 'phase1', 'A'));
+  await fs.writeFile(path.join(dir, 'phase1', 'A', 'brief.txt'), today);
+  assert.equal((await loadRun(dir)).criteria.rows[0].verdict, 'confirmed', 'the CLI seat brief');
+});
+
+test('self-review fixes: a reader that closes stdout early keeps the exit code and the requested files (review-run report)', async (t) => {
+  const dir = await makeRun(t);
+  const reviewRun = fileURLToPath(new URL('../review-run.mjs', import.meta.url));
   const run = (args) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [SCRIPT, '--run-dir', dir, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [reviewRun, 'report', '--run-dir', dir, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.destroy();
     child.on('close', resolve);
   });
@@ -1083,26 +1390,26 @@ test('failing words that describe code, quotes, identifiers or an expected pre-f
   const seatA = lines('# A', '', '## No findings', '', '## Checks performed',
     "- [AC-36-1] static trace: `use == 'failed'` sets is_failed=1 and a Red 'Failed Drive' log_error with failed_drive_count++, and the drive_failed column.",
     '- [AC-36-2] the pre-fix test failed as intended; the fixed code passes.');
-  const seatB = lines('# B', '', '## No findings', '', '## Checks performed', '- AC-36-1, AC-36-2: traced failed-drive counting and the alert identity. No defect found statically.');
+  const seatB = lines('# B', '', '## No findings', '', '- AC-36-1, AC-36-2: traced failed-drive counting and the alert identity. No defect found statically.');
   const report = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB } });
   assert.deepEqual(report.criteria.rows.map((r) => r.failedSeats), [[], []]);
   assert.equal(report.caveats.some((c) => c.includes('failing check')), false);
-  const real = lines('# A', '', '## No findings', '', '## Checks performed', '- [AC-36-1] device independence fails (reproduced); I filed no claim for it.');
+  const real = lines('# A', '', '## No findings', '', '- [AC-36-1] device independence fails (reproduced); I filed no claim for it.');
   const flagged = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: real, B: seatB } });
   assert.deepEqual(flagged.criteria.rows[0].failedSeats, ['A'], 'a real failing sentence is still flagged');
 });
 
 test('live run notes: unresolved is not "disputed", seats that split on a hypothesis are named, a split ticket gets a caveat, a PARTIAL shows its reason, markdown carries the recommended fix', () => {
   const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [AC-2] two', '- [H1] no path can double count', '- [H2] second', '- Tickets: 6036 = AC-1, AC-2');
-  const seatA = lines('# A', '', '## No findings', '', '## Checks performed', '- AC-1 PARTIAL: the NVMe host path was not run.', '- AC-2 MET: ok', '- H1: no path double counts. REFUTED.', '- H2: CONFIRMED.', '- 6036: NO GO - AC-1 is partial');
-  const seatB = lines('# B', '', '## No findings', '', '## Checks performed', '- AC-1 MET: ok', '- AC-2 MET: ok', '- H1: read the loop. CONFIRMED.', '- H2: CONFIRMED.', '- 6036: GO');
+  const seatA = lines('# A', '', '## No findings', '', '- AC-1 PARTIAL: the NVMe host path was not run.', '- AC-2 MET: ok', '- H1: no path double counts. REFUTED.', '- H2: CONFIRMED.', '- 6036: NO GO - AC-1 is partial');
+  const seatB = lines('# B', '', '## No findings', '', '- AC-1 MET: ok', '- AC-2 MET: ok', '- H1: read the loop. CONFIRMED.', '- H2: CONFIRMED.', '- 6036: GO');
   const report = buildReport({
     findingsDoc: { findings: [finding({ id: 'F1', severity: 'MEDIUM', final_state: 'unresolved-low-stakes', recommended_fix: 'Key the dedup on node id and status. Then add a test.' })] },
     manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB },
   });
   const chat = renderChat(report);
   assert.doesNotMatch(chat, /disputed/);
-  assert.match(chat, /1 unresolved \(not settled\)/);
+  assert.match(chat, /1 unresolved \(F1\)/);
   assert.match(chat, /^- SPLIT {8}H1 \(A refuted, B confirmed\)/m);
   assert.doesNotMatch(chat, /^- REFUTED/m);
   assert.match(chat, /^ {2}PARTIAL {6}AC-1 {2}no finding tagged$/m);
@@ -1111,13 +1418,27 @@ test('live run notes: unresolved is not "disputed", seats that split on a hypoth
   assert.match(renderMarkdown(report), /Fix: Key the dedup on node id and status\. Then add a test\./);
 });
 
+test('field feedback S3: a split ticket whose NO GO rests on a finding the auditor confirmed says the finding settles it', () => {
+  const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- Tickets: 6076 = AC-1');
+  const seatA = lines('# A', '', '## A1 [AC-1] The lag check returns None', 'Severity: HIGH', '', '## Checks performed', '- AC-1 NOT MET: see A1', '- 6076: NO GO - see A1');
+  const seatB = lines('# B', '', '## No findings', '', '- AC-1 MET: ok', '- 6076: GO');
+  const build = (result) => buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', origins: ['A1'], auditor_check: { result } })] },
+    manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB },
+  });
+  const settled = build('CONFIRMED').caveats.find((c) => c.startsWith('Ticket 6076'));
+  assert.equal(settled, 'Ticket 6076: the seats disagree (A NO GO, B GO); the auditor confirmed F1, so the ticket stays NO GO until it is fixed.');
+  const open = build('NOT_CHECKED').caveats.find((c) => c.startsWith('Ticket 6076'));
+  assert.match(open, /the exchange did not reconcile it, so read both seat files before you act\.$/, 'no confirmed finding: both seat files');
+});
+
 test('live run notes 4: the full recommended fix, a wrapped PARTIAL reason, SPLIT in the table, every flagged tag in the banner, findings next to a ticket verdict', () => {
   const longFix = 'Route the volume status through the alert helper, keep the remote-copy exception, guard a None status, and add a regression test. ' + 'Risk: the offline path changes colour; check the Yellow rows. '.repeat(8);
   const reason = 'the NVMe host path was not run because the lab array has no NVMe shelf and the simulator cannot return the tier field the code reads, so only the SAS path is proved';
   const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [AC-2] two', '- [AC-3] three', '- [AC-4] four', '- [AC-5] five', '- [AC-6] six', '- [H1] no path double counts', '- Tickets: 6036 = AC-1, AC-2, AC-3, AC-4, AC-5, AC-6');
   const checks = (v) => ['## Checks performed', ...['AC-2', 'AC-3', 'AC-4', 'AC-5', 'AC-6'].map((t) => '- ' + t + ' MET: ok'), '- AC-1 PARTIAL: ' + reason + '.', '- H1: ' + v + '.', '- 6036: NO GO - see AC-1'];
   const seatA = lines('# A', '', '## A1 [AC-2] [AC-3] [AC-4] [AC-5] [AC-6] The first claim', 'Severity: MEDIUM', '', ...checks('REFUTED'));
-  const seatB = lines('# B', '', '## No findings', '', ...checks('CONFIRMED'));
+  const seatB = lines('# B', '', '## No findings', '', ...checks('CONFIRMED').slice(1));
   const report = buildReport({
     findingsDoc: { findings: [finding({ id: 'F1', severity: 'MEDIUM', origins: ['A1'], recommended_fix: longFix })] },
     manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB },
@@ -1142,11 +1463,17 @@ test('live run notes 5: a finding tagged only BUG-<ticket> or PROD-<ticket> show
   const packet = lines('# P', '## Acceptance criteria', '- [AC-30-1] one', '- [BUG-6030] bug reproduced and fixed', '- [PROD-6030] ticket is prod-ready', '- Tickets: 6030 = AC-30-1');
   const seatA = lines('# A', '', '## A1 [BUG-6030] [PROD-6030] The excluded volume gets no row', 'Severity: HIGH', '', '## Checks performed',
     '- AC-30-1 PARTIAL: ' + longReason, '- 6030: NO GO - see the volume finding');
-  const seatB = lines('# B', '', '## No findings', '', '## Checks performed', '- AC-30-1 MET: ok', '- 6030: NO GO');
+  const seatB = lines('# B', '', '## No findings', '', '- AC-30-1 MET: ok', '- 6030: NO GO');
   const report = buildReport({
     findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', origins: ['A1'] })] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB },
   });
   assert.deepEqual(report.criteria.tickets.find((x) => x.id === '6030').findings, ['F1']);
+  // Fix review R4: a finding the author marked wrong leaves the ticket line too.
+  const wrong = buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', origins: ['A1'] })] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB },
+    notesText: lines('## Finding status', '- F1: wrong: the volume is excluded on purpose'),
+  });
+  assert.deepEqual(wrong.criteria.tickets.find((x) => x.id === '6030').findings, []);
   const chat = renderChat(report);
   assert.match(chat, /^- NO GO {8}6030 {2}findings F1/m);
   const row = report.criteria.rows.find((r) => r.tag === 'AC-30-1');
@@ -1172,7 +1499,7 @@ test('live run notes 6: a finding tagged only BUG-<ticket> in its heading reache
 
 test('live run notes 8: a tag the Tickets line does not list (AC-30-F6) joins the one ticket whose number ends in 30, not a ticket "30"', () => {
   const packet = lines('# P', '## Acceptance criteria', '- [AC-30-1] one', '- [AC-30-F1] two', '- [AC-30-F6] three', '- [AC-36-1] four', 'Tickets: 6036 = AC-36-1; 6030 = AC-30-1');
-  const checks = lines('# A', '', '## No findings', '', '## Checks performed', '- AC-30-1 MET: ok', '- AC-30-F1 MET: ok', '- AC-30-F6 MET: ok', '- AC-36-1 MET: ok', '- 6030: GO', '- 6036: GO');
+  const checks = lines('# A', '', '## No findings', '', '- AC-30-1 MET: ok', '- AC-30-F1 MET: ok', '- AC-30-F6 MET: ok', '- AC-36-1 MET: ok', '- 6030: GO', '- 6036: GO');
   const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: checks, B: SEAT_B } });
   const groups = Object.fromEntries(report.criteria.rows.map((r) => [r.tag, r.group]));
   assert.deepEqual(groups, { 'AC-30-1': '6030', 'AC-30-F1': '6030', 'AC-30-F6': '6030', 'AC-36-1': '6036' });
@@ -1226,7 +1553,269 @@ test('commands: the chat report names a seat only when none of its commands succ
   assert.match(none, /^- COMMANDS     seat A ran no commands; its result rests on reading alone$/m);
   const one = chat({ ...COMMANDS_MANIFEST, reviewers: [MANIFEST.reviewers[0], { ...COMMANDS_MANIFEST.reviewers[1], commands: { tried: 1, failed: 1, source: 'codex-rollout' } }] });
   assert.match(one, /^- COMMANDS     seat B tried 1 command, it failed; its result rests on reading alone$/m);
+  const scripts = chat({ ...COMMANDS_MANIFEST, reviewers: [MANIFEST.reviewers[0], { ...COMMANDS_MANIFEST.reviewers[1], commands: { tried: 1, failed: 1, scripts: 29, scriptsFailed: 2, source: 'codex-rollout' } }] });
+  assert.match(scripts, /^- COMMANDS     seat B tried 1 command, it failed; it ran 27 tool scripts instead$/m, 'a seat that ran node_repl scripts did more than read');
   const auditor = chat({ ...COMMANDS_MANIFEST, seat_usage: { ...COMMANDS_MANIFEST.seat_usage, auditor: { commands: { tried: 0, failed: 0, source: 'transcript' } } } });
   assert.doesNotMatch(auditor, /COMMANDS +auditor/, 'the line is about the reviewer seats');
-  for (const out of [text, none, one]) for (const line of out.split(NL)) assert.ok(line.length <= 100 || !/COMMANDS/.test(line), line);
+  for (const out of [text, none, one, scripts]) for (const line of out.split(NL)) assert.ok(line.length <= 100 || !/COMMANDS/.test(line), line);
+});
+
+test('field r4: a status line that looks like an outcome word but is not one gets a caveat; a real one or free text does not', () => {
+  const caveats = (line) => buildReport({ findingsDoc: { findings: [finding({ id: 'F1' })] }, manifest: MANIFEST, notesText: `## Finding status\n- F1: ${line}\n` }).caveats.filter((c) => c.includes('not an outcome word'));
+  assert.equal(caveats('wontfix: too costly').length, 1);
+  assert.match(caveats('wontfix: too costly')[0], /F1's line in the report notes starts with "wontfix:"/);
+  assert.equal(caveats('not-worth-it: one log line').length, 0);
+  assert.equal(caveats('fixed after the snapshot, not re-reviewed').length, 0);
+  assert.equal(caveats('https://dev.azure.com/org/project/_workitems/edit/6075').length, 0, 'a link is not a mistyped outcome word');
+});
+
+test('outcome words in the notes: only the first word counts; wrong withdraws (a blocker only with a reason) from the groups, blockers and severity counts; intentional/not-worth-it/decided can wait', () => {
+  assert.deepEqual(outcomeOf('wrong: the cap is never reached'), { word: 'wrong', reason: 'the cap is never reached' });
+  assert.deepEqual(outcomeOf('Not-worth-it - one log line'), { word: 'not-worth-it', reason: 'one log line' });
+  assert.deepEqual(outcomeOf('decided'), { word: 'decided', reason: '' });
+  assert.equal(outcomeOf('wrong value returned for empty input'), null, 'a plain sentence that starts with the word is not an outcome');
+  assert.equal(outcomeOf('returns the wrong value'), null);
+  assert.equal(outcomeOf('not fixed yet'), null);
+  const notes = lines('## Finding status', '- F1: wrong: needs 100,000 vdisks and the cap is 1000 pages of 1000', '- F2: wrong', '- F3: intentional: matches the vendor tool', '- F4: wrong: duplicate of F5', '- F5: returns the wrong value, not fixed yet');
+  const report = buildReport({
+    findingsDoc: { findings: [
+      finding({ id: 'F1', severity: 'HIGH' }), finding({ id: 'F2', severity: 'HIGH' }), finding({ id: 'F3', severity: 'MEDIUM' }),
+      finding({ id: 'F4', severity: 'MEDIUM' }), finding({ id: 'F5', severity: 'MEDIUM' }),
+    ] },
+    manifest: MANIFEST, notesText: notes,
+  });
+  const g = groupFindings(report);
+  assert.deepEqual(g.withdrawn.map((f) => f.id), ['F1', 'F4']);
+  assert.deepEqual(g.fixNow.map((f) => f.id), ['F2'], 'a blocker marked wrong with no reason stays');
+  assert.deepEqual(g.canWait.map((f) => f.id), ['F3']);
+  assert.deepEqual(g.fixNext.map((f) => f.id), ['F5'], 'free text keeps its old meaning');
+  assert.deepEqual(report.blockers, ['F2'], 'a blocker withdrawn with a reason is no longer a blocker');
+  assert.deepEqual([report.counts.high, report.counts.medium, report.counts.withdrawn], [1, 2, 2], 'withdrawn findings leave the severity counts');
+  assert.ok(report.caveats.some((c) => c.startsWith('F2 is marked wrong in the report notes with no reason')));
+  assert.ok(report.caveats.some((c) => c.startsWith('F1, F4 are marked wrong in the report notes, so they are counted as withdrawn')));
+  const chat = renderChat(report);
+  assert.match(chat, /^ {2}WITHDRAWN {4}2 claim\(s\) refuted or dropped, or marked wrong by the author: F1 F4$/m);
+  assert.match(chat, /1 blocker \(fix F2 first\)/);
+  assert.match(chat, /CHECKED +0 of 3 findings|VERIFIED/, 'the auditor line counts only findings still standing');
+});
+
+test('fix review R4: a finding marked wrong leaves its criterion, hypothesis and ticket lines too', () => {
+  const report = buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', origins: ['A1'] }), finding({ id: 'F2', severity: 'MEDIUM', origins: ['A2'] })] },
+    manifest: MANIFEST,
+    packetText: lines('- [AC-1] One.', '- [H1] the cap is never reached.'),
+    seatTexts: { A: lines('## A1 — [AC-1] cap missing', '## A2 — [H1] cap never reached', '## Checks performed', '- AC-1: MET.', '- H1: REFUTED.') },
+    notesText: lines('## Finding status', '- F1: wrong: the cap is never reached', '- F2: wrong: duplicate of F1'),
+  });
+  const by = Object.fromEntries(report.criteria.rows.map((r) => [r.tag, r]));
+  assert.deepEqual([by['AC-1'].status, by['AC-1'].findings, by['AC-1'].refuted], ['clean', [], ['F1']]);
+  assert.equal(by.H1.verdict, 'refuted');
+  assert.equal(report.criteria.hypothesisStats.confirmed, 0);
+  assert.doesNotMatch(renderChat(report, { all: true }), /issue found: F1/i);
+});
+
+const CHANGE_DIFF = lines(
+  'diff --git a/vsiclient/x.py b/vsiclient/x.py', '--- a/vsiclient/x.py', '+++ b/vsiclient/x.py', '@@ -10,3 +10,5 @@ def f():',
+  ' a = 1', '+b = 2', '+++ counter;', ' c = 4', ' d = 5',
+  'diff --git a/new.py b/new.py', 'new file mode 100644', '--- /dev/null', '+++ b/new.py', '@@ -0,0 +1,2 @@', '+one', '+two',
+);
+
+test('where in the change: the best tag over every evidence file:line (added lines, near the change, changed file, outside), unknown without one; an added "++" line is not a file header', () => {
+  const hunks = diffHunks(CHANGE_DIFF);
+  assert.deepEqual([...hunks.keys()], ['vsiclient/x.py', 'new.py']);
+  assert.deepEqual([...hunks.get('vsiclient/x.py').added], [11, 12]);
+  const tag = (...evidence) => whereInChange(evidence, hunks);
+  assert.deepEqual(tag('targets/app_client/vsiclient/x.py:11 sets b'), { tag: 'added lines', at: 'targets/app_client/vsiclient/x.py:11' });
+  assert.equal(tag('vsiclient/x.py:30').tag, 'near the change');
+  assert.equal(tag('vsiclient/x.py:200').tag, 'changed file');
+  assert.equal(tag('tests/test_x.py:5').tag, 'outside the change');
+  assert.equal(tag('tests/test_x.py:5 fails', 'then vsiclient/x.py:12').tag, 'added lines', 'the best location wins, not the first');
+  assert.equal(tag('C:\\repo\\vsiclient\\x.py:12').tag, 'added lines');
+  assert.equal(tag('new.py:2').tag, 'added lines');
+  assert.deepEqual(tag('no location here; see https://host.example:9443/x'), { tag: 'unknown', at: null });
+  assert.deepEqual(tag('curl http://10.0.0.5:8443/api/disks.json:200'), { tag: 'unknown', at: null }, 'a URL with a port is not a file:line');
+});
+
+test('where in the change: plain diff -u headers (tab and time), git-quoted names and deleted files are read; a root file does not claim a same-named file in a folder; two diffs keep their own files', () => {
+  const plain = lines('--- old/src/x.c\t2026-10-02 10:00:00.000000000 +0000', '+++ new/src/x.c\t2026-10-02 11:00:00.000000000 +0000', '@@ -1,2 +1,3 @@', ' a', '+b', ' c');
+  assert.equal(whereInChange(['src/x.c:2'], diffHunks(plain)).tag, 'added lines');
+  const quoted = lines('diff --git "a/src/caf\\303\\251.js" "b/src/caf\\303\\251.js"', '--- "a/src/caf\\303\\251.js"', '+++ "b/src/caf\\303\\251.js"', '@@ -1 +1,2 @@', ' x', '+y');
+  assert.deepEqual([...diffHunks(quoted).keys()], ['src/café.js']);
+  const deleted = lines('diff --git a/src/del.js b/src/del.js', 'deleted file mode 100644', '--- a/src/del.js', '+++ /dev/null', '@@ -1,2 +0,0 @@', '-one', '-two');
+  assert.equal(whereInChange(['src/del.js:1'], diffHunks(deleted)).tag, 'changed file');
+  const root = lines('--- a/index.js', '+++ b/index.js', '@@ -1 +1,2 @@', ' a', '+b');
+  assert.equal(whereInChange(['lib/index.js:2'], diffHunks(root)).tag, 'outside the change');
+  assert.equal(whereInChange(['index.js:2'], diffHunks(root)).tag, 'added lines');
+  const repoA = lines('--- a/src/app.py', '+++ b/src/app.py', '@@ -10 +10,2 @@', ' a', '+b');
+  const repoB = lines('--- a/src/app.py', '+++ b/src/app.py', '@@ -200 +200,2 @@', ' a', '+b');
+  assert.equal(whereInChange(['src/app.py:11'], [diffHunks(repoA), diffHunks(repoB)]).tag, 'added lines', 'one diff does not overwrite the other');
+});
+
+test('where in the change: a path under a snapshot folder matches by file name when one diff file in a folder has that name', () => {
+  const pkg = lines('--- a/CONTOSO_V4_DEVICE/Reporter.py', '+++ b/CONTOSO_V4_DEVICE/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+  assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(pkg)), { tag: 'added lines', at: 'REVIEW/head/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py', byName: true });
+  assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11', 'CONTOSO_V4_DEVICE/Reporter.py:11'], diffHunks(pkg)), { tag: 'added lines', at: 'CONTOSO_V4_DEVICE/Reporter.py:11' }, 'a path match wins over a name guess');
+  // Round 2 F1: same-named files (the two skills' identical copies) give the tag they agree on, else "unknown", never "outside".
+  const two = lines(pkg, '--- a/OTHER_DEVICE/Reporter.py', '+++ b/OTHER_DEVICE/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+  assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(two)), { tag: 'added lines', at: 'REVIEW/head/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py, OTHER_DEVICE/Reporter.py', byName: true });
+  assert.equal(whereInChange(['Reporter.py:11'], diffHunks(two)).tag, 'added lines', 'a bare name the same way');
+  const apart = lines(pkg, '--- a/OTHER_DEVICE/Reporter.py', '+++ b/OTHER_DEVICE/Reporter.py', '@@ -300 +300,2 @@', ' a', '+b');
+  assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(apart)), { tag: 'unknown', at: 'REVIEW/head/Reporter.py:11, file name shared by 2 changed files', byName: true, addedInOne: true });
+  const withRoot = lines(pkg, '--- a/Reporter.py', '+++ b/Reporter.py', '@@ -300 +300,2 @@', ' a', '+b');
+  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(withRoot)).tag, 'unknown', 'a root file with the name makes it ambiguous');
+  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(lines('--- a/x.py', '+++ b/x.py', '@@ -1 +1,2 @@', ' a', '+b'))).tag, 'outside the change', 'no diff file has the name');
+  // Round 3 F2: a partial path that two diff files end with is a guess, in either diff order; the whole path stays a real match.
+  const a = lines('--- a/pkgA/src/x.py', '+++ b/pkgA/src/x.py', '@@ -10 +10,2 @@', ' a', '+b');
+  const b = lines('--- a/pkgB/src/x.py', '+++ b/pkgB/src/x.py', '@@ -300 +300,2 @@', ' a', '+b');
+  for (const diff of [lines(a, b), lines(b, a)]) {
+    const w = whereInChange(['src/x.py:11'], diffHunks(diff));
+    assert.deepEqual([w.tag, w.byName, w.addedInOne], ['unknown', true, true]);
+  }
+  assert.deepEqual(whereInChange(['pkgA/src/x.py:11'], diffHunks(lines(a, b))), { tag: 'added lines', at: 'pkgA/src/x.py:11' });
+  assert.deepEqual(whereInChange(['src/x.py:11'], diffHunks(lines(a, lines('--- a/pkgB/src/x.py', '+++ b/pkgB/src/x.py', '@@ -10 +10,2 @@', ' a', '+b')))).tag, 'added lines', 'two that agree');
+  assert.deepEqual(whereInChange(['src/x.py:11'], diffHunks(a)), { tag: 'added lines', at: 'src/x.py:11' }, 'one diff file ends with it: a real match');
+  const root = lines('--- a/Reporter.py', '+++ b/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(root)).tag, 'outside the change', 'a root diff file never claims a file in a folder');
+});
+
+test('where in the change: shown in md and text with the diff it came from; without a diff nothing changes; the run folder since.diff is read by default', async (t) => {
+  const findingsDoc = { findings: [finding({ id: 'F1', severity: 'HIGH', evidence: ['vsiclient/x.py:11'] }), finding({ id: 'F2', evidence: ['notes only'] })] };
+  const report = buildReport({ findingsDoc, manifest: MANIFEST, changeDiffs: [{ name: 'since.diff', text: CHANGE_DIFF }] });
+  const md = renderMarkdown(report);
+  assert.match(md, /^ {2}Where: added lines \(vsiclient\/x\.py:11\)$/m);
+  assert.match(md, /^ {2}Where: unknown$/m);
+  assert.match(md, /^- Where tags \(a hint from evidence file:line, never a grouping\): since\.diff sha256 [0-9a-f]{12}$/m);
+  assert.match(renderText(report, { color: false }), /^ {11}Where: added lines \(vsiclient\/x\.py:11\)$/m);
+  assert.deepEqual(groupFindings(report).fixNow.map((f) => f.id), ['F1'], 'the tag never moves a finding');
+  const none = renderMarkdown(buildReport({ findingsDoc, manifest: MANIFEST }));
+  assert.doesNotMatch(none, /Where/);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'report-where-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, 'phase3'));
+  await fs.writeFile(path.join(dir, 'phase3', 'findings.json'), JSON.stringify(findingsDoc));
+  assert.deepEqual((await loadRun(dir)).changeDiffs, []);
+  await fs.writeFile(path.join(dir, 'since.diff'), CHANGE_DIFF);
+  assert.equal((await loadRun(dir)).findings.find((f) => f.id === 'F1').where.tag, 'added lines');
+  const missing = await runCli(['--run-dir', dir, '--change-diff', path.join(dir, 'nope.diff')]);
+  assert.match(missing.stderr, /--change-diff .*nope\.diff does not exist/);
+});
+
+test('field northwind-1a: a seat whose usage is a lower bound (a call reported none) shows its numbers and a note naming the missing calls', () => {
+  const manifest = { ...MANIFEST, reviewers: [MANIFEST.reviewers[0], { role: 'B', provider: 'openai', transport: 'cli', usage: { source: 'provider', input_tokens: 3799667, cached_input_tokens: 3610496, output_tokens: 46603, calls_without_usage: 1 } }],
+    seat_usage: { A: MANIFEST.seat_usage.A } };
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest });
+  const b = report.cost.find((r) => r.seat === 'seat B');
+  assert.equal(b.newInput, 3799667 - 3610496);
+  assert.equal(b.output, 46603);
+  assert.match(costNote(report.cost), /seat B: a lower bound; 1 call\(s\) reported no usage and are not counted\./);
+  assert.equal(costNote([seatCostRow('seat B', { input_tokens: 10, cached_input_tokens: 5, output_tokens: 1, calls: 1 })]), null);
+});
+
+test('drift accepted while the seats worked (step phase1/phase2) says a seat may have read the change; an audit-only record keeps the auditor wording', () => {
+  const cav = (step) => buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, drift_accepted: [{ at: 'x', ...(step ? { step } : {}), files: ['CONTOSO_V4_DEVICE/Reporter.py'] }] } }).caveats.find((c) => c.includes('--accept-drift'));
+  assert.match(cav('phase1'), /^The target changed while the seats were reviewing it .*CONTOSO_V4_DEVICE\/Reporter\.py.*a seat or the auditor may have read/);
+  assert.match(cav('phase2'), /while the seats were reviewing it/);
+  assert.match(cav('audit'), /^The target changed after Phase 1 and the audit went on/);
+  assert.match(cav(null), /^The target changed after Phase 1 and the audit went on/, 'an older record without a step');
+});
+
+test('review rules changed by the reviewed change: one caveat naming the copy the seats used; none otherwise', () => {
+  const caveats = (rules) => buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, ...(rules ? { review_rules: rules } : {}) } }).caveats;
+  assert.ok(caveats({ mode: 'head', changed_by_target: true, files: [] }).includes('The review rules (REVIEW.md) differ from the committed copy (the working tree or the branch changed them, possibly another session); the seats used the merge-base copy.'));
+  assert.ok(caveats({ mode: 'head', changed_by_target: false, base_unknown: true, files: [] }).some((c) => c.includes('read at the branch tip')));
+  assert.ok(caveats({ mode: 'worktree', changed_by_target: true, files: [] }).some((c) => c.includes('the working-tree copy')));
+  assert.ok(!caveats({ mode: 'head', changed_by_target: false, files: [] }).some((c) => c.includes('REVIEW.md')));
+  assert.ok(!caveats(null).some((c) => c.includes('REVIEW.md')));
+});
+
+test('review round: shown in every header when the packet names it; from round 3 a step-back caveat; no line, no round', () => {
+  const at = (n) => buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: n === null ? PACKET : `# Task packet: re-review\nReview round: ${n}\n\n${PACKET}` });
+  const two = at(2);
+  assert.equal(two.round, 2);
+  assert.ok(!two.caveats.some((c) => c.startsWith('Round ')));
+  assert.match(renderText(two, { color: false }), /round 2/);
+  assert.match(renderMarkdown(two), /^# Review report: \w+ \(round 2\)$/m);
+  assert.match(renderChat(two), /^> \*\*REVIEW \w+ · round 2 · /m);
+  const three = at(3);
+  assert.ok(three.caveats.some((c) => c.startsWith('Round 3: findings keep coming from fixes.')));
+  const none = at(null);
+  assert.equal(none.round, null);
+  assert.doesNotMatch(renderChat(none), /round/);
+});
+
+test('time: wall time from the first brief to findings.json and the orchestrator working time, in text and md; a missing or reversed span is unknown', async (t) => {
+  const manifest = { ...MANIFEST, seat_usage: { ...MANIFEST.seat_usage, orchestrator: { duration_ms: 656812 } } };
+  const both = buildReport({ findingsDoc: { findings: [] }, manifest, timing: { start: '2026-10-16T07:47:52.017Z', end: '2026-10-16T08:15:40.000Z' } });
+  assert.match(renderText(both, { color: false }), /^ {2}Time: 28 min wall \(first brief to findings\.json; packet writing not counted\); orchestrator working time 11 min$/m);
+  assert.match(renderMarkdown(both), /^- Time: 28 min wall .*orchestrator working time 11 min$/m);
+  const reversed = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, timing: { start: '2026-10-16T08:15:40.000Z', end: '2026-10-16T07:47:52.017Z' } });
+  assert.match(renderMarkdown(reversed), /^- Time: unknown wall .*orchestrator working time unknown$/m);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'report-time-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, 'phase3'));
+  const findingsFile = path.join(dir, 'phase3', 'findings.json');
+  await fs.writeFile(findingsFile, '{"findings":[]}\n');
+  assert.equal((await loadRun(dir)).time.wallMs, null, 'no skill-versions.jsonl: unknown');
+  await fs.writeFile(path.join(dir, 'skill-versions.jsonl'), lines('{"phase":"phase2","at":"2026-10-16T08:00:00.000Z"}', 'not json', '{"phase":"phase1","at":"2026-10-16T07:50:00.000Z"}'));
+  await fs.utimes(findingsFile, new Date('2026-10-16T08:20:00.000Z'), new Date('2026-10-16T08:20:00.000Z'));
+  assert.equal((await loadRun(dir)).time.wallMs, 30 * 60000, 'the earliest brief starts the span');
+});
+
+test('trigger and same_shape: shown under the finding in md (and so chat --all) and under a blocker in text; "none found" sites and findings without the keys show nothing', () => {
+  const report = buildReport({
+    findingsDoc: { findings: [
+      finding({ id: 'F1', severity: 'HIGH', trigger: ['A1: more than 100,000 vdisks; rare'], same_shape: ['A1: pg.py:40', 'B2: none found (searched _pg_list)'] }),
+      finding({ id: 'F2', severity: 'MEDIUM', same_shape: ['B1: none found'] }),
+      finding({ id: 'F3', severity: 'LOW' }),
+    ] },
+    manifest: MANIFEST,
+  });
+  const md = renderMarkdown(report);
+  assert.match(md, /^ {2}Trigger: A1: more than 100,000 vdisks; rare$/m);
+  assert.match(md, /^ {2}Same shape: A1: pg\.py:40$/m);
+  assert.equal(md.match(/Same shape:/g).length, 1, 'a "none found" sweep is not a site');
+  assert.equal(md.match(/Trigger:/g).length, 1);
+  assert.match(renderChat(report, { all: true }), /Trigger: A1: more than 100,000 vdisks/);
+  const text = renderText(report, { color: false });
+  assert.match(text, /^ {11}Trigger: A1: more than 100,000 vdisks; rare$/m);
+  assert.match(text, /^ {11}Same shape: A1: pg\.py:40$/m);
+  assert.doesNotMatch(renderChat(report), /Trigger:/, 'the short chat report is unchanged');
+});
+
+test('closing round 5 F2: the tag lines are read under the one section heading, through its subheadings, up to the next level-1 or level-2 heading; other heading shapes are not read', async () => {
+  const { checksPerformed } = await import('../build-report.mjs');
+  for (const next of ['## Appendix', '# Appendix']) {
+    const text = `## A1 — x\n\n## Checks performed\n- AC-1: ran it. MET\n### Detail\n- H1: gone. REFUTED\nBlocked: none\n${next}\n- AC-2: copied. NOT MET\n`;
+    const got = checksPerformed(text, 'A');
+    assert.match(got, /AC-1: ran it\. MET/, next);
+    assert.match(got, /H1: gone\. REFUTED/, next);
+    assert.doesNotMatch(got, /AC-2/, next);
+  }
+  for (const heading of ['### Checks performed', '## 4. Checks performed', '## (1) Checks performed', '## **Checks performed**', '# Checks performed', '## `Checks performed`', '    ## Checks performed']) {
+    assert.equal(checksPerformed(`## A1 — x\n\n${heading}\n- AC-1: ok. MET\nBlocked: none\n`, 'A'), '', heading);
+  }
+});
+
+test('step 5: the report prints the observed overlap of the seats: raised by seat A only, seat B only, or both', () => {
+  const report = buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', origins: ['A1', 'B2'] }), finding({ id: 'F2', origins: ['A2'] }), finding({ id: 'F3', origins: ['A3'] }), finding({ id: 'F4', origins: ['B1'] })] },
+    manifest: MANIFEST, packetText: '', seatTexts: {},
+  });
+  assert.deepEqual(report.coverage.overlap, { aOnly: 2, bOnly: 1, both: 1 });
+  const line = 'Raised by: seat A only 2, seat B only 1, both 1 (observed counts)';
+  assert.ok(renderText(report).includes(line));
+  assert.ok(renderMarkdown(report).includes(`- ${line}`));
+  assert.ok(renderHtml(report).includes(`<p>${line}</p>`));
+  const none = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: '', seatTexts: {} });
+  assert.equal(none.coverage.overlap, null);
+  assert.doesNotMatch(renderText(none), /Raised by/);
+});
+
+test('field run: chat names the flagged criteria past the first eight instead of a bare count', () => {
+  const ids = Array.from({ length: 10 }, (_, i) => `AC-${i + 1}`);
+  const packet = lines('# P', '## Acceptance criteria', ...ids.map((id) => `- [${id}] item`));
+  const seat = lines('# A', '', '## No findings', '', ...ids.map((id) => `- ${id} NOT MET: the check failed`));
+  const out = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: seat } }));
+  assert.match(out, /^- MORE {9}2 more flagged: AC-9 AC-10 \(--all lists them\)$/m, out);
+  assert.doesNotMatch(out, /\(\+\d+ more\)$/m);
 });

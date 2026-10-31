@@ -7,6 +7,7 @@
 Severity: HIGH
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 Built a fake `opencode` shim in a scratch dir, dispatched with --isolate against a non-git target:
@@ -25,6 +26,7 @@ The `isolationNote` at opencode-dispatch.mjs:594-595 promises "protected only by
 Severity: MEDIUM
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 codex-dispatch.mjs:54-57 and opencode-dispatch.mjs:77-80, identical:
@@ -37,6 +39,7 @@ Node sets `child.killed` true when the signal is successfully sent, not when the
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 tests/dispatch-integration.test.mjs:76-79 (codex) and :106-109 (opencode) assert only:
@@ -48,6 +51,7 @@ Neither checks that the hung fake process actually died — no pid liveness chec
 Severity: HIGH
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 model-capabilities.md:68-79: "No CLI-level read-only sandbox exists for OpenCode, verified."
@@ -61,6 +65,7 @@ Flatly contradicted by the rewrite: review-protocol.md:17-20 names OpenCode `--i
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 review-protocol.md:139: Peer response: unaddressed | conceded | disputed-no-counter-fact | disputed-with-counter-fact
@@ -72,6 +77,7 @@ The example rows use free prose instead of the closed enum. The second is a near
 Severity: MEDIUM
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 phase-3-scorecard.md:34-36: "apply the refutation-asymmetry and confidence-floor rules
@@ -84,6 +90,7 @@ review-protocol.md's Synthesis section (lines 130-160) has no such rule and no c
 Severity: HIGH
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 review-protocol.md:101-116: strip fenced/inline-backtick spans, grep remaining prose for
@@ -95,6 +102,7 @@ Three gaps, unrunnable as written when the reviewed target is this skill itself 
 Severity: MEDIUM
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 Read both dispatchers end to end, grepped scripts/ for relabel/scan/P/X/Y/manifest logic: none found.
@@ -105,6 +113,7 @@ No relabeling code, no vendor-token scan, no P/X/Y handling, no manifest writer 
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 $ node review-config.mjs setup --a-provider openai --a-runtime codex --a gpt-6-astra \
@@ -119,6 +128,7 @@ The helper saves this — the only cross-review constraint enforced is that the 
 Severity: MEDIUM
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 SKILL.md:98: "Result metadata records requested model/effort" (general property).
@@ -131,6 +141,7 @@ An orchestrator building the manifest's model_requested/effort_requested entries
 Severity: LOW
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 Ran phase-1 then a phase-2 resume against a real git repo with a tracked modification and
@@ -145,6 +156,7 @@ worktree
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```
 review-protocol.md:152-154: "Drop SPECULATIVE claims that neither the peer raised
@@ -170,6 +182,7 @@ If every claim is attacked or conceded by construction, the "neither ... nor att
 - Porcelain -z parsing and rename/copy handling — unit-tested, not re-derived.
 - isSupportedPair prototype-pollution safety confirmed via Object.hasOwn, covered by passing test.
 - Repository cleanliness after all runs: git status --porcelain identical before/after — 11 pre-existing modified files, nothing added or changed. Untracked scripts/result.json covered by the skill's own .gitignore, not created by this pass.
+Blocked: none
 
 ## What was not checked
 - No live CLI behavior — neither codex nor opencode was invoked; every dispatch used a fake shim. Vendor-specific claims in source comments (opencode run ignoring stdin content but waiting for EOF, -s resume not dropping --dir, codex exec resume rejecting --sandbox/--cd, last text/agent_message event being the final response, -f attachment honored) are unverified, resting on the source comments' own claims.

@@ -1,0 +1,180 @@
+{"findings": [
+{
+  "id": "F1",
+  "origins": ["X1", "Y1"],
+  "severity": "HIGH",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "X1", "response": "conceded" },
+    { "claim": "Y1", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Imported the shipped seatBlockedLine from plugins/pair-review/skills/pair-review/scripts/review-run.mjs and passed \"## No findings\\n\\nBlocked: none\\n<line>\": it returned \"\" (read as none) for \"**Blocked**: rg missing\", \"- **Blocked**: rg missing\", \"1. Blocked: rg missing\", \"BLOCKED: rg missing\" and \"Blocked:rg missing\"; control \"Blocked: rg missing\" returned \"rg missing\". A claims seat whose only block is \"- **Blocked**: x\" returns null, so it gets only the no-line warning and no seat-warnings-phase1.json record. The loose regex at review-run.mjs:771 needs exact case, the colon right after the label or closing emphasis, a space after it, and no numbered marker. assertSeatsRan (review-run.mjs:816-830) treats \"\" as clean, so a blocked No findings seat passes phase1 --wait with exit 0, contrary to review-protocol.md \"a block counts in any shape\". Pure string code: holds on every platform."
+  },
+  "final_state": "settled-agree",
+  "evidence": [
+    "seatBlockedLine returned \"\" for \"1. Blocked: target: EACCES\" and \"- **Blocked**: target: EACCES\" after a strict \"Blocked: none\"; shipped run() reported validate Phase 1 clean, exit 0.",
+    "seatBlockedLine returned \"\" for bold, italic, underscore, numbered, upper-case and no-space block shapes after a strict \"Blocked: none\"; control returned the block."
+  ],
+  "summary": "The loose Blocked: reader misses common Markdown block shapes (bold or italic label, numbered item, upper case, no space after the colon), so a blocked No findings seat that also writes a strict \"Blocked: none\" passes phase1 --wait as clean, and a claims seat loses its blind caveat.",
+  "recommended_fix": "review-run.mjs:771 (shared, both skills): make the loose pattern case-insensitive, allow a numbered list marker, single or double emphasis around the label (before or after the colon) and an optional space after the colon; keep the strict pattern for none. Add these shapes, plus a heading variant such as \"## Checks performed:\", to the round 6 test in review-run.test.mjs, run through assertSeatsRan.",
+  "priority": 1
+},
+{
+  "id": "F2",
+  "origins": ["X2"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "X2", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "build-report.mjs:491-496 (pair-review copy, shared script): verdict = found.length > 0 ? 'confirmed' is tested before the PARTLY/MIXED branch, so a hypothesis that both seats mark PARTLY CONFIRMED and that carries one standing tagged finding is printed as confirmed and counted under confirmed, not partly. The test at build-report.test.mjs covers only the REFUTED-plus-finding case. Holds on every platform."
+  },
+  "final_state": "settled-agree",
+  "evidence": [
+    "Shipped buildReport() with two PARTLY outcomes and one tagged standing finding returned verdict confirmed, confirmed 1, partly 0; rendered summary said 1 confirmed."
+  ],
+  "summary": "A hypothesis both seats rate partly confirmed becomes fully confirmed in the report whenever a finding is tagged to it, so the hypothesis counts are wrong.",
+  "recommended_fix": "build-report.mjs:493: when the seat outcomes include PARTLY or MIXED, keep 'partly' even with a tagged finding (a finding only lifts REFUTED or unparsed outcomes); add the partly-plus-finding case to build-report.test.mjs.",
+  "priority": 2
+},
+{
+  "id": "F3",
+  "origins": ["X3"],
+  "severity": "HIGH",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "X3", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Wrote two Codex-style transcripts to my scratch folder and called the shipped native-agent.mjs: [session_meta, task_started, task_complete(written), task_started, turn_aborted] gave agentState done and agentLastReply \"written\"; [session_meta, task_started, turn_aborted] gave done and null. codexState (native-agent.mjs:95-99) counts turn_aborted as done, and agentLastReply never resets the reply on a new task_started. checkFinalReply (review-run.mjs:230-235) throws only on a reply starting \"blocked:\", so null or a stale \"written\" passes with no warning, and a schema-valid partial findings file is taken as a full pass. Checked only the Codex transcript path; the trigger needs an interrupted native turn, which is uncommon. Holds on every platform."
+  },
+  "final_state": "settled-agree",
+  "evidence": [
+    "agentState/agentLastReply on in-memory transcripts: first turn aborted gave done with reply null; earlier written turn then an aborted turn gave done with reply written; shipped phase1 --wait reported validate Phase 1 clean, exit 0."
+  ],
+  "summary": "A native Codex seat or auditor whose current turn was aborted is read as finished, with no reply or an earlier turn's \"written\" reply, so a partial output file passes the completion gate as a full pass.",
+  "recommended_fix": "native-agent.mjs: have codexState return a distinct state (for example 'aborted') when the last mark is turn_aborted, and reset the reply in agentLastReply on each task_started; in review-run.mjs (checkFinalReply and the native wait paths for phase1, phase2 and the auditor) treat that state as unfinished with a StepError that says to resume the agent; add tests for both transcripts.",
+  "priority": 1
+},
+{
+  "id": "F4",
+  "origins": ["X4"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "X4", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "worktree-utils.mjs:115 fingerprintsMatch now compares JSON.stringify(a.changed) with JSON.stringify(b.changed); the committed version of this file has no changed field (its only match of the word is in an error message), and computeSnapshotFingerprint now always returns an array, so a marker written before this change gives undefined against \"[]\" and setupIsolatedWorktree refuses at :201 with \"snapshot fingerprint mismatch\" for an unchanged target. No migration or legacy branch exists in the file. It fails closed with a clear restart message, so MEDIUM. Holds on every platform."
+  },
+  "final_state": "settled-agree",
+  "evidence": [
+    "Shipped setupIsolatedWorktree() with a legacy marker returned ok false, snapshot fingerprint mismatch; the same fixture with changed: [] in both fingerprints returned ok true, reused true."
+  ],
+  "summary": "An isolated run started before these changes cannot resume: its snapshot marker has no changed field, so an unchanged worktree is refused as drifted.",
+  "recommended_fix": "worktree-utils.mjs:115 and :217: when the stored marker has no changed field, re-verify the current changed-file bytes against the worktree and then rewrite the marker with the field, instead of refusing; add a legacy-marker test.",
+  "priority": 2
+},
+{
+  "id": "F5",
+  "origins": ["Y2"],
+  "severity": "MEDIUM",
+  "basis": "STATIC_TRACE",
+  "evidence_strength": "DETERMINISTIC",
+  "peer_responses": [
+    { "claim": "Y2", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "grep for stoppedAfterAnswer and stopIncomplete over the pair-review scripts, SKILL.md and references finds them only in claude-dispatch.mjs and codex-dispatch.mjs (and the CHANGELOG). claude-dispatch.mjs:482-488 sets the flags in result.json and writes both WARNINGs with log() only. review-run.mjs:636-637 pushes \"seat X: completed (cli ...)\" without reading either flag, and assertSeatsRan reads the stderr log only for exec_command failure lines; build-manifest.mjs and build-report.mjs never read them. So the warning the accepted Windows deviation relies on (\"the run says so with stopIncomplete and a WARNING\") never reaches the orchestrator or the report on the review-run route. The peer's in-memory run() also showed warning exposed false with exit 0. Holds on every platform; the leaked-process case is Windows."
+  },
+  "final_state": "settled-agree",
+  "evidence": [
+    "No reader of stoppedAfterAnswer or stopIncomplete in review-run.mjs, build-manifest.mjs, build-report.mjs, SKILL.md or references; review-run.mjs:636-637 prints only completed."
+  ],
+  "summary": "review-run never shows the dispatchers' stopped-after-answer or stopIncomplete warnings, so on the default route nobody is told that a seat process may still be running.",
+  "recommended_fix": "review-run.mjs:636: read the seat's result.json (readResult) and append a note when stoppedAfterAnswer is set, and push a warning line telling the user to check the process list when stopIncomplete is set; optionally carry it into seat-warnings so the report shows a caveat; add a test with a record carrying both flags.",
+  "priority": 1
+},
+{
+  "id": "F6",
+  "origins": ["Y3"],
+  "severity": "LOW",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "Y3", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Called the shipped packetReach (preflight.mjs) with cdAbs set to a scratch folder and two existing repository files R/README.md and R/CHANGELOG.md: single path and comma pair went to outside (found); joined with \";\", \"&\" or \"<br>\" gave notFound with the whole joined string (one false missing path, both real paths lost); in smart double quotes, \"~~...~~\", \"--log:path\" and \"path!\" gave neither outside nor notFound (path lost silently); R/nope.md control gave notFound. Split at preflight.mjs:1449 is /\\]\\(|[=,|]/ and the trim classes at 1423/1426 lack smart quotes, \"~\" and \"!\". Advisory warning only, so LOW."
+  },
+  "final_state": "settled-agree",
+  "evidence": [
+    "packetReach: \";\", \"&\" and \"<br>\" joined paths give one false notFound joined path; smart quotes, \"~~\", \"--opt:path\" and a trailing \"!\" lose the path; comma and \"=\" controls found."
+  ],
+  "summary": "The packet path scan still mishandles sibling joiners (\";\", \"&\", \"<br>\") and some wrappers (smart quotes, strikethrough, \"--opt:path\", trailing \"!\"), giving a false missing-path warning or a silently lost path.",
+  "recommended_fix": "preflight.mjs:1449: split on /\\]\\(|<br\\s*\\/?>|[=,;&|]/i; add smart quotes, \"~\" and \"!\" to the start and end trim classes at 1423 and 1426; extend the packet-path test with these shapes.",
+  "priority": 3
+},
+{
+  "id": "F7",
+  "origins": ["Y4"],
+  "severity": "MEDIUM",
+  "basis": "STATIC_TRACE",
+  "evidence_strength": "DETERMINISTIC",
+  "peer_responses": [
+    { "claim": "Y4", "response": "disputed-with-counter-fact", "counter_fact": "The documented report-notes route can carry the warning into verbatim chat output without creating the sequencer's sidecar file." }
+  ],
+  "auditor_check": {
+    "result": "INCONCLUSIVE",
+    "basis": "STATIC_TRACE",
+    "evidence": "Confirmed part: phase-1-independent-passes.md:241-243 says a seat with claims and a block keeps its claims \"and the report must say it may have reviewed blind\", and SKILL.md:66 promises such a seat \"a report caveat\"; the automatic caveat (build-report.mjs:744-746) comes only from seat-warnings-phase1.json, which only review-run.mjs:840 writes and which no doc names. Refuted part: phase-3-scorecard.md:335-340 documents report-notes.md with Why, Decisions needed and Open items (gaps that are not findings), and build-report.mjs:1036 renders Open items, so the orchestrator has a documented way to carry the caveat into the verbatim report. The Completion gate does not point to it. Residual: a doc gap (no named step), not a missing mechanism; it would be LOW to MEDIUM if read as a misleading doc."
+  },
+  "final_state": "unresolved-low-stakes",
+  "evidence": [
+    "Completion gate requires a report caveat for a blocked claims seat; the only automatic source is seat-warnings-phase1.json, written only by review-run; the peer showed report-notes.md Why and Decisions needed reach the chat output."
+  ],
+  "summary": "On the manual route the docs require a \"may have reviewed blind\" report caveat for a blocked seat with claims but name no step that produces it; report-notes.md can carry it, but the Completion gate does not say so.",
+  "recommended_fix": "phase-1-independent-passes.md:243 (both skills) and SKILL.md step 3: say how to record it, for example \"put it under ## Open items in report-notes.md\" or write seat-warnings-phase1.json as {\"blind\": {\"<seat>\": [\"Blocked: <line>\"]}} before build-manifest.",
+  "priority": 2
+},
+{
+  "id": "F8",
+  "origins": ["Y5"],
+  "severity": "MEDIUM",
+  "basis": "SOURCE_CITATION",
+  "evidence_strength": "SUPPORTED",
+  "peer_responses": [
+    { "claim": "Y5", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "review-config.mjs:189: transport is seat.runtime === nativeRuntime ? (transport ?? 'native') : 'cli', so a seat or auditor whose runtime matches the host is native by default. SKILL.md:53 (and task-packet-template.md:13-15) now says a native seat or auditor gets whatever the host loads into every agent, including the user's global instructions and memory, and only tells it to treat that as unchecked context. Known deviations do not list this. So on the default route host-loaded memory (which can hold earlier verdicts or vendor names) still reaches seats and the auditor; the doc is now accurate but the blinding gap under the acceptance criterion stays open. Actual host payloads were not inspected, so exposure in every run is unverified."
+  },
+  "final_state": "settled-agree",
+  "evidence": [
+    "review-config.mjs:189 defaults host-matching actors to native transport; SKILL.md:53 says native actors get the host's global instructions and memory and are only told to treat it as unchecked context."
+  ],
+  "summary": "Native transport is the default for host-matching seats and the auditor, so host-loaded memory still reaches them; the change only documents it and asks them to ignore it.",
+  "recommended_fix": "Either list it under Known deviations as an accepted cost of native seats, or have review-config seats print a one-line warning when it picks native transport (suggesting --transport cli).",
+  "priority": 2
+}
+]}

@@ -1,0 +1,12 @@
+{
+  "A": [
+    "line 3: \"## A1 — [AC-1] [AC-10] A declared block is dropped when a later \"Block\" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 127: \"- AC-1: ran phase1 --wait end to end in a disposable copy (native seat\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 134: \"- AC-8: linux-2 items 1, 5 and 7 (path scan, ports, variable spellings\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 135: \"- AC-9: seatBlockedLine: old reader took `**Blocked:** none` as a bloc\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 136: \"- AC-10: the strict Blocked: test covers shapes but not two lines with\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 137: \"- H1: conflicting duplicate lines CONFIRMED end to end (exit 0, \"valid\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 138: \"- H2: CRLF, trailing spaces, `Blocked: None.`, a BOM and a `### Checks\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence"
+  ],
+  "B": []
+}

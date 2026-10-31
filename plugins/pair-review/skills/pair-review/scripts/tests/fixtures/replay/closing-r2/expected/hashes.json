@@ -1,0 +1,11 @@
+{
+  "step validate": "0e6c05605845f51f897b98e95d96cdd51487654d6b393143b9ff3961f8210337",
+  "step exchange prepare": "a779711813e05fbf2b5801d4da1b6080601af385d9f05e7de42cfba356d9dc51",
+  "step exchange finish": "c5cfdc7921795da9bc365099b6fb251bc624b7c06b51c642289ee906c88832d7",
+  "step audit-prep": "3aebf59efc5207dd5912ca7bde8bee1484d84394ab8e7916d572bc0ea8e20f59",
+  "phase1/A-findings.md": "17773d5250996040d07103483bfeaa309d65b3e24e1086804faf7e6288bb7462",
+  "phase2/peer-view-for-A.md": "e03dd943104cf1acf4c95fa514dac7ca11dd70b5a4992e92c5cd5330963f4e37",
+  "phase1/B-findings.md": "716fbbc42034f10e099a334920f42ba3f0fb23f3309371ccb2c2da7db0336b22",
+  "phase2/peer-view-for-B.md": "d3d2803b29f5f0a8f18e8cd28ec1190d7c1e8c7892a0c08da275fd97a5e958fe",
+  "phase2/exchange-result.json": "412b529e9369a349ee7ee0e80b3480f7bccccdc5b5e6c0cad5a8033b9d578acb"
+}

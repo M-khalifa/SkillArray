@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SKILLS = ["cross-review", "pair-review"];
 // Each skill ships as its own plugin: plugins/<skill>/skills/<skill>.
@@ -110,8 +110,7 @@ function briefSpecs(fx) {
     { name: "phase1-seat-B", args: ["--mode", "phase1", "--packet", p("task-packet.md"), "--seat", "B"] },
     { name: "phase1-seat-A-repo-only", args: ["--mode", "phase1", "--packet", p("task-packet.md"), "--seat", "A", "--repo-only"] },
     { name: "delta", args: ["--mode", "delta", "--peer-view", p("peer-view-for-A.md"), "--output-path", p("A-rebuttal.md")] },
-    { name: "auditor-light", args: ["--mode", "auditor", "--packet", p("task-packet.md"), "--audit-dir", p("audit"), "--target-dir", p("target"), "--run-dir", p("run")] },
-    { name: "auditor-full", args: ["--mode", "auditor", "--packet", p("task-packet.md"), "--audit-dir", p("audit"), "--target-dir", p("target"), "--run-dir", p("run"), "--audit-depth", "full"] },
+    { name: "auditor", args: ["--mode", "auditor", "--packet", p("task-packet.md"), "--audit-dir", p("audit"), "--target-dir", p("target"), "--run-dir", p("run")] },
     { name: "verifier", args: ["--mode", "verifier", "--claim", p("claim.md"), "--rebuttal", p("rebuttal.md"), "--target-dir", p("target")] },
   ];
 }
@@ -125,12 +124,22 @@ function normalisePaths(text, dir) {
   return out;
 }
 
+const STEP_RUNNER = [
+  "const [url, ...argv] = process.argv.slice(1);",
+  "const r = await (await import(url)).runStep(argv);",
+  "process.stdout.write(r.stdout); process.stderr.write(r.stderr); process.exitCode = r.code;",
+].join(" ");
+
 function buildBrief(skillRoot, spec, outFile) {
   const script = path.join(skillRoot, "scripts", "build-brief.mjs");
   if (!existsSync(script)) {
     return { error: `missing ${script}` };
   }
-  const result = spawnSync(process.execPath, [script, ...spec.args, "--out", outFile], { encoding: "utf8" });
+  // A tree where build-brief is a step module (no command line) runs it through its exported runStep.
+  const argv = [...spec.args, "--out", outFile];
+  const result = /export \{[^}]*\brunStep\b/.test(readFileSync(script, "utf8"))
+    ? spawnSync(process.execPath, ["--input-type=module", "-e", STEP_RUNNER, pathToFileURL(script).href, ...argv], { encoding: "utf8" })
+    : spawnSync(process.execPath, [script, ...argv], { encoding: "utf8" });
   if (result.error || result.status !== 0) {
     return { error: `build-brief exited ${result.status}: ${(result.stderr || result.error?.message || "").trim()}` };
   }

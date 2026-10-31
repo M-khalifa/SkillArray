@@ -2,9 +2,8 @@
 name: cross-review
 description: >-
   Reviews code, designs, or documents with two reviewer providers, then
-  cross-examines their findings. Supports Claude/Fable, OpenAI Codex, and
-  OpenCode-routed providers, with first-run model setup, saved preferences,
-  and changing models anytime.
+  cross-examines their findings. Supports Claude/Fable and OpenAI Codex,
+  with first-run model setup, saved preferences, and changing models anytime.
   Use for cross-vendor review, Claude plus Codex review, or /cross-review.
 license: MIT
 compatibility: >-
@@ -12,15 +11,15 @@ compatibility: >-
   an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.1.0
+  version: 1.2.0
 ---
 
 # Cross Review
 
 Reviewer A and B use two different providers. The orchestrator is neither
 reviewer. Seat A always runs as a Claude reviewer, on either host; seat B runs
-through Codex CLI or OpenCode's configured provider bridge, never as a Claude
-reviewer — no other layout has a defined dispatch path, and `review-config.mjs`
+through Codex (the CLI on Claude Code, a native Codex agent on a Codex host), never as a Claude reviewer — no other layout
+has a defined dispatch path, and `review-config.mjs`
 enforces this. State the resolved provider, runtime, model, and effort before
 dispatch. Do not change authentication or provider configuration during setup.
 
@@ -31,41 +30,50 @@ stop before any setup or paid call and tell the user to install a current Node.j
 macOS `brew install node`, Debian or Ubuntu the NodeSource or distribution package, or https://nodejs.org), then rerun.
 
 With `scripts/review-run.mjs` (the sequencer) a review is these commands; open a phase file only when a step fails, a seat has to be
-replaced, a scan stops the run, or you dispatch by hand. Read `references/configuration.md` only for first-time setup and
+replaced, a scan stops the run, or you run the falsification pass or a re-review. Read `references/configuration.md` only for first-time setup and
 `references/review-profiles.md` when you write the packet. Your host file (below) says how each actor is started.
 
 ```text
-node "<skill-dir>/scripts/review-config.mjs" seats --host <claude-code|codex> --out "<work>/seats.json"   # decide web on or off (--repo-only) and whether the deep-verify pass may run (--falsification) first: neither can be added once run.json exists; from the saved choices; add --a <model> --b <model> (also --a-provider, --a-runtime, --a-effort) to override them for this run only, --auditor <model> to run the auditor on another model than seat A, --repo-only when web verification is off
-node "<skill-dir>/scripts/preflight.mjs" --cd "<target>" --compact --out "<evidence-dir>/preflight.json"   # evidence for the packet
+node "<skill-dir>/scripts/review-config.mjs" seats --host <claude-code|codex> --out "<work>/seats.json"   # decide web on or off (--repo-only) first: it cannot change once run.json exists; --falsification runs the deep-verify pass before the audit (a deep verify asked for after the audit works without it only with a native auditor, which can be resumed); from the saved choices; add --a <model> --b <model> (also --a-provider, --a-runtime, --a-effort) to override them for this run only, --auditor <model> to run the auditor on another model than seat A, --repo-only when web verification is off
+node "<skill-dir>/scripts/preflight.mjs" --cd "<target>" --compact --out "<evidence-dir>/preflight.json" [--exec "<test command>"] [--timeout <seconds>] [--base <commit>]   # evidence for the packet (--base: list work already committed since that commit): run the tests here (--exec is refused with --host); keep <evidence-dir> outside the run folder
 <write <run-dir>/task-packet.md from references/task-packet-template.md>
-node "<skill-dir>/scripts/preflight.mjs" --host <host> --cd "<target>" --run-dir "<run-dir>" --seats "<work>/seats.json"
+node "<skill-dir>/scripts/preflight.mjs" --host <host> --cd "<target>" --run-dir "<run-dir>" --seats "<work>/seats.json" [--keep-target-copy]   # --keep-target-copy keeps the target as reviewed in <run-dir>-target-copy, so the run can become a bench case (bench/case-from-run.mjs --target); it holds the target's code: delete it with the run folders
 node "<skill-dir>/scripts/review-run.mjs" phase1 --run-dir "<run-dir>" --start --local     # starts CLI seats; native seats get a prompt file
 <spawn each native seat with the prompt file the output names>
-node "<skill-dir>/scripts/review-run.mjs" phase1 --run-dir "<run-dir>" --wait --native-agent A=<agent id, Codex thread id or rollout path>   # rerun on exit 3
+node "<skill-dir>/scripts/review-run.mjs" phase1 --run-dir "<run-dir>" --wait --native-agent <native seat: A or B>=<agent id, Codex thread id or rollout path>   # rerun on exit 3
 node "<skill-dir>/scripts/review-run.mjs" phase2 --run-dir "<run-dir>" --start   # then resume each native seat with its prompt file
-node "<skill-dir>/scripts/review-run.mjs" phase2 --run-dir "<run-dir>" --wait --native-agent A=<agent id, Codex thread id or rollout path>
-node "<skill-dir>/scripts/review-run.mjs" audit --run-dir "<run-dir>" --prepare [--audit-depth full]
+node "<skill-dir>/scripts/review-run.mjs" phase2 --run-dir "<run-dir>" --wait   # the agent ids given in phase 1 are remembered
+node "<skill-dir>/scripts/review-run.mjs" audit --run-dir "<run-dir>" --prepare
 node "<skill-dir>/scripts/review-run.mjs" audit --run-dir "<run-dir>" --finish   # spawn a native auditor with its prompt file, then:
 node "<skill-dir>/scripts/review-run.mjs" audit --run-dir "<run-dir>" --finish --native-agent auditor=<agent id, Codex thread id or rollout path>
-node "<skill-dir>/scripts/build-manifest.mjs" --run-dir "<run-dir>"   # collects every input; run it with --init first to write a body to edit, then again without: it reads that body
-node "<skill-dir>/scripts/build-report.mjs" --run-dir "<run-dir>" --format chat   # the report for the chat window: paste the output verbatim as your reply, never retype it; add --all for every finding, criterion and the cost; --out report.md for a ticket, --html page.html only when the user asks
+node "<skill-dir>/scripts/review-run.mjs" manifest --run-dir "<run-dir>" --init --seat-transcript orchestrator=auto@<review start>/<review end>   # optional: a body to edit (what only you know) and this session's own cost
+node "<skill-dir>/scripts/review-run.mjs" manifest --run-dir "<run-dir>"   # collects every input and reads that body; writes <run-dir>/manifest.json (without --init, give --seat-transcript orchestrator=... here: one call is enough)
+node "<skill-dir>/scripts/review-run.mjs" report --run-dir "<run-dir>" --format chat   # the report for the chat window: paste the output verbatim as your reply, never retype it; add --all for every finding, criterion and the cost; --out report.md for a ticket, --html page.html only when the user asks
 ```
 
-Each `review-run` call prints at most ten lines and a `next:` line; exit 3 means a seat is still running, so rerun the same command.
+Project knowledge: when you write `task-packet.md`, first read the project's own instructions (CLAUDE.md, AGENTS.md, REVIEW.md), the user's memory notes and local skills that concern this target, and its docs. Put the facts that matter for this review into the packet (Scope or Start here, Known deviations, Hypotheses to test), after you remove model and vendor names and earlier review verdicts (a finding marked fixed comes back as a hypothesis to recheck; one decided or accepted goes under Known deviations). The user's own bug checklists come from `review-config.mjs checklists`. No seat is given the user's memory or skills, so the packet is how that knowledge reaches them. A CLI seat reads only the target and the project's CLAUDE.md, AGENTS.md and REVIEW.md. A native seat or auditor (started with the host's agent tool) also gets whatever the host loads into every agent, such as the user's global instructions and memory: its brief tells it to treat that as unchecked context, never as evidence. Use CLI seats when that matters.
+Each `review-run` phase call (`phase1`, `phase2`, `audit`) prints at most ten lines and a `next:` line; exit 3 means a seat is still running, so rerun the same command (a larger `--max-wait`, default 480 s, means fewer reruns; keep the shell timeout above it). A CLI seat that stopped part way (a reboot, a crash, a killed worker) is dispatched again by the next `--wait` of its phase, alone: the seat that finished is kept, so never start the phase over.
+`review-run status --run-dir <a> --run-dir <b>` prints one line per run (its step, and each seat's progress) and runs nothing, for several runs at once. `review-run cleanup --run-dir <dir>` lists the seats' scratch folders of a finished run with their sizes, and `--yes` deletes them (a seat may not be allowed to delete its own). `review-config seats ... --out <file> --replace` overwrites an existing seats file, for example to switch a seat's transport before preflight.
+When `phase1 --wait`, `phase2` or `audit --finish` stops because the target changed after the Phase 1 snapshot, it names the changed files. If they are outside what the review covers (another session edited the same repository), rerun the same command with `--accept-drift`: the manifest and the report record it, and say that a seat or the auditor may have read the changed files. `phase1 --start` never accepts drift.
 Do not pipe a script into `Select-Object -First` or `head` on PowerShell: PowerShell itself reports exit 255 (-1) for any program it stops early, even `node -e` with no script of ours. The output is already short; redirect it to a file instead.
-A review of two repositories works: give the second one to both preflights with `--repo <path>` (its snapshotHash is recorded and `review-run` warns if it changes) and run its tests with `--exec-in <path> "<command>"`; the packet names both paths.
-Give a shell call that waits a timeout above `--max-wait` plus 60 s. The scorecard is `<run-dir>/phase3/scorecard.md`.
+A large target reviews better as several runs, each with a packet scoped to one area (for example one feature, then the merge with upstream), than as one run over everything: each seat reads its area in full. A test suite too heavy for this machine (it was stopped for low memory, or it hits `--timeout`) can run outside `--exec`; cite its log and the snapshot it ran on in the packet.
+A review of two repositories works: give the second one to both preflights with `--repo <path>` (its snapshotHash is recorded and `review-run` warns if it changes) and run its tests with `--exec-in <path> "<command>"` (or `--exec-in-file <path> <file>`, one command per line as `--exec-file`, for PowerShell 5.1 and quoted paths with spaces); the packet names both paths.
+Give a shell call that waits a timeout above `--max-wait` plus 60 s. On a host low on memory, the host may stop background shells: run `--wait`, `--exec` and test steps in the foreground. The scorecard is `<run-dir>/phase3/scorecard.md`.
 
 On a Codex host the second `preflight` needs `--allow-trial --probe-claude-session --yes-paid` (seat A is a Claude CLI seat: the probe is one paid check that its session survives a call). On Claude Code it needs no extra flag.
 When `codex doctor` shows a failed sandbox row, the second `preflight` stops until you add `--yes-paid` (one small live `codex exec` probe) or `--skip-codex-doctor`; on a Codex host use `--skip-codex-doctor`, because a nested `codex exec` is blocked there.
-Put the run folder, the evidence folder and the work folder outside the target's git repository, or in a folder that repository git-ignores: with a Claude CLI or OpenCode seat the second `preflight` refuses a run folder inside it, because that seat's worktree snapshots the whole repository and the run's own files would break the Phase 2 resume.
+On macOS give the run folder an ASCII path (a seat that quotes an accented folder name in another Unicode form stops the exchange), and set `core.fsmonitor=false` for the target if your git config turns the fsmonitor daemon on (each snapshot would start one that outlives the run). Put the run folder, the evidence folder and the work folder outside the target, and the evidence folder outside the run folder (a packet that names the run folder is refused at `phase1 --start`; the second `preflight` warns first): the second `preflight` refuses a run folder inside it, because every dispatcher's write check would count the run's own files as target writes. With a Claude CLI seat keep them also outside the target's git repository, or in a folder that repository git-ignores: that seat's worktree snapshots the whole repository and the run's own files would break the Phase 2 resume.
+A CLI seat or auditor runs with a filtered environment (OS basics, proxy and certificate variables, its CLI's own config folder). A seat that needs more, such as `CLAUDE_CODE_USE_BEDROCK` and the `AWS_*` variables of a Bedrock seat, gets them from `review-config seats --env A=CLAUDE_CODE_USE_BEDROCK,AWS_REGION` (repeat for B or auditor; the auditor takes seat A's list unless it has its own), `--env-mode <role>=inherit` (the whole environment) or `--use-api-key <role>` (ANTHROPIC_API_KEY, Claude only). run.json stores the names, never the values: on Windows a seat's worker starts through WMI with the user's own environment, so set those variables for the user, not only in this shell.
+On Windows every CLI seat and CLI auditor runs inside a job object: a process its CLI starts (a server, a watcher) is stopped when the CLI ends, also one whose launcher has exited, and result.json `leftoversStopped` names it. The job adds a few seconds to each start. Where a sandbox refuses the job, result.json has `jobRefused` and the run warns that a process it started may still be running. On Linux and macOS the groups the CLI's tool commands lead are watched while it runs, and every process carrying the seat's run id (`REVIEW_SEAT_RUN_ID`, inherited also by one that left its group); what is still running when the CLI ends is stopped and named in `leftoversStopped`. On macOS the run id finds a job that is a non-Apple program (node, Homebrew python); an Apple system program (`/bin/sh`, `/bin/sleep`, `/usr/bin/perl`) hides its environment and is not found.
+A Codex CLI seat runs with every MCP server off (it lists them with `codex mcp list --json` and passes `-c mcp_servers.<name>.enabled=false` for each), because such a server (node_repl, cua_repl) runs code outside its read-only sandbox; if that list cannot be read nothing is started. A native seat keeps the host's or the user's servers.
+Give a Codex seat an explicit effort (`--b-effort high`, or `--a-effort` for an OpenAI seat A): with `default` a field run got a 61-second pass with one claim; the manifest records the effort the rollout ran with (`effort_resolved`; `codex-default (not reported)` on the default, which the rollout does not log), and `review-config seats` warns about a Codex seat left on it. Its read-only sandbox may not read a path outside the target, write a temp file (so test suites fail) or reach a port, as seen on Linux and Windows; on Windows its PowerShell may also run in Constrained Language mode, which refuses object creation (`ConversionSupportedOnlyToCoreTypes`). Its brief names no scratch folder and tells it to write no file, so give it executed test evidence another way: run the suite in preflight Tier 2 (`--exec`, `--compact`) and cite those logs in the packet, the way the packet template does; also paste the result lines (counts, failing tests) into the packet, because every brief holds the packet while a log outside the target may not be readable to this seat. To check what it can reach: `preflight --host ... --probe-reach --yes-paid` (one small paid call) checks the paths and ports the packet names, the second `preflight` and `phase1 --start` warn about paths outside the target on Linux and Windows, and a seat whose own lines say a read or command was blocked gets a "may have reviewed blind" warning and a report caveat. Preflight also runs `python` (`python3` on Linux and macOS), `rg` and `git` inside the Codex sandbox (`codex sandbox`, free) and warns about each one the seat cannot start, naming where this host has it (on Windows it runs them through PowerShell, the seat's shell, and the sandbox account cannot start a program installed under the user profile: install it for all users, or put a copy under Program Files on PATH; the per-user one can stay first); `phase1 --start` repeats the warning (`seat-tools.json`); `--skip-codex-doctor` skips it too.
 
-If a native agent replies that it cannot read its brief (its shell or file tools time out), that is a host tool failure, not a reviewer finding: keep the agent and the run folder, do not respawn or hand-write its file, and report the review as incomplete until the tools work again, then resume the same agent. With `--native-agent`, `--wait` detects this itself: once the agent's transcript shows its turn ended and the file is still missing, it fails with the agent's last reply quoted (agents are told to reply `blocked:` and the error).
+If a native agent replies that it cannot read its brief (its shell or file tools time out), that is a host tool failure, not a reviewer finding: keep the agent and the run folder, do not respawn or hand-write its file, and report the review as incomplete until the tools work again, then resume the same agent. With `--native-agent`, `--wait` detects this itself: once the agent's transcript shows its turn ended and the file is still missing, or its last reply starts with `blocked:` (a partly written file), it fails with that reply quoted (agents are told to reply `blocked:` and the error). `--native-done` for an agent whose file is missing or has no claim fails after a short grace, naming the file.
 
 ## Host table
 
 Support is decided per actor (host, runtime, transport) in `scripts/host-support.mjs`. On Claude Code
-everything in this skill is supported except an OpenCode seat (a trial: `preflight.mjs --allow-trial`).
+everything in this skill is supported.
 Cross-review on a Codex host is a trial that preflight must prove first: the Claude CLI seat is usable only if its
 session survives a call there (`--probe-claude-session --yes-paid`; see [Codex](references/hosts/codex.md)).
 Match the tools you actually have, in this order, and
@@ -97,20 +105,16 @@ choices, so never offer a model from memory or from an older copy of these
 docs. Fable must be offered with the Claude choices when the harness exposes
 it. For a Codex seat, `codex debug models` shows what the installed CLI can
 actually run. Its output is about 500 KB of JSON, so never print it raw; use
-the parse command in model-capabilities.md's "Codex seat" section. For an
-OpenCode seat, run `opencode models` and show only configured providers and
-model IDs. Do not inherit an unidentified runtime
+the parse command in model-capabilities.md's "Codex seat" section. Do not inherit an unidentified runtime
 default.
 
 **What to read.** With `review-run`, the Quickstart and your host file are enough; configuration.md is for first-time setup and
 review-profiles.md for the packet. Open the phase file for the phase you are running only for a failed step, a replaced seat, a
-redaction round or a manual dispatch: the phase files hold every manual orchestrator step. [references/review-protocol.md](references/review-protocol.md)
+redaction round, the falsification pass or a re-review. [references/review-protocol.md](references/review-protocol.md)
 holds the rules the seats, the auditor and the verifiers follow, and
-`build-brief.mjs` copies them into their briefs: read the sections a phase file
+`review-run` copies them into their briefs: read the sections a phase file
 names (its section index gives their lines), not the whole file. In
-model-capabilities.md read only the section for each runtime you selected
-(skip "OpenCode seats" when no seat runs on OpenCode; it is most of the file).
-In the phase files, skip the OpenCode paragraphs for the same reason.
+model-capabilities.md read only the section for each runtime you selected.
 
 `/cross-review setup` changes choices anytime; `/cross-review config` shows them.
 Natural-language requests to change either seat also enter setup. Setup, config,
@@ -134,12 +138,7 @@ include the phrase **"deep verify disputed high-severity findings"** in the
 task text — this is the canonical phrase the orchestrator recognizes as an
 explicit request; falsification never runs without it.
 
-The auditor re-checks only claims the other reviewer did not concede (light
-audit, the default). To have it re-check every claim, include the phrase
-**"double check all claims"** in the task text; with the sequencer, run `review-run audit --prepare --audit-depth full`
-(it writes the depth into `run.json`; it cannot change once the auditor brief exists). After an exchange where every claim was
-conceded and none disputed, a full audit is the safer choice when any conceded claim is HIGH or CRITICAL: agreement between two seats is not proof that the findings are right. When every conceded claim is MEDIUM or LOW, `exchange.mjs finish` prints a note instead and the light audit is enough.
-Without the sequencer pass `--audit-depth full` to both `build-brief.mjs --mode auditor` and `blind-relabel.mjs translate`.
+The auditor re-checks every claim, also the ones the other reviewer conceded and the ones both reviewers raised: agreement between two seats is not proof that a finding is right.
 
 Explicit choices override saved values for one run only. A changed provider,
 runtime, or model resets that seat's old effort to `default` unless effort is
@@ -155,8 +154,7 @@ use pair-review.
    unsupported explicit choices require user resolution, never silent fallback.
 2. Check the selected runtime only: Claude harness model metadata for `claude`,
    `codex --version`, `codex login status`, `codex exec --help`, and
-   `codex exec resume --help` for `codex`; or `opencode --version`,
-   `opencode models`, and `opencode run --help` for `opencode`. Do not read
+   `codex exec resume --help` for `codex`. Do not read
    credential files. Confirm the two selected provider IDs differ.
 3. Resolve this skill's actual directory from the loaded SKILL.md location.
    Verify the linked references and bundled dispatcher exist. No sibling skill
@@ -168,7 +166,7 @@ use pair-review.
 5. Resolve the host (Host table above) and run
    `preflight.mjs --host <host> --cd <target-dir> --run-dir <run-dir> --seats <seats.json>`.
    It checks that this skill ships the dispatchers the seats need, that `claude -p --help`
-   lists every flag `claude-dispatch.mjs` uses, and writes `<run-dir>/run.json`, the seat
+   lists every flag the Claude CLI dispatcher uses, and writes `<run-dir>/run.json`, the seat
    table every later script reads. The check is free; `--probe-dispatch` only prints the one
    paid probe it would run unless `--yes-paid` is also given.
 
@@ -180,59 +178,50 @@ Read the reference for the phase being executed:
    run Claude and Codex concurrently against the same snapshot.
 2. [Cross-examination](references/phase-2-cross-examination.md):
    exchange completed findings once, preserving both original passes.
-   `scripts/exchange.mjs prepare` builds both delta briefs and `finish`
+   `review-run phase2 --start` builds both delta briefs and `--wait`
    appends both rebuttal files.
 3. [Scorecard](references/phase-3-scorecard.md):
    verify contested claims and retain unresolved disagreements. An opt-in
    Falsification pass independently checks a specific HIGH/CRITICAL disputed
    claim before synthesis, when the task explicitly requests it.
 
-Build every brief with [scripts/build-brief.mjs](scripts/build-brief.mjs), append
-rebuttals with `blind-relabel.mjs append-rebuttals`, and stage the auditor's
-folder with `blind-relabel.mjs audit-prep`; the phase files give the exact
-commands. Full-tool readers (the Claude seat, the auditor) write their own
-result files; the orchestrator never retypes a reviewer's or auditor's output.
-
 `scripts/review-run.mjs` runs the three phase commands from `run.json`: `phase1`, `phase2`
-and `audit`, each with two halves (`--start` and `--wait`; `--prepare` and `--finish`). It prints
-at most ten lines and one `next:` line, stops at the first failed step and keeps every artifact.
-It calls only scripts the phase files name, in their order, so those commands stay documented
-in the phase files.
+and `audit`, each with two halves (`--start` and `--wait`; `--prepare` and `--finish`), then
+`manifest` and `report`. It builds every brief, appends the rebuttals and stages the auditor's
+folder. Each phase call prints at most ten lines and one `next:` line, stops at the first failed step and keeps
+every artifact. The phase files say what each step does and checks. `review-run splice` and
+`review-run scan` are the redaction round's tools, `review-run verifier-brief` builds a
+falsification verifier's brief, and `review-run recheck` drafts a re-review packet;
+`review-run --help` prints every option. Full-tool readers (the Claude seat, the auditor) write
+their own result files; the orchestrator never retypes a reviewer's or auditor's output.
 
-Dispatch a Codex seat with [scripts/codex-dispatch.mjs](scripts/codex-dispatch.mjs)
-and an OpenCode seat with [scripts/opencode-dispatch.mjs](scripts/opencode-dispatch.mjs).
-Pass the resolved `--model` on every dispatch, including resume. Pass `--effort`
-only when the runtime supports and the user explicitly selected it; omit it for
-`default`. A native Claude seat uses the host's explicit model/effort mechanism;
-a CLI Claude seat gets `--model` and `--effort` on
-[scripts/claude-dispatch.mjs](scripts/claude-dispatch.mjs).
-Snapshot all arguments for the run. Dispatchers do not load user preferences.
+`review-run` passes each seat's resolved model on every call, including resume, and its effort
+only when the runtime supports it and the user explicitly selected it (never for `default`). A
+native Claude seat uses the host's explicit model/effort mechanism. All arguments come from the
+`run.json` snapshot of the run; the seat runs do not load user preferences.
 
 Result metadata records requested model/effort; it is not proof of server-side
 selection. Use runtime evidence for resolved values, otherwise record `null`
 and explain what could not be verified. Any dispatcher error or missing seat
 means the review is incomplete; do not synthesize a completed two-vendor verdict.
 
-OpenCode is selected only when the user chose it. It is never a silent fallback.
-
 ## Run checklist
 
 1. Setup and Preflight above; state the resolved seats.
 2. [Phase 1](references/phase-1-independent-passes.md): run directory,
-   `preflight.mjs`, the frozen `task-packet.md`, `build-brief.mjs --mode phase1`
-   for each seat, then seat A's agent and seat B's dispatcher at the same time.
-3. Completion gate: `blind-relabel.mjs validate --phase1-dir <run-dir>/phase1
-   --target-dir <target-dir> --packet <run-dir>/task-packet.md` exits 0.
-4. [Phase 2](references/phase-2-cross-examination.md): `exchange.mjs prepare`;
-   each seat's delta brief by its resume action (the host file names it for a
-   native seat; a CLI seat is resumed on its Phase 1 session); then
-   `exchange.mjs finish`. Extra tasks the user asked for (a
+   `preflight.mjs`, the frozen `task-packet.md`, then `review-run phase1 --start`
+   (both briefs, both seats at the same time) and `phase1 --wait`.
+3. Completion gate: `review-run phase1 --wait` validates both seat files against
+   the target and the task packet and passes only when both are valid. A seat file must be in the strict format (`scripts/seat-file.mjs`: claim headings, exactly `## Checks performed` or only `## No findings`, and in that section exactly one `Blocked:` line; every claim has a `Same shape elsewhere:` line); `review-run phase1 --wait` returns a refused file to its seat once to rewrite (a CLI seat is resumed, a native seat gets a message file), and a file refused again makes the review INCOMPLETE (`phase1/format-refused.json`, shown by the manifest and the report). A `## No findings` seat that names a block is incomplete; a seat with claims and a block gets the "may have reviewed blind" caveat.
+4. [Phase 2](references/phase-2-cross-examination.md): `review-run phase2 --start`
+   (relabel, scan, both delta briefs; a CLI seat is resumed on its Phase 1 session, a native
+   seat by the resume action the host file names), then `phase2 --wait` (appends both rebuttal
+   files and validates). Extra tasks the user asked for (a
    fix design) run after it (phase 2, Extra tasks after the exchange).
-5. [Phase 3](references/phase-3-scorecard.md): `blind-relabel.mjs flip` and
-   `audit-prep`; falsification verifiers only on request; the fresh auditor
-   (`build-brief.mjs --mode auditor`); `translate`; `scorecard`.
-6. `build-manifest.mjs`, the report, `blind-relabel.mjs clear-cache`, and
-   worktree cleanup for an isolated seat.
+5. [Phase 3](references/phase-3-scorecard.md): `review-run audit --prepare` (coin flip and the
+   auditor's staged folder); falsification verifiers only on request; `audit --finish` (the fresh
+   auditor, translate, the scorecard, cache and worktree cleanup).
+6. `review-run manifest` and `review-run report`.
 
 ## Rules that apply throughout
 
@@ -241,8 +230,8 @@ OpenCode is selected only when the user chose it. It is never a silent fallback.
    Every call re-sends the whole conversation, so the orchestrator's cost per
    step grows with its context: between reviews, start a new session or
    `/compact` once the context has grown large. Record the session's own cost with
-   `build-manifest --seat-transcript orchestrator=<session .jsonl>@<review start>/<review end>`
-   (ISO times) on the review's first `build-manifest`: in a session that runs
+   `review-run manifest --seat-transcript orchestrator=<session .jsonl>@<review start>/<review end>` (or `orchestrator=auto@<start>/<end>`, which finds this session's transcript; when one session runs several reviews, `review-run status` prints each run's first brief time, the latest safe `<start>`)
+   (ISO times) on the review's first `review-run manifest`: in a session that runs
    several reviews, the window counts only this review's calls. The host file names the transcript file to use.
 2. **Tell the user local time.** The scripts store every time in UTC (`startedAt`,
    `finishedAt`, the `Z` times). Whenever you mention a time to the user, convert it
@@ -254,7 +243,7 @@ OpenCode is selected only when the user chose it. It is never a silent fallback.
    incomplete, never replaced. Before it, a seat whose provider is unavailable
    may move to another provider (phase 1, Stalled or unavailable seats).
 5. Never hand-edit or retype reviewer or auditor output: return it to its seat
-   and apply the reply with `blind-relabel.mjs splice`.
+   and apply the reply with `review-run splice`.
 6. A scan hit: delete the relabeled file and allow one redaction round. Each hit
    names the matched token: if the second scan names the same token, stop the run and
    report; if it names a different one, the first round fixed its token, so one more
@@ -273,14 +262,14 @@ OpenCode is selected only when the user chose it. It is never a silent fallback.
 
 ## Reviewing the same code again
 
-Each fix pass adds new code, and the next review mostly finds bugs in that new code: in a four-round series on one collector
+Each fix pass adds new code, and the next review mostly finds bugs in that new code: in a four-round series on one module
 about half of each round's findings came from the previous fixes. Review again after a fix pass only when the last round had a
 finding that only one seat raised on code that was changed. Stop after the first round where each finding was raised by both
-seats, or where nothing new is on changed code: another round costs the same tokens and finds less.
+seats, or where nothing new is on changed code: another round costs the same tokens and finds less. A packet from `review-run recheck` carries a `Review round: N` line, and from round 3 the report asks you to step back: a test over every input combination the findings name, or a redesign, usually beats another round. The packet never names the old run folder (its manifest names the seats' models): `previous-run.json` next to the packet records it for you; keep it out of the seats' reach. Every `recheck` option is in [phase-3-scorecard.md](references/phase-3-scorecard.md), Re-review.
 
-For a last check of a small fix diff, one fresh reviewer can be enough. Draft the packet with `scripts/build-recheck-packet.mjs
---from-run <old-run-dir> --out <packet.md>` (or write the short packet in references/task-packet-template.md), spawn one fresh
-agent (never a fork) with it, and require a command and its output for every finding. Treat what it reports as leads to verify:
+For a last check of a small fix diff, one fresh reviewer can be enough. Draft the packet with `review-run recheck
+--from-run <old-run-dir> --out <new-run-dir>/task-packet.md` (or write the short packet in references/task-packet-template.md), spawn one fresh
+agent (never a fork) with it, ask it to return its findings as text in its reply (a subagent may not be allowed to write a report file), and require evidence that fits each finding: a command and its output when the finding can be run, otherwise the cited lines (file:line and the quoted passage). Treat what it reports as leads to verify:
 there is no blind exchange and no auditor, so it does not replace a review round.
 
 Your own bug checklists: `review-config.mjs checklists` lists the files in `<config dir>/checklists/` (next to your saved choices,
@@ -297,12 +286,10 @@ when maintaining both packages; neither package imports files from the other.
 The shared scripts include `snapshot-utils.mjs` (imported by `preflight.mjs`) and
 `build-brief.mjs`, which reads only the shared review-protocol.md, and
 `exchange.mjs`, which runs the shared `blind-relabel.mjs` and `build-brief.mjs`.
-The phase references and dispatchers are maintained here
-and do not require updates to another skill.
+The phase references are maintained here and do not require updates to another skill.
 
 Shared scripts, identical in both skills and checked by the repository-level `scripts/validate-repository.mjs`
 (in the SkillArray repository, not in this folder): `claude-dispatch.mjs`, `codex-dispatch.mjs`, `detach-utils.mjs`, `worktree-utils.mjs`, `rollout-utils.mjs`,
 `run-descriptor.mjs` (reads and writes `run.json`), `review-run.mjs` (the sequencer) and
-`preflight.mjs`, with their tests. `opencode-dispatch.mjs` exists only
-here. The host files `references/hosts/claude-code.md` and `references/hosts/codex.md` are not
+`preflight.mjs`, with their tests. The host files `references/hosts/claude-code.md` and `references/hosts/codex.md` are not
 parity files: each skill's host files differ where its transports differ.

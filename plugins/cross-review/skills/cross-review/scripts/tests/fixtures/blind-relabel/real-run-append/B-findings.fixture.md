@@ -4,6 +4,7 @@
 Severity: HIGH  
 Basis: EXECUTED  
 Evidence strength: REPRODUCED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 scanText('identified in P12', null) returned no hits.
@@ -17,6 +18,7 @@ Suggested fix: In `scripts/blind-relabel.mjs`, reject `P<n>` tokens in Phase 3 i
 Severity: MEDIUM  
 Basis: EXECUTED  
 Evidence strength: REPRODUCED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 parseArgs(['--brief','x','--cd','.']).timeout returned 1800 for both dispatchers.
@@ -29,6 +31,7 @@ Suggested fix: In both dispatchers’ `parseArgs`, make an omitted timeout unlim
 Severity: MEDIUM  
 Basis: STATIC_TRACE  
 Evidence strength: DETERMINISTIC  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 SKILL.md:29-32 requires gpt-6-astra and gpt-5.6 variants.
@@ -41,6 +44,7 @@ Suggested fix: Update `SKILL.md`’s “Start here” model list to match `provi
 Severity: MEDIUM  
 Basis: STATIC_TRACE  
 Evidence strength: SUPPORTED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 phase-1-independent-passes.md:92-100 instructs reviewers to return full findings in their final response and the orchestrator to persist them verbatim.
@@ -53,6 +57,7 @@ Suggested fix: Add a capture helper or an artifact-writing path to the phase ins
 Severity: MEDIUM  
 Basis: STATIC_TRACE  
 Evidence strength: DETERMINISTIC  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 phase-2-cross-examination.md:121-130 requires translating each P ID and appending an exact rebuttal heading.
@@ -64,6 +69,7 @@ Suggested fix: Add a Phase 2 rebuttal parser to `scripts/blind-relabel.mjs` that
 Severity: MEDIUM  
 Basis: STATIC_TRACE  
 Evidence strength: DETERMINISTIC  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 preflight.mjs:150-156 returns only gitRepo:false and a note for a non-git directory.
@@ -76,6 +82,7 @@ Suggested fix: Add an opt-in, size-bounded file hash inventory for non-git targe
 Severity: MEDIUM  
 Basis: STATIC_TRACE  
 Evidence strength: SUPPORTED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 review-profiles.md defines a Document lens.
@@ -88,6 +95,7 @@ Suggested fix: Add a document extraction step that records tool/version, text, h
 Severity: MEDIUM  
 Basis: STATIC_TRACE  
 Evidence strength: DETERMINISTIC  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 review-protocol.md:199-211 prohibits fetching target-embedded URLs.
@@ -100,6 +108,7 @@ Suggested fix: Add a pre-handoff check that extracts target URLs and flags match
 Severity: LOW  
 Basis: SOURCE_CITATION  
 Evidence strength: SUPPORTED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 review-protocol.md:186-191 says “5 fetches per seat per phase” and requires an actual count.
@@ -111,6 +120,7 @@ Suggested fix: In `references/review-protocol.md`, define separate counts for fe
 Severity: LOW  
 Basis: EXECUTED  
 Evidence strength: REPRODUCED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 The supplied preflight.json is 66,868 bytes. Its Tier 2 test result contains hundreds of passing-test lines.
@@ -122,6 +132,7 @@ Suggested fix: Add a `preflight.mjs` brief-summary output with command, exit cod
 Severity: LOW  
 Basis: EXECUTED  
 Evidence strength: REPRODUCED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 review-protocol.md:129-141 defines Severity, Basis, Evidence strength, and Evidence, with no Suggested fix.
@@ -133,6 +144,7 @@ Suggested fix: Add an optional `suggested_fix` field to the claim and canonical 
 Severity: LOW  
 Basis: STATIC_TRACE  
 Evidence strength: SUPPORTED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 phase-1-independent-passes.md:35-40 forbids naming one’s seat in prose.
@@ -144,6 +156,7 @@ Suggested fix: Add “do not put your seat letter in scratch paths or filenames�
 Severity: LOW  
 Basis: SOURCE_CITATION  
 Evidence strength: SUPPORTED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 review-protocol.md:153 defines severity only as “impact if the claim is real.”
@@ -155,6 +168,7 @@ Suggested fix: Add a short severity rubric to `references/review-protocol.md` co
 Severity: MEDIUM  
 Basis: STATIC_TRACE  
 Evidence strength: SUPPORTED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 review-profiles.md:25-34 lists Code security topics, including secrets, but does not ask whether supposedly anonymized captures retain hardware or infrastructure identifiers.
@@ -165,6 +179,7 @@ Suggested fix: Add a data privacy check to the Code and Document lenses for seri
 Severity: MEDIUM  
 Basis: STATIC_TRACE  
 Evidence strength: SUPPORTED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 phase-3-scorecard.md:140-160 says to give the auditor ONLY X/Y material, yet defines no staged input directory or check that real-ID run artifacts are outside its accessible paths.
@@ -175,6 +190,7 @@ Suggested fix: Stage only X/Y files and the target snapshot in a separate audito
 Severity: LOW  
 Basis: STATIC_TRACE  
 Evidence strength: DETERMINISTIC  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 phase-3-scorecard.md:31-41 requires the orchestrator to read the flip and substitute both labels into four relabel commands and two output names.
@@ -185,6 +201,7 @@ Suggested fix: Add one `blind-relabel.mjs` command that reads the mapping and Ph
 Severity: LOW  
 Basis: STATIC_TRACE  
 Evidence strength: SUPPORTED  
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ```text
 phase-1-independent-passes.md:35-46 and :51-67 require verbatim identity and web rules in each brief.
@@ -206,3 +223,4 @@ Suggested fix: Add phase brief builders that include the relevant rule blocks on
 - **Repository changes:** None.
 
 Web fetch/search count: 0.
+Blocked: none

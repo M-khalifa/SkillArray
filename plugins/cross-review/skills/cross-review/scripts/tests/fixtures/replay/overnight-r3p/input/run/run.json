@@ -1,0 +1,77 @@
+{
+  "skill": "pair-review",
+  "skillDir": "C:\\Users\\dev\\.claude\\skills\\pair-review",
+  "targetDir": "@@TARGET_JSON@@",
+  "host": "claude-code",
+  "flags": {
+    "auditDepth": "full",
+    "falsification": false,
+    "mode": "adversarial",
+    "repoOnly": true
+  },
+  "fingerprint": {
+    "head": "ea0b739e8bc727cbe052c89b9478f31d675aacef",
+    "diffSha256": "07f3ac338d8052f1e9f3bd400c6838cbecf94156cdbbd6d9f41d3f563b5163b1",
+    "untrackedSha256": "a1f5ed7e23a3edfa0f92a35bd6b5b63d069bf0b493216f00c0a05a878816cee8",
+    "snapshotHash": "b7c80e849b67b5387693f51758817b1db7b8653e8843663229ae0efbd8bf8c20"
+  },
+  "seatA": {
+    "role": "A",
+    "effort": null,
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@\\phase1\\seat-A",
+    "provider": "anthropic",
+    "runtime": "claude",
+    "model": "sonnet",
+    "transport": "native",
+    "selectionSource": "saved"
+  },
+  "seatB": {
+    "role": "B",
+    "effort": null,
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@\\phase1\\seat-B",
+    "provider": "anthropic",
+    "runtime": "claude",
+    "model": "opus",
+    "transport": "native",
+    "selectionSource": "saved"
+  },
+  "auditor": {
+    "role": "auditor",
+    "effort": null,
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@-audit-input",
+    "provider": "anthropic",
+    "runtime": "claude",
+    "model": "opus",
+    "transport": "native"
+  },
+  "verifiers": [],
+  "support": [
+    {
+      "role": "A",
+      "runtime": "claude",
+      "transport": "native",
+      "status": "supported"
+    },
+    {
+      "role": "B",
+      "runtime": "claude",
+      "transport": "native",
+      "status": "supported"
+    },
+    {
+      "role": "auditor",
+      "runtime": "claude",
+      "transport": "native",
+      "status": "supported"
+    }
+  ]
+}

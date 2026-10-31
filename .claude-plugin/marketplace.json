@@ -1,6 +1,6 @@
 {
   "name": "skillarray",
-  "description": "Evidence-grounded Claude Code skills for multi-model review and cross-vendor verification.",
+  "description": "Evidence-grounded Claude Code and Codex skills for multi-model review and cross-vendor verification.",
   "owner": {
     "name": "Mahmoud Khalifa"
   },

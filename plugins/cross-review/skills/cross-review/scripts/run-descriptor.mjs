@@ -16,7 +16,7 @@ const SEATS = ['A', 'B'];
 const TRANSPORTS = ['native', 'cli'];
 const SEAT_KEYS = { A: 'seatA', B: 'seatB' };
 const TOP_STRINGS = ['skill', 'skillDir', 'targetDir', 'host'];
-const FLAG_KEYS = ['auditDepth', 'falsification', 'mode'];
+const FLAG_KEYS = ['falsification', 'mode'];
 const AUDIT_DEPTHS = ['light', 'full'];
 const REVIEW_SKILLS = ['cross-review', 'pair-review'];
 const ACTOR_STRINGS = ['role', 'provider', 'runtime', 'transport', 'outputDir'];
@@ -64,6 +64,26 @@ function validateActor(actor, label, expectedRole) {
   if (present(actor.grantDirs) && (!Array.isArray(actor.grantDirs) || actor.grantDirs.some((d) => typeof d !== 'string' || !path.isAbsolute(d)))) {
     throw new RunDescriptorError(`run descriptor: actor "${label}" "grantDirs" must be an array of absolute paths`);
   }
+  if (present(actor.env)) validateEnv(actor.env, label, actor);
+}
+
+const ENV_KEYS = ['mode', 'pass', 'apiKey'];
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// A CLI actor's environment: filtered or inherited, the variable names that also reach it, and the ANTHROPIC_API_KEY
+// opt-in. Names only: every script reads run.json, so a value never goes in it.
+function validateEnv(env, label, actor) {
+  const where = `run descriptor: actor "${label}" "env"`;
+  if (env === null || typeof env !== 'object' || Array.isArray(env)) throw new RunDescriptorError(`${where} must be an object { mode, pass, apiKey }`);
+  const unknown = Object.keys(env).filter((k) => !ENV_KEYS.includes(k));
+  if (unknown.length > 0) throw new RunDescriptorError(`${where} has unknown key(s) ${unknown.join(', ')}; it holds mode, pass (variable names) and apiKey only, never a value`);
+  if (present(env.mode) && !['filtered', 'inherit'].includes(env.mode)) throw new RunDescriptorError(`${where}.mode must be filtered or inherit`);
+  if (present(env.pass) && (!Array.isArray(env.pass) || env.pass.some((n) => typeof n !== 'string' || !ENV_NAME.test(n)))) {
+    throw new RunDescriptorError(`${where}.pass must be a list of variable names (letters, digits and _), never NAME=value`);
+  }
+  if (present(env.apiKey) && typeof env.apiKey !== 'boolean') throw new RunDescriptorError(`${where}.apiKey must be true or false`);
+  if (actor.transport !== 'cli') throw new RunDescriptorError(`${where} applies to a CLI actor only; a native agent runs in the host's own environment`);
+  if (env.apiKey === true && actor.runtime !== 'claude') throw new RunDescriptorError(`${where}.apiKey opts a Claude CLI actor in to ANTHROPIC_API_KEY; for runtime "${actor.runtime}" name the variable in env.pass`);
 }
 
 // The same vendor, runtime, mode and distinct-model rules review-config.mjs enforces at setup, applied to the seats file.
@@ -93,7 +113,9 @@ function validate(data, file) {
   for (const key of FLAG_KEYS) {
     if (!present(data.flags[key])) throw new RunDescriptorError(`run descriptor ${file}: flags.${key} is missing`);
   }
-  if (!AUDIT_DEPTHS.includes(data.flags.auditDepth)) throw new RunDescriptorError(`run descriptor ${file}: flags.auditDepth must be ${AUDIT_DEPTHS.join(' or ')}, got ${JSON.stringify(data.flags.auditDepth)}`);
+  // The audit is always full; a run.json written before that may say "light", and that run's own files are read by its rule.
+  if (present(data.flags.auditDepth) && !AUDIT_DEPTHS.includes(data.flags.auditDepth)) throw new RunDescriptorError(`run descriptor ${file}: flags.auditDepth must be ${AUDIT_DEPTHS.join(' or ')}, got ${JSON.stringify(data.flags.auditDepth)}`);
+  if (!present(data.flags.auditDepth)) data.flags.auditDepth = 'full';
   if (typeof data.flags.falsification !== 'boolean') throw new RunDescriptorError(`run descriptor ${file}: flags.falsification must be the boolean true or false, got ${JSON.stringify(data.flags.falsification)}`);
   if (present(data.flags.timeoutS) && !(Number.isInteger(data.flags.timeoutS) && data.flags.timeoutS >= 0 && data.flags.timeoutS <= 2147483)) {
     throw new RunDescriptorError(`run descriptor ${file}: flags.timeoutS must be a whole number of seconds, 0 for no limit`);
@@ -102,6 +124,7 @@ function validate(data, file) {
     throw new RunDescriptorError(`run descriptor ${file}: flags.checklists must be a list of 2-16 upper-case letter or digit names starting with a letter`);
   }
   if (present(data.flags.repoOnly) && typeof data.flags.repoOnly !== 'boolean') throw new RunDescriptorError(`run descriptor ${file}: flags.repoOnly must be a boolean`);
+  if (present(data.flags.foldsCase) && typeof data.flags.foldsCase !== 'boolean') throw new RunDescriptorError(`run descriptor ${file}: flags.foldsCase must be a boolean`);
   if (!present(data.fingerprint)) throw new RunDescriptorError(`run descriptor ${file}: "fingerprint" is missing (null is allowed)`);
   if (present(data.sourceDirs) && (!Array.isArray(data.sourceDirs) || data.sourceDirs.some((d) => typeof d !== 'string' || !path.isAbsolute(d)))) {
     throw new RunDescriptorError(`run descriptor ${file}: "sourceDirs" must be an array of absolute paths`);
@@ -196,7 +219,7 @@ function privateOutputPath(desc, phase, role) {
 // A native agent has file tools whatever its vendor, so it writes its own file; a CLI actor follows its runtime.
 function channelFor(actor) {
   if (actor.transport === 'native' || actor.runtime === 'claude') return 'file';
-  if (actor.runtime === 'codex' || actor.runtime === 'opencode') return 'final-message';
+  if (actor.runtime === 'codex') return 'final-message';
   throw new RunDescriptorError(`no output channel is defined for runtime "${actor.runtime}"`);
 }
 
@@ -306,7 +329,7 @@ async function assertGrantsIsolated(desc) {
       }
       if (isInside(grant, desc.runDir)) {
         const hit = await findForbiddenName(grant, actor.role, peers);
-        if (hit) throw new RunDescriptorError(`actor "${actor.role}" is granted ${grant}, which holds ${hit}`);
+        if (hit) throw new RunDescriptorError(`actor "${actor.role}" is granted ${grant}, which holds ${hit}; if that is a seat's leftover test file or link, move it out of the run folder and rerun`);
       }
     }
   }

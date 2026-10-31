@@ -1,0 +1,482 @@
+diff --git a/plugins/cross-review/skills/cross-review/SKILL.md b/plugins/cross-review/skills/cross-review/SKILL.md
+index c25783c..4f6c306 100644
+--- a/plugins/cross-review/skills/cross-review/SKILL.md
++++ b/plugins/cross-review/skills/cross-review/SKILL.md
+@@ -281,7 +281,7 @@ OpenCode is selected only when the user chose it. It is never a silent fallback.
+ Each fix pass adds new code, and the next review mostly finds bugs in that new code: in a four-round series on one collector
+ about half of each round's findings came from the previous fixes. Review again after a fix pass only when the last round had a
+ finding that only one seat raised on code that was changed. Stop after the first round where each finding was raised by both
+-seats, or where nothing new is on changed code: another round costs the same tokens and finds less. A packet from `build-recheck-packet.mjs` carries a `Review round: N` line, and from round 3 the report asks you to step back: a test over every input combination the findings name, or a redesign, usually beats another round.
++seats, or where nothing new is on changed code: another round costs the same tokens and finds less. A packet from `build-recheck-packet.mjs` carries a `Review round: N` line, and from round 3 the report asks you to step back: a test over every input combination the findings name, or a redesign, usually beats another round. The packet never names the old run folder (its manifest names the seats' models): `previous-run.json` next to the packet records it for you; keep it out of the seats' reach.
+ 
+ For a last check of a small fix diff, one fresh reviewer can be enough. Draft the packet with `scripts/build-recheck-packet.mjs
+ --from-run <old-run-dir> --out <packet.md>` (or write the short packet in references/task-packet-template.md), spawn one fresh
+diff --git a/plugins/cross-review/skills/cross-review/references/review-protocol.md b/plugins/cross-review/skills/cross-review/references/review-protocol.md
+index 79878df..1e63b92 100644
+--- a/plugins/cross-review/skills/cross-review/references/review-protocol.md
++++ b/plugins/cross-review/skills/cross-review/references/review-protocol.md
+@@ -447,7 +447,7 @@ An opt-in, orchestrator-run step inside Phase 3, before the auditor, that
+ independently checks a specific disputed claim without letting either original
+ reviewer argue it again. Off by default; the orchestrator enables it only
+ on an explicit request in the task — the canonical phrase is "deep verify
+-disputed high-severity findings" (see the skill's own Invocation section).
++disputed high-severity findings".
+ When off, this section does not run — no verifier is spawned, no claim is
+ excluded from Synthesis for lack of one.
+ 
+diff --git a/plugins/cross-review/skills/cross-review/scripts/build-recheck-packet.mjs b/plugins/cross-review/skills/cross-review/scripts/build-recheck-packet.mjs
+index f632fdf..3f1686e 100644
+--- a/plugins/cross-review/skills/cross-review/scripts/build-recheck-packet.mjs
++++ b/plugins/cross-review/skills/cross-review/scripts/build-recheck-packet.mjs
+@@ -50,6 +50,8 @@ Options:
+   --drop-tag <tag>   remove a criterion tag: its "- [tag]" bullet and its entry in the Tickets line (repeat or comma-separate).
+ With --since-diff or --since-dirs the diff is also written to since.diff next to --out (kept if it exists); build-report
+ reads it from the run folder to tag where each finding sits in the change.
++The packet never names the old run folder (its manifest names the seats' models): previous-run.json next to --out records it
++for you (kept, with a warning, if one with other contents exists); give the seats no path to it.
+ --out is never overwritten. Every "FILL" marker must be replaced before the seats start; the script lists them.
+ `;
+ 
+diff --git a/plugins/cross-review/skills/cross-review/scripts/build-report.mjs b/plugins/cross-review/skills/cross-review/scripts/build-report.mjs
+index 2ebd3b1..59fdb5d 100644
+--- a/plugins/cross-review/skills/cross-review/scripts/build-report.mjs
++++ b/plugins/cross-review/skills/cross-review/scripts/build-report.mjs
+@@ -614,9 +614,12 @@ export function diffHunks(text) {
+ }
+ 
+ const NEAR_LINES = 20;
+-const WHERE_RANK = ['added lines', 'near the change', 'changed file', 'outside the change'];
++const WHERE_RANK = ['added lines', 'near the change', 'changed file', 'unknown', 'outside the change'];
++const tagIn = (entry, n) => (entry.added.has(n) ? 'added lines'
++  : entry.spans.some(([a, b]) => n >= a - NEAR_LINES && n <= b + NEAR_LINES) ? 'near the change' : 'changed file');
+ // Where a finding's evidence locations sit in the change: the best over all its file:line locations and all diffs (one Map
+-// per diff), "unknown" without a location. A path matches at a "/" boundary; a bare name only when one diff file has it.
++// per diff), "unknown" without a location. A path matches at a "/" boundary. A file name alone (bare, or under a snapshot
++// folder such as REVIEW/head/) is a guess marked byName: the tag its diff files agree on, else "unknown".
+ export function whereInChange(evidence, hunkMaps) {
+   const fold = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+   const maps = hunkMaps instanceof Map ? [hunkMaps] : hunkMaps;
+@@ -624,27 +627,24 @@ export function whereInChange(evidence, hunkMaps) {
+   for (const loc of evidenceLocations(evidence)) {
+     const m = /^(.*):(\d+)$/.exec(loc.replace(/\\/g, '/'));
+     const [file, n] = [fold(m[1].replace(/^\.\//, '')), Number(m[2])];
++    const base = file.split('/').pop();
+     for (const hunks of maps) {
+       const paths = [...hunks.keys()];
+-      const byPath = file.includes('/')
+-        ? paths.filter((p) => { const fp = fold(p); return fp === file || (fp.includes('/') && file.endsWith(`/${fp}`)) || fp.endsWith(`/${file}`); })
+-        : [];
+-      // A path under a snapshot folder (REVIEW/head/Reporter.py) shares no suffix with the diff's path (PKG/Reporter.py): then a
+-      // file name only one diff file has decides, and the tag says so. A root diff file never claims a same-named file in a folder.
+-      const sameName = byPath.length > 0 || !file.includes('/') ? [] : paths.filter((p) => fold(p).split('/').pop() === file.split('/').pop());
+-      const byName = sameName.length === 1 && sameName[0].includes('/') ? sameName : [];
+-      const plainName = file.includes('/') ? [] : paths.filter((p) => fold(p).split('/').pop() === file);
+-      const hits = byPath.length > 0 ? byPath : file.includes('/') ? byName : plainName;
+-      const usable = byPath.length > 0 || hits.length === 1 ? hits : [];
+-      const entry = usable.length > 0 ? hunks.get(usable.reduce((a, b) => (b.length > a.length ? b : a))) : null;
+-      const tag = !entry ? 'outside the change'
+-        : entry.added.has(n) ? 'added lines'
+-        : entry.spans.some(([a, b]) => n >= a - NEAR_LINES && n <= b + NEAR_LINES) ? 'near the change' : 'changed file';
+-      const byNameOnly = Boolean(entry) && byPath.length === 0 && file.includes('/');
+-      const at = byNameOnly ? `${loc}, matched by file name to ${usable[0]}` : loc;
++      const byPath = paths.filter((p) => { const fp = fold(p); return fp === file || (file.includes('/') && ((fp.includes('/') && file.endsWith(`/${fp}`)) || fp.endsWith(`/${file}`))); });
++      const sameName = byPath.length > 0 ? [] : paths.filter((p) => fold(p).split('/').pop() === base);
++      // A root diff file alone never claims a cited file in a folder.
++      const named = file.includes('/') && sameName.every((p) => !p.includes('/')) ? [] : sameName;
++      let found;
++      if (byPath.length > 0) found = { tag: tagIn(hunks.get(byPath.reduce((a, b) => (b.length > a.length ? b : a))), n), at: loc };
++      else if (named.length === 0) found = { tag: 'outside the change', at: loc };
++      else {
++        const tags = named.map((p) => tagIn(hunks.get(p), n));
++        found = new Set(tags).size === 1
++          ? { tag: tags[0], at: `${loc}, matched by file name to ${named.join(', ')}`, byName: true }
++          : { tag: 'unknown', at: `${loc}, file name shared by ${named.length} changed files`, byName: true, addedInOne: tags.includes('added lines') };
++      }
+       // A path match outranks a file-name guess of the same tag.
+-      const better = best === null || WHERE_RANK.indexOf(tag) < WHERE_RANK.indexOf(best.tag) || (tag === best.tag && best.byName && !byNameOnly);
+-      if (better) best = byNameOnly ? { tag, at, byName: true } : { tag, at };
++      if (best === null || WHERE_RANK.indexOf(found.tag) < WHERE_RANK.indexOf(best.tag) || (found.tag === best.tag && best.byName && !found.byName)) best = found;
+     }
+   }
+   return best ?? { tag: 'unknown', at: null };
+@@ -660,7 +660,7 @@ function runTime(timing, m) {
+ const minutes = (ms) => (ms === null ? 'unknown' : ms < 60000 ? 'under 1 min' : `${Math.round(ms / 60000)} min`);
+ export const timeText = (t) => `${minutes(t.wallMs)} wall (first brief to findings.json; packet writing not counted); orchestrator working time ${minutes(t.orchestratorMs)}`;
+ 
+-export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {}, timing = null, changeDiffs = [] }) {
++export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {}, timing = null, changeDiffs = [], briefText = null }) {
+   if (!findingsDoc || !Array.isArray(findingsDoc.findings)) throw new ReportError('findings.json has no "findings" array');
+   const hunks = changeDiffs.map((d) => diffHunks(d.text));
+   const findings = findingsDoc.findings.map((f) => ({
+@@ -696,8 +696,10 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts
+   const headingTags = new Map();
+   for (const text of Object.values(seatTexts)) for (const [id, tags] of claimHeadingTags(text, [...packetCriteria(packetText).keys()])) headingTags.set(id, tags);
+   const checksBySeat = Object.fromEntries(Object.entries(seatTexts).map(([seat, text]) => [seat, checksPerformed(text)]));
+-  // A packet that defines CONFIRMED (the defect is still there) asked the seats for the defect's side, whatever a line's wording.
+-  const fixWordedFlips = !/CONFIRMED \(the (?:previous )?defect (?:is still there|it names exists)\)/.test(packetText);
++  // Seats whose brief or packet defines CONFIRMED (the defect exists) answered for the defect, whatever a line's wording; the
++  // run's seat brief decides when it is there, since a hand-written packet need not repeat the definition.
++  const defines = (text) => /CONFIRMED\s+\(the\s+(?:previous\s+)?defect\s+(?:is\s+still\s+there|it\s+names\s+exists)\)/.test(text);
++  const fixWordedFlips = briefText != null ? !defines(briefText) : !defines(packetText);
+   const criteria = buildCriteria(packetCriteria(packetText), criteriaInput, headingTags, checksBySeat, packetTicketMap(packetText), { fixWordedFlips });
+   if (criteria) {
+     const byId = new Map(findings.map((f) => [f.id, f]));
+@@ -767,7 +769,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts
+     if (new Set(Object.values(t.seats)).size > 1) caveats.push(`Ticket ${t.id}: the seats disagree (${Object.entries(t.seats).map(([seat, v]) => `${seat} ${v}`).join(', ')}); the exchange did not reconcile it, so read both seat files before you act.`);
+   }
+   const fixWorded = (criteria?.rows ?? []).filter((r) => r.fixWorded && r.status !== 'not-verified').map((r) => r.tag);
+-  if (fixWorded.length > 0) caveats.push(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a packet that does not define CONFIRMED (a 1.1.0 packet), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`);
++  if (fixWorded.length > 0) caveats.push(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a run whose seats were not told what CONFIRMED means (a 1.1.0 run), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`);
+   if (criteria?.silentSeats.length > 0) caveats.push(`${criteria.silentSeats.map((x) => `Seat ${x}`).join(', ')} wrote checks but named no criterion or hypothesis tag, so the criteria and hypotheses counts reflect only the seat(s) that did.`);
+   // A CLI seat whose usage sits in seat_usage keeps its count on its reviewers[] or actors[] entry.
+   const entryCommands = (role) => [...(m.reviewers ?? []), ...(m.actors ?? [])].find((x) => x?.role === role)?.commands;
+@@ -800,6 +802,9 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts
+   counts.withdrawn = findings.length - standing.length;
+   const preMarked = changeDiffs.length > 0 ? [] : findings.filter((f) => noteKinds(f.status).pre);
+   const preOnAdded = changeDiffs.length > 0 ? findings.filter((f) => noteKinds(f.status).pre && f.where?.tag === 'added lines' && !f.where.byName) : [];
++  // A file-name guess never moves a finding, but a pre-existing note against one that points at added lines is worth a look.
++  const preOnGuess = changeDiffs.length > 0 ? findings.filter((f) => noteKinds(f.status).pre && f.where?.byName && (f.where.tag === 'added lines' || f.where.addedInOne)) : [];
++  for (const f of preOnGuess) caveats.push(`${f.id} is marked pre-existing in the report notes; its evidence matches lines the change added only by file name (${f.where.at}), so check it is not the same file.`);
+   if (preOnAdded.length > 0) caveats.push(`${preOnAdded.map((f) => f.id).join(', ')} ${preOnAdded.length === 1 ? 'is' : 'are'} marked pre-existing in the report notes, but ${preOnAdded.length === 1 ? 'its' : 'their'} evidence is on lines the change added, so ${preOnAdded.length === 1 ? 'it stays' : 'they stay'} where ${preOnAdded.length === 1 ? 'its' : 'their'} severity puts ${preOnAdded.length === 1 ? 'it' : 'them'}.`);
+   if (preMarked.length > 0) caveats.push(`${preMarked.map((f) => f.id).join(', ')} ${preMarked.length === 1 ? 'is' : 'are'} marked pre-existing in the report notes, but this report has no change diff (since.diff in the run folder, or --change-diff), so nothing tells what the change was; ${preMarked.length === 1 ? 'it stays' : 'they stay'} where ${preMarked.length === 1 ? 'its' : 'their'} severity puts ${preMarked.length === 1 ? 'it' : 'them'}.`);
+   for (const f of findings.filter((x) => x.blocker && outcomeOf(x.status)?.word === 'wrong' && outcomeOf(x.status).reason === '')) {
+@@ -1348,6 +1353,7 @@ export async function loadRun(runDir, notesPath = null, changeDiffPaths = []) {
+     files: { scorecard: existsSync(path.join(dir, 'phase3', 'scorecard.md')) ? 'phase3/scorecard.md' : null, findings: 'phase3/findings.json', manifest: manifest ? 'manifest.json' : null },
+     timing: await runTiming(dir, findingsFile),
+     changeDiffs: await readChangeDiffs(dir, changeDiffPaths),
++    briefText: existsSync(path.join(dir, 'phase1', 'brief-A.txt')) ? await readOptional(path.join(dir, 'phase1', 'brief-A.txt')) : null,
+   });
+   if (!manifest) report.caveats.unshift('manifest.json was not found; status, pass counts and cost are unknown.');
+   return report;
+diff --git a/plugins/cross-review/skills/cross-review/scripts/tests/blind-relabel.test.mjs b/plugins/cross-review/skills/cross-review/scripts/tests/blind-relabel.test.mjs
+index c2855a7..0bf0171 100644
+--- a/plugins/cross-review/skills/cross-review/scripts/tests/blind-relabel.test.mjs
++++ b/plugins/cross-review/skills/cross-review/scripts/tests/blind-relabel.test.mjs
+@@ -3483,6 +3483,11 @@ test('CLI audit-prep --packet: on success stages task-packet.md (byte-exact) and
+   assert.ok(pointed.length > 0);
+   for (const name of pointed) assert.match(staged, new RegExp(`^#{2,4} ${esc(name)}`, 'm'), name);
+   for (const label of labels.filter(pointsTo)) assert.match(staged, new RegExp(`^\\*\\*${esc(label)}`, 'm'), label);
++  // "(see the skill's own Invocation section)": a named section the staged copy does not hold, wherever it lives.
++  const stagedHeads = [...staged.matchAll(/^#{1,4} (.+?)\s*$/gm)].map((m) => m[1]);
++  for (const m of flat.matchAll(/\bsee (?:the |its |this )?(?:skill's own |protocol's )?((?:[A-Z][\w-]*)(?: [\w-]+){0,4}) section\b/g)) {
++    assert.ok(stagedHeads.some((h) => h.startsWith(m[1])), `points to a section the auditor does not get: ${m[0]}`);
++  }
+   r = runCli([...base, '--out-dir', outDir, '--packet', packet]);
+   assert.equal(r.status, 1);
+   assert.match(r.stderr, /pass a new empty folder/);
+diff --git a/plugins/cross-review/skills/cross-review/scripts/tests/build-recheck-packet.test.mjs b/plugins/cross-review/skills/cross-review/scripts/tests/build-recheck-packet.test.mjs
+index 922d9db..c3c8964 100644
+--- a/plugins/cross-review/skills/cross-review/scripts/tests/build-recheck-packet.test.mjs
++++ b/plugins/cross-review/skills/cross-review/scripts/tests/build-recheck-packet.test.mjs
+@@ -132,6 +132,7 @@ test('CLI: writes the draft, lists the FILL markers, and never overwrites its ou
+   assert.equal(other.status, 0, other.stderr);
+   assert.match(other.stderr, /previous-run\.json already exists with other contents and was kept/);
+   assert.match(other.stdout, /not recorded: the record already exists/);
++  assert.match(spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' }).stdout, /previous-run\.json next to --out records it/, 'round 2 F5: --help names the record');
+   const missing = spawnSync(process.execPath, [SCRIPT, '--from-run', path.join(dir, 'nope'), '--out', path.join(dir, 'x.md')], { encoding: 'utf8' });
+   assert.equal(missing.status, 1);
+   assert.equal(existsSync(path.join(dir, 'x.md')), false);
+diff --git a/plugins/cross-review/skills/cross-review/scripts/tests/build-report.test.mjs b/plugins/cross-review/skills/cross-review/scripts/tests/build-report.test.mjs
+index 26d297b..e62fc9a 100644
+--- a/plugins/cross-review/skills/cross-review/scripts/tests/build-report.test.mjs
++++ b/plugins/cross-review/skills/cross-review/scripts/tests/build-report.test.mjs
+@@ -863,7 +863,17 @@ test('a finding marked pre-existing whose evidence is on lines the change added
+   });
+   assert.equal(other.findings[0].where.byName, true);
+   assert.deepEqual(groupFindings(other).preExisting.map((f) => f.id), ['F1']);
+-  assert.ok(!other.caveats.some((c) => c.startsWith('F1 is marked pre-existing')));
++  assert.ok(!other.caveats.some((c) => c.includes('so it stays where its severity puts it')));
++  assert.ok(other.caveats.includes('F1 is marked pre-existing in the report notes; its evidence matches lines the change added only by file name (HITACHI_DEVICE/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py), so check it is not the same file.'));
++  // Round 2 F2: a bare name that one changed file in a folder has is a guess too.
++  const bare = buildReport({
++    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', evidence: ['Reporter.py:11'] })] },
++    manifest: MANIFEST,
++    notesText: ['## Finding status', '- F1: pre-existing', ''].join(String.fromCharCode(10)),
++    changeDiffs: [{ name: 'since.diff', text: '--- a/CONTOSO_V4_DEVICE/Reporter.py\n+++ b/CONTOSO_V4_DEVICE/Reporter.py\n@@ -10 +10,2 @@\n a\n+b\n' }],
++  });
++  assert.equal(bare.findings[0].where.byName, true);
++  assert.deepEqual(groupFindings(bare).preExisting.map((f) => f.id), ['F1']);
+ });
+ 
+ test('field website: with no change diff, "pre-existing" in the notes does not move a finding out of Fix now, and a caveat says why', () => {
+@@ -1190,6 +1200,20 @@ test('a hypothesis worded "Confirm it is fixed" has its outcomes flipped, so REF
+   assert.ok(!current.caveats.some((c) => c.includes('Confirm it is fixed')));
+ });
+ 
++test('round 2 F3: the seats\' brief decides the "Confirm it is fixed" flip, read from phase1/brief-A.txt by loadRun', async (t) => {
++  const packet = lines('- [H1] Previous finding F1: the cache is never cleared. Confirm it is fixed.');
++  const seats = { A: lines('## Checks performed', '- H1: CONFIRMED, still broken.'), B: lines('## Checks performed', '- H1: CONFIRMED.') };
++  const today = 'end a hypothesis line with CONFIRMED (the defect it names exists), REFUTED\n  (it does not)';
++  assert.equal(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: seats, briefText: today }).criteria.rows[0].verdict, 'confirmed', 'a current brief: no flip, even with a packet that does not define it');
++  assert.equal(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: seats, briefText: 'an old brief' }).criteria.rows[0].verdict, 'refuted', 'a 1.1.0 brief: flipped');
++  const dir = await makeRun(t);
++  await fs.writeFile(path.join(dir, 'task-packet.md'), packet);
++  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), seats.A);
++  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), seats.B);
++  await fs.writeFile(path.join(dir, 'phase1', 'brief-A.txt'), today);
++  assert.equal((await loadRun(dir)).criteria.rows[0].verdict, 'confirmed');
++});
++
+ test('self-review fixes: a reader that closes stdout early keeps the exit code and the requested files', async (t) => {
+   const dir = await makeRun(t);
+   const run = (args) => new Promise((resolve) => {
+@@ -1459,10 +1483,15 @@ test('where in the change: a path under a snapshot folder matches by file name w
+   const pkg = lines('--- a/CONTOSO_V4_DEVICE/Reporter.py', '+++ b/CONTOSO_V4_DEVICE/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+   assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(pkg)), { tag: 'added lines', at: 'REVIEW/head/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py', byName: true });
+   assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11', 'CONTOSO_V4_DEVICE/Reporter.py:11'], diffHunks(pkg)), { tag: 'added lines', at: 'CONTOSO_V4_DEVICE/Reporter.py:11' }, 'a path match wins over a name guess');
++  // Round 2 F1: same-named files (the two skills' identical copies) give the tag they agree on, else "unknown", never "outside".
+   const two = lines(pkg, '--- a/OTHER_DEVICE/Reporter.py', '+++ b/OTHER_DEVICE/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+-  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(two)).tag, 'outside the change', 'two same-named files: no guess');
+-  const withRoot = lines(pkg, '--- a/Reporter.py', '+++ b/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+-  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(withRoot)).tag, 'outside the change', 'a root file with the name makes it ambiguous');
++  assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(two)), { tag: 'added lines', at: 'REVIEW/head/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py, OTHER_DEVICE/Reporter.py', byName: true });
++  assert.equal(whereInChange(['Reporter.py:11'], diffHunks(two)).tag, 'added lines', 'a bare name the same way');
++  const apart = lines(pkg, '--- a/OTHER_DEVICE/Reporter.py', '+++ b/OTHER_DEVICE/Reporter.py', '@@ -300 +300,2 @@', ' a', '+b');
++  assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(apart)), { tag: 'unknown', at: 'REVIEW/head/Reporter.py:11, file name shared by 2 changed files', byName: true, addedInOne: true });
++  const withRoot = lines(pkg, '--- a/Reporter.py', '+++ b/Reporter.py', '@@ -300 +300,2 @@', ' a', '+b');
++  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(withRoot)).tag, 'unknown', 'a root file with the name makes it ambiguous');
++  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(lines('--- a/x.py', '+++ b/x.py', '@@ -1 +1,2 @@', ' a', '+b'))).tag, 'outside the change', 'no diff file has the name');
+   const root = lines('--- a/Reporter.py', '+++ b/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+   assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(root)).tag, 'outside the change', 'a root diff file never claims a file in a folder');
+ });
+diff --git a/plugins/pair-review/skills/pair-review/SKILL.md b/plugins/pair-review/skills/pair-review/SKILL.md
+index 8a74c68..940489d 100644
+--- a/plugins/pair-review/skills/pair-review/SKILL.md
++++ b/plugins/pair-review/skills/pair-review/SKILL.md
+@@ -241,7 +241,7 @@ becomes unavailable during Phase 1.
+ Each fix pass adds new code, and the next review mostly finds bugs in that new code: in a four-round series on one collector
+ about half of each round's findings came from the previous fixes. Review again after a fix pass only when the last round had a
+ finding that only one seat raised on code that was changed. Stop after the first round where each finding was raised by both
+-seats, or where nothing new is on changed code: another round costs the same tokens and finds less. A packet from `build-recheck-packet.mjs` carries a `Review round: N` line, and from round 3 the report asks you to step back: a test over every input combination the findings name, or a redesign, usually beats another round.
++seats, or where nothing new is on changed code: another round costs the same tokens and finds less. A packet from `build-recheck-packet.mjs` carries a `Review round: N` line, and from round 3 the report asks you to step back: a test over every input combination the findings name, or a redesign, usually beats another round. The packet never names the old run folder (its manifest names the seats' models): `previous-run.json` next to the packet records it for you; keep it out of the seats' reach.
+ 
+ For a last check of a small fix diff, one fresh reviewer can be enough. Draft the packet with `scripts/build-recheck-packet.mjs
+ --from-run <old-run-dir> --out <packet.md>` (or write the short packet in references/task-packet-template.md), spawn one fresh
+diff --git a/plugins/pair-review/skills/pair-review/references/review-protocol.md b/plugins/pair-review/skills/pair-review/references/review-protocol.md
+index 79878df..1e63b92 100644
+--- a/plugins/pair-review/skills/pair-review/references/review-protocol.md
++++ b/plugins/pair-review/skills/pair-review/references/review-protocol.md
+@@ -447,7 +447,7 @@ An opt-in, orchestrator-run step inside Phase 3, before the auditor, that
+ independently checks a specific disputed claim without letting either original
+ reviewer argue it again. Off by default; the orchestrator enables it only
+ on an explicit request in the task — the canonical phrase is "deep verify
+-disputed high-severity findings" (see the skill's own Invocation section).
++disputed high-severity findings".
+ When off, this section does not run — no verifier is spawned, no claim is
+ excluded from Synthesis for lack of one.
+ 
+diff --git a/plugins/pair-review/skills/pair-review/scripts/build-recheck-packet.mjs b/plugins/pair-review/skills/pair-review/scripts/build-recheck-packet.mjs
+index f632fdf..3f1686e 100644
+--- a/plugins/pair-review/skills/pair-review/scripts/build-recheck-packet.mjs
++++ b/plugins/pair-review/skills/pair-review/scripts/build-recheck-packet.mjs
+@@ -50,6 +50,8 @@ Options:
+   --drop-tag <tag>   remove a criterion tag: its "- [tag]" bullet and its entry in the Tickets line (repeat or comma-separate).
+ With --since-diff or --since-dirs the diff is also written to since.diff next to --out (kept if it exists); build-report
+ reads it from the run folder to tag where each finding sits in the change.
++The packet never names the old run folder (its manifest names the seats' models): previous-run.json next to --out records it
++for you (kept, with a warning, if one with other contents exists); give the seats no path to it.
+ --out is never overwritten. Every "FILL" marker must be replaced before the seats start; the script lists them.
+ `;
+ 
+diff --git a/plugins/pair-review/skills/pair-review/scripts/build-report.mjs b/plugins/pair-review/skills/pair-review/scripts/build-report.mjs
+index 2ebd3b1..59fdb5d 100644
+--- a/plugins/pair-review/skills/pair-review/scripts/build-report.mjs
++++ b/plugins/pair-review/skills/pair-review/scripts/build-report.mjs
+@@ -614,9 +614,12 @@ export function diffHunks(text) {
+ }
+ 
+ const NEAR_LINES = 20;
+-const WHERE_RANK = ['added lines', 'near the change', 'changed file', 'outside the change'];
++const WHERE_RANK = ['added lines', 'near the change', 'changed file', 'unknown', 'outside the change'];
++const tagIn = (entry, n) => (entry.added.has(n) ? 'added lines'
++  : entry.spans.some(([a, b]) => n >= a - NEAR_LINES && n <= b + NEAR_LINES) ? 'near the change' : 'changed file');
+ // Where a finding's evidence locations sit in the change: the best over all its file:line locations and all diffs (one Map
+-// per diff), "unknown" without a location. A path matches at a "/" boundary; a bare name only when one diff file has it.
++// per diff), "unknown" without a location. A path matches at a "/" boundary. A file name alone (bare, or under a snapshot
++// folder such as REVIEW/head/) is a guess marked byName: the tag its diff files agree on, else "unknown".
+ export function whereInChange(evidence, hunkMaps) {
+   const fold = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+   const maps = hunkMaps instanceof Map ? [hunkMaps] : hunkMaps;
+@@ -624,27 +627,24 @@ export function whereInChange(evidence, hunkMaps) {
+   for (const loc of evidenceLocations(evidence)) {
+     const m = /^(.*):(\d+)$/.exec(loc.replace(/\\/g, '/'));
+     const [file, n] = [fold(m[1].replace(/^\.\//, '')), Number(m[2])];
++    const base = file.split('/').pop();
+     for (const hunks of maps) {
+       const paths = [...hunks.keys()];
+-      const byPath = file.includes('/')
+-        ? paths.filter((p) => { const fp = fold(p); return fp === file || (fp.includes('/') && file.endsWith(`/${fp}`)) || fp.endsWith(`/${file}`); })
+-        : [];
+-      // A path under a snapshot folder (REVIEW/head/Reporter.py) shares no suffix with the diff's path (PKG/Reporter.py): then a
+-      // file name only one diff file has decides, and the tag says so. A root diff file never claims a same-named file in a folder.
+-      const sameName = byPath.length > 0 || !file.includes('/') ? [] : paths.filter((p) => fold(p).split('/').pop() === file.split('/').pop());
+-      const byName = sameName.length === 1 && sameName[0].includes('/') ? sameName : [];
+-      const plainName = file.includes('/') ? [] : paths.filter((p) => fold(p).split('/').pop() === file);
+-      const hits = byPath.length > 0 ? byPath : file.includes('/') ? byName : plainName;
+-      const usable = byPath.length > 0 || hits.length === 1 ? hits : [];
+-      const entry = usable.length > 0 ? hunks.get(usable.reduce((a, b) => (b.length > a.length ? b : a))) : null;
+-      const tag = !entry ? 'outside the change'
+-        : entry.added.has(n) ? 'added lines'
+-        : entry.spans.some(([a, b]) => n >= a - NEAR_LINES && n <= b + NEAR_LINES) ? 'near the change' : 'changed file';
+-      const byNameOnly = Boolean(entry) && byPath.length === 0 && file.includes('/');
+-      const at = byNameOnly ? `${loc}, matched by file name to ${usable[0]}` : loc;
++      const byPath = paths.filter((p) => { const fp = fold(p); return fp === file || (file.includes('/') && ((fp.includes('/') && file.endsWith(`/${fp}`)) || fp.endsWith(`/${file}`))); });
++      const sameName = byPath.length > 0 ? [] : paths.filter((p) => fold(p).split('/').pop() === base);
++      // A root diff file alone never claims a cited file in a folder.
++      const named = file.includes('/') && sameName.every((p) => !p.includes('/')) ? [] : sameName;
++      let found;
++      if (byPath.length > 0) found = { tag: tagIn(hunks.get(byPath.reduce((a, b) => (b.length > a.length ? b : a))), n), at: loc };
++      else if (named.length === 0) found = { tag: 'outside the change', at: loc };
++      else {
++        const tags = named.map((p) => tagIn(hunks.get(p), n));
++        found = new Set(tags).size === 1
++          ? { tag: tags[0], at: `${loc}, matched by file name to ${named.join(', ')}`, byName: true }
++          : { tag: 'unknown', at: `${loc}, file name shared by ${named.length} changed files`, byName: true, addedInOne: tags.includes('added lines') };
++      }
+       // A path match outranks a file-name guess of the same tag.
+-      const better = best === null || WHERE_RANK.indexOf(tag) < WHERE_RANK.indexOf(best.tag) || (tag === best.tag && best.byName && !byNameOnly);
+-      if (better) best = byNameOnly ? { tag, at, byName: true } : { tag, at };
++      if (best === null || WHERE_RANK.indexOf(found.tag) < WHERE_RANK.indexOf(best.tag) || (found.tag === best.tag && best.byName && !found.byName)) best = found;
+     }
+   }
+   return best ?? { tag: 'unknown', at: null };
+@@ -660,7 +660,7 @@ function runTime(timing, m) {
+ const minutes = (ms) => (ms === null ? 'unknown' : ms < 60000 ? 'under 1 min' : `${Math.round(ms / 60000)} min`);
+ export const timeText = (t) => `${minutes(t.wallMs)} wall (first brief to findings.json; packet writing not counted); orchestrator working time ${minutes(t.orchestratorMs)}`;
+ 
+-export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {}, timing = null, changeDiffs = [] }) {
++export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {}, timing = null, changeDiffs = [], briefText = null }) {
+   if (!findingsDoc || !Array.isArray(findingsDoc.findings)) throw new ReportError('findings.json has no "findings" array');
+   const hunks = changeDiffs.map((d) => diffHunks(d.text));
+   const findings = findingsDoc.findings.map((f) => ({
+@@ -696,8 +696,10 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts
+   const headingTags = new Map();
+   for (const text of Object.values(seatTexts)) for (const [id, tags] of claimHeadingTags(text, [...packetCriteria(packetText).keys()])) headingTags.set(id, tags);
+   const checksBySeat = Object.fromEntries(Object.entries(seatTexts).map(([seat, text]) => [seat, checksPerformed(text)]));
+-  // A packet that defines CONFIRMED (the defect is still there) asked the seats for the defect's side, whatever a line's wording.
+-  const fixWordedFlips = !/CONFIRMED \(the (?:previous )?defect (?:is still there|it names exists)\)/.test(packetText);
++  // Seats whose brief or packet defines CONFIRMED (the defect exists) answered for the defect, whatever a line's wording; the
++  // run's seat brief decides when it is there, since a hand-written packet need not repeat the definition.
++  const defines = (text) => /CONFIRMED\s+\(the\s+(?:previous\s+)?defect\s+(?:is\s+still\s+there|it\s+names\s+exists)\)/.test(text);
++  const fixWordedFlips = briefText != null ? !defines(briefText) : !defines(packetText);
+   const criteria = buildCriteria(packetCriteria(packetText), criteriaInput, headingTags, checksBySeat, packetTicketMap(packetText), { fixWordedFlips });
+   if (criteria) {
+     const byId = new Map(findings.map((f) => [f.id, f]));
+@@ -767,7 +769,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts
+     if (new Set(Object.values(t.seats)).size > 1) caveats.push(`Ticket ${t.id}: the seats disagree (${Object.entries(t.seats).map(([seat, v]) => `${seat} ${v}`).join(', ')}); the exchange did not reconcile it, so read both seat files before you act.`);
+   }
+   const fixWorded = (criteria?.rows ?? []).filter((r) => r.fixWorded && r.status !== 'not-verified').map((r) => r.tag);
+-  if (fixWorded.length > 0) caveats.push(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a packet that does not define CONFIRMED (a 1.1.0 packet), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`);
++  if (fixWorded.length > 0) caveats.push(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a run whose seats were not told what CONFIRMED means (a 1.1.0 run), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`);
+   if (criteria?.silentSeats.length > 0) caveats.push(`${criteria.silentSeats.map((x) => `Seat ${x}`).join(', ')} wrote checks but named no criterion or hypothesis tag, so the criteria and hypotheses counts reflect only the seat(s) that did.`);
+   // A CLI seat whose usage sits in seat_usage keeps its count on its reviewers[] or actors[] entry.
+   const entryCommands = (role) => [...(m.reviewers ?? []), ...(m.actors ?? [])].find((x) => x?.role === role)?.commands;
+@@ -800,6 +802,9 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts
+   counts.withdrawn = findings.length - standing.length;
+   const preMarked = changeDiffs.length > 0 ? [] : findings.filter((f) => noteKinds(f.status).pre);
+   const preOnAdded = changeDiffs.length > 0 ? findings.filter((f) => noteKinds(f.status).pre && f.where?.tag === 'added lines' && !f.where.byName) : [];
++  // A file-name guess never moves a finding, but a pre-existing note against one that points at added lines is worth a look.
++  const preOnGuess = changeDiffs.length > 0 ? findings.filter((f) => noteKinds(f.status).pre && f.where?.byName && (f.where.tag === 'added lines' || f.where.addedInOne)) : [];
++  for (const f of preOnGuess) caveats.push(`${f.id} is marked pre-existing in the report notes; its evidence matches lines the change added only by file name (${f.where.at}), so check it is not the same file.`);
+   if (preOnAdded.length > 0) caveats.push(`${preOnAdded.map((f) => f.id).join(', ')} ${preOnAdded.length === 1 ? 'is' : 'are'} marked pre-existing in the report notes, but ${preOnAdded.length === 1 ? 'its' : 'their'} evidence is on lines the change added, so ${preOnAdded.length === 1 ? 'it stays' : 'they stay'} where ${preOnAdded.length === 1 ? 'its' : 'their'} severity puts ${preOnAdded.length === 1 ? 'it' : 'them'}.`);
+   if (preMarked.length > 0) caveats.push(`${preMarked.map((f) => f.id).join(', ')} ${preMarked.length === 1 ? 'is' : 'are'} marked pre-existing in the report notes, but this report has no change diff (since.diff in the run folder, or --change-diff), so nothing tells what the change was; ${preMarked.length === 1 ? 'it stays' : 'they stay'} where ${preMarked.length === 1 ? 'its' : 'their'} severity puts ${preMarked.length === 1 ? 'it' : 'them'}.`);
+   for (const f of findings.filter((x) => x.blocker && outcomeOf(x.status)?.word === 'wrong' && outcomeOf(x.status).reason === '')) {
+@@ -1348,6 +1353,7 @@ export async function loadRun(runDir, notesPath = null, changeDiffPaths = []) {
+     files: { scorecard: existsSync(path.join(dir, 'phase3', 'scorecard.md')) ? 'phase3/scorecard.md' : null, findings: 'phase3/findings.json', manifest: manifest ? 'manifest.json' : null },
+     timing: await runTiming(dir, findingsFile),
+     changeDiffs: await readChangeDiffs(dir, changeDiffPaths),
++    briefText: existsSync(path.join(dir, 'phase1', 'brief-A.txt')) ? await readOptional(path.join(dir, 'phase1', 'brief-A.txt')) : null,
+   });
+   if (!manifest) report.caveats.unshift('manifest.json was not found; status, pass counts and cost are unknown.');
+   return report;
+diff --git a/plugins/pair-review/skills/pair-review/scripts/tests/blind-relabel.test.mjs b/plugins/pair-review/skills/pair-review/scripts/tests/blind-relabel.test.mjs
+index c2855a7..0bf0171 100644
+--- a/plugins/pair-review/skills/pair-review/scripts/tests/blind-relabel.test.mjs
++++ b/plugins/pair-review/skills/pair-review/scripts/tests/blind-relabel.test.mjs
+@@ -3483,6 +3483,11 @@ test('CLI audit-prep --packet: on success stages task-packet.md (byte-exact) and
+   assert.ok(pointed.length > 0);
+   for (const name of pointed) assert.match(staged, new RegExp(`^#{2,4} ${esc(name)}`, 'm'), name);
+   for (const label of labels.filter(pointsTo)) assert.match(staged, new RegExp(`^\\*\\*${esc(label)}`, 'm'), label);
++  // "(see the skill's own Invocation section)": a named section the staged copy does not hold, wherever it lives.
++  const stagedHeads = [...staged.matchAll(/^#{1,4} (.+?)\s*$/gm)].map((m) => m[1]);
++  for (const m of flat.matchAll(/\bsee (?:the |its |this )?(?:skill's own |protocol's )?((?:[A-Z][\w-]*)(?: [\w-]+){0,4}) section\b/g)) {
++    assert.ok(stagedHeads.some((h) => h.startsWith(m[1])), `points to a section the auditor does not get: ${m[0]}`);
++  }
+   r = runCli([...base, '--out-dir', outDir, '--packet', packet]);
+   assert.equal(r.status, 1);
+   assert.match(r.stderr, /pass a new empty folder/);
+diff --git a/plugins/pair-review/skills/pair-review/scripts/tests/build-recheck-packet.test.mjs b/plugins/pair-review/skills/pair-review/scripts/tests/build-recheck-packet.test.mjs
+index 922d9db..c3c8964 100644
+--- a/plugins/pair-review/skills/pair-review/scripts/tests/build-recheck-packet.test.mjs
++++ b/plugins/pair-review/skills/pair-review/scripts/tests/build-recheck-packet.test.mjs
+@@ -132,6 +132,7 @@ test('CLI: writes the draft, lists the FILL markers, and never overwrites its ou
+   assert.equal(other.status, 0, other.stderr);
+   assert.match(other.stderr, /previous-run\.json already exists with other contents and was kept/);
+   assert.match(other.stdout, /not recorded: the record already exists/);
++  assert.match(spawnSync(process.execPath, [SCRIPT, '--help'], { encoding: 'utf8' }).stdout, /previous-run\.json next to --out records it/, 'round 2 F5: --help names the record');
+   const missing = spawnSync(process.execPath, [SCRIPT, '--from-run', path.join(dir, 'nope'), '--out', path.join(dir, 'x.md')], { encoding: 'utf8' });
+   assert.equal(missing.status, 1);
+   assert.equal(existsSync(path.join(dir, 'x.md')), false);
+diff --git a/plugins/pair-review/skills/pair-review/scripts/tests/build-report.test.mjs b/plugins/pair-review/skills/pair-review/scripts/tests/build-report.test.mjs
+index 26d297b..e62fc9a 100644
+--- a/plugins/pair-review/skills/pair-review/scripts/tests/build-report.test.mjs
++++ b/plugins/pair-review/skills/pair-review/scripts/tests/build-report.test.mjs
+@@ -863,7 +863,17 @@ test('a finding marked pre-existing whose evidence is on lines the change added
+   });
+   assert.equal(other.findings[0].where.byName, true);
+   assert.deepEqual(groupFindings(other).preExisting.map((f) => f.id), ['F1']);
+-  assert.ok(!other.caveats.some((c) => c.startsWith('F1 is marked pre-existing')));
++  assert.ok(!other.caveats.some((c) => c.includes('so it stays where its severity puts it')));
++  assert.ok(other.caveats.includes('F1 is marked pre-existing in the report notes; its evidence matches lines the change added only by file name (HITACHI_DEVICE/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py), so check it is not the same file.'));
++  // Round 2 F2: a bare name that one changed file in a folder has is a guess too.
++  const bare = buildReport({
++    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', evidence: ['Reporter.py:11'] })] },
++    manifest: MANIFEST,
++    notesText: ['## Finding status', '- F1: pre-existing', ''].join(String.fromCharCode(10)),
++    changeDiffs: [{ name: 'since.diff', text: '--- a/CONTOSO_V4_DEVICE/Reporter.py\n+++ b/CONTOSO_V4_DEVICE/Reporter.py\n@@ -10 +10,2 @@\n a\n+b\n' }],
++  });
++  assert.equal(bare.findings[0].where.byName, true);
++  assert.deepEqual(groupFindings(bare).preExisting.map((f) => f.id), ['F1']);
+ });
+ 
+ test('field website: with no change diff, "pre-existing" in the notes does not move a finding out of Fix now, and a caveat says why', () => {
+@@ -1190,6 +1200,20 @@ test('a hypothesis worded "Confirm it is fixed" has its outcomes flipped, so REF
+   assert.ok(!current.caveats.some((c) => c.includes('Confirm it is fixed')));
+ });
+ 
++test('round 2 F3: the seats\' brief decides the "Confirm it is fixed" flip, read from phase1/brief-A.txt by loadRun', async (t) => {
++  const packet = lines('- [H1] Previous finding F1: the cache is never cleared. Confirm it is fixed.');
++  const seats = { A: lines('## Checks performed', '- H1: CONFIRMED, still broken.'), B: lines('## Checks performed', '- H1: CONFIRMED.') };
++  const today = 'end a hypothesis line with CONFIRMED (the defect it names exists), REFUTED\n  (it does not)';
++  assert.equal(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: seats, briefText: today }).criteria.rows[0].verdict, 'confirmed', 'a current brief: no flip, even with a packet that does not define it');
++  assert.equal(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: seats, briefText: 'an old brief' }).criteria.rows[0].verdict, 'refuted', 'a 1.1.0 brief: flipped');
++  const dir = await makeRun(t);
++  await fs.writeFile(path.join(dir, 'task-packet.md'), packet);
++  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), seats.A);
++  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), seats.B);
++  await fs.writeFile(path.join(dir, 'phase1', 'brief-A.txt'), today);
++  assert.equal((await loadRun(dir)).criteria.rows[0].verdict, 'confirmed');
++});
++
+ test('self-review fixes: a reader that closes stdout early keeps the exit code and the requested files', async (t) => {
+   const dir = await makeRun(t);
+   const run = (args) => new Promise((resolve) => {
+@@ -1459,10 +1483,15 @@ test('where in the change: a path under a snapshot folder matches by file name w
+   const pkg = lines('--- a/CONTOSO_V4_DEVICE/Reporter.py', '+++ b/CONTOSO_V4_DEVICE/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+   assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(pkg)), { tag: 'added lines', at: 'REVIEW/head/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py', byName: true });
+   assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11', 'CONTOSO_V4_DEVICE/Reporter.py:11'], diffHunks(pkg)), { tag: 'added lines', at: 'CONTOSO_V4_DEVICE/Reporter.py:11' }, 'a path match wins over a name guess');
++  // Round 2 F1: same-named files (the two skills' identical copies) give the tag they agree on, else "unknown", never "outside".
+   const two = lines(pkg, '--- a/OTHER_DEVICE/Reporter.py', '+++ b/OTHER_DEVICE/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+-  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(two)).tag, 'outside the change', 'two same-named files: no guess');
+-  const withRoot = lines(pkg, '--- a/Reporter.py', '+++ b/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+-  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(withRoot)).tag, 'outside the change', 'a root file with the name makes it ambiguous');
++  assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(two)), { tag: 'added lines', at: 'REVIEW/head/Reporter.py:11, matched by file name to CONTOSO_V4_DEVICE/Reporter.py, OTHER_DEVICE/Reporter.py', byName: true });
++  assert.equal(whereInChange(['Reporter.py:11'], diffHunks(two)).tag, 'added lines', 'a bare name the same way');
++  const apart = lines(pkg, '--- a/OTHER_DEVICE/Reporter.py', '+++ b/OTHER_DEVICE/Reporter.py', '@@ -300 +300,2 @@', ' a', '+b');
++  assert.deepEqual(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(apart)), { tag: 'unknown', at: 'REVIEW/head/Reporter.py:11, file name shared by 2 changed files', byName: true, addedInOne: true });
++  const withRoot = lines(pkg, '--- a/Reporter.py', '+++ b/Reporter.py', '@@ -300 +300,2 @@', ' a', '+b');
++  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(withRoot)).tag, 'unknown', 'a root file with the name makes it ambiguous');
++  assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(lines('--- a/x.py', '+++ b/x.py', '@@ -1 +1,2 @@', ' a', '+b'))).tag, 'outside the change', 'no diff file has the name');
+   const root = lines('--- a/Reporter.py', '+++ b/Reporter.py', '@@ -10 +10,2 @@', ' a', '+b');
+   assert.equal(whereInChange(['REVIEW/head/Reporter.py:11'], diffHunks(root)).tag, 'outside the change', 'a root diff file never claims a file in a folder');
+ });

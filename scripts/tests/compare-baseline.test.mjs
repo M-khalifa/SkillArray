@@ -73,7 +73,7 @@ test('identical trees pass and the summary counts briefs, items and drops', (t) 
   const root = makeRepo(t);
   const r = runTool(root);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /passed against HEAD: 14 briefs identical, \d+ rule items checked, 0 drops used/);
+  assert.match(r.stdout, /passed against HEAD: 12 briefs identical, \d+ rule items checked, 0 drops used/);
 });
 
 test('a missing drops file is read as empty and --init-drops is the only way the tool writes one', (t) => {

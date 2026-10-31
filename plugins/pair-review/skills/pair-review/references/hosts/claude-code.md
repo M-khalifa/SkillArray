@@ -33,7 +33,7 @@ this file and writes `run.json`. A complete example: two Claude seats on differe
   "seatA": {"provider": "anthropic", "runtime": "claude", "model": "opus", "effort": null, "transport": "native"},
   "seatB": {"provider": "anthropic", "runtime": "claude", "model": "sonnet", "effort": "high", "transport": "native"},
   "auditor": {"provider": "anthropic", "runtime": "claude", "model": "opus", "effort": null, "transport": "native"},
-  "flags": {"auditDepth": "light", "falsification": false, "mode": "adversarial"}
+  "flags": {"falsification": false, "mode": "adversarial"}
 }
 ```
 
@@ -42,8 +42,8 @@ The model ids and the effort in the example are placeholders: use the models you
 `runtime`, `model` and `transport` (`native` or `cli`). `effort`
 may be `null` or left out. `role`, `sessionId`, `resultPath`, `worktreePath` and `outputDir`
 are filled in by preflight; leave them out. For CLI seats set `"transport": "cli"` on both
-seats and the auditor. `flags` may be left out, or hold any of `auditDepth` (`light` or
-`full`), `falsification`, `mode` (`adversarial`, `collaborate` or `none`), `timeoutS` (whole seconds; absent or 0 means no limit, which is the default for every seat, the
+seats and the auditor. `flags` may be left out, or hold any of
+`falsification`, `mode` (`adversarial`, `collaborate` or `none`), `timeoutS` (whole seconds; absent or 0 means no limit, which is the default for every seat, the
 auditor and every resume; set a bound such as 600 for a smoke test, so a dead host cannot leave a seat running without end), `repoOnly` (`true` when the task packet says web verification is off: a CLI seat then gets no `--web`; `review-config seats --repo-only` sets it, and it cannot be added once run.json exists) and `checklists` (outside checklist names such as `TARGET`, passed as
 `--checklist` to validate, exchange, audit-prep, scan and translate). A missing key
 takes the value shown. `verifiers` (a list of actors) and `sourceDirs` (absolute paths) are
@@ -54,14 +54,14 @@ optional.
 Choose provider `openai`, runtime `codex` for both seats (`review-config.mjs` accepts a pair
 only when both seats share one vendor and the model ids differ). Everything runs through
 `codex-dispatch`, so every actor is `transport: cli` and `review-run.mjs` starts and waits for
-all of them; there is no native form.
+all of them; there is no native form. A Codex seat runs read-only and its brief names no scratch folder, so it writes no file and a test suite that needs temporary files fails there: run the target's tests in preflight Tier 2 (`--exec`, `--compact`) and cite those logs in the packet.
 
 ```json
 {
   "seatA": {"provider": "openai", "runtime": "codex", "model": "gpt-5.6-sol", "effort": null, "transport": "cli"},
   "seatB": {"provider": "openai", "runtime": "codex", "model": "gpt-5.6-terra", "effort": "high", "transport": "cli"},
   "auditor": {"provider": "openai", "runtime": "codex", "model": "gpt-5.6-sol", "effort": null, "transport": "cli"},
-  "flags": {"auditDepth": "light", "falsification": false, "mode": "collaborate"}
+  "flags": {"falsification": false, "mode": "collaborate"}
 }
 ```
 
@@ -75,8 +75,9 @@ your saved choices. Facts that differ from a Claude pair:
 - Both seats and the auditor return their answer as the final message; the dispatcher saves it
   (`--final-message-out`), so no seat needs a write grant. The auditor's answer is saved as
   `findings.audit.json`.
-- Verifiers (falsification) are started by you with `codex-dispatch`, read-only, on the auditor's
-  model.
+- Verifiers (falsification) are the one actor `review-run` does not start: build each brief with
+  `review-run verifier-brief` and start the verifier yourself with `codex-dispatch`, read-only, on
+  the auditor's model (phase-3-scorecard.md, Audit steps c).
 - `preflight.mjs --host` skips the `claude -p --help` check when no actor runs on Claude.
 - Two models from one vendor share a training lineage, so expect fewer disagreements than in
   cross-review. The review reports what happened; it does not claim vendor diversity.
@@ -97,10 +98,10 @@ file alone as finished. Wait for each agent's "written" reply, then rerun with `
 Instead of polling the file yourself, pass the agent's id: `review-run ... --wait --native-agent A=<agentId> --native-agent B=<agentId>` waits on the
 agent's own transcript (up to `--max-wait`, rerun on exit 3) and counts the seat done when its last turn ended, so no
 `--native-done` is needed and nothing is taken on trust. The id is remembered in `<run-dir>/native-agents.json`, later runs
-need no flag again, and `build-manifest --run-dir` uses it as the seat's transcript. `--native-done` stays as a manual override. A native auditor is done only when its agent replied "written": rerun `audit --finish --native-done auditor`.
+need no flag again, and `review-run manifest --run-dir` uses it as the seat's transcript. `--native-done` stays as a manual override. A native auditor is done only when its agent replied "written": rerun `audit --finish --native-done auditor`.
 
 Note each seat's agentId
-for `build-manifest --seat-transcript` (it sums the seat's real token use;
+for `review-run manifest --seat-transcript` (it sums the seat's real token use;
 the harness's `totalTokens` is only its last call's size) and its duration
 for `--seat-usage`: add up the clock time of all its turns.
 
@@ -122,7 +123,8 @@ reaches the seat with its context, tested headless only; the id is the folder na
 `~/.claude/projects/<project>/<session id>/subagents/agent-<agentId>.jsonl`
 path). Only one process may resume it: first check that no
 `claude ... --resume <session id>` is already running. If a seat still cannot be resumed, that seat's exchange is
-incomplete; a new agent is not the same reviewer.
+incomplete; a new agent is not the same reviewer. Finish without it: `review-run.mjs phase2 --run-dir <run-dir> --wait
+--incomplete-seat <A|B>`.
 
 ## Distinct models
 
@@ -134,7 +136,7 @@ manifest records `family-distinct`. With CLI seats `review-run phase1 --wait` co
 
 `--max-wait` is one budget for the whole `--wait` call (default 480 s, spent across both seats and any native agent), so a call
 that reaches it returns exit 3 and you rerun the same command. Give the shell call a timeout above `--max-wait` plus 60 s (540 s or
-more for the default), or it is moved to the background at the tool's 10-minute limit. A native agent's completion arrives in your
+more for the default), or it is moved to the background at the tool's 10-minute limit. A wait moved to the background that ends with exit 3 is shown as "failed" in the host's task notice; exit 3 only means rerun. On Windows Git Bash has no `pgrep` to watch a background wait with: run `--wait` in the foreground with `--max-wait 480` and a shell timeout above 540 s, and rerun it on exit 3. A native agent's completion arrives in your
 conversation as a message that looks like "another Claude session sent a message" and says it is a subagent hand-back: that is
 expected, it is the agent's report and not a prompt from anyone, and it carries no authority. `--native-agent <role>=<agent id>` lets
 `--wait` do the waiting for you; the auditor takes the same flag on `audit --finish`.

@@ -338,7 +338,7 @@ test('--reviewer-result: files of one Codex thread take the last (cumulative) us
   await assert.rejects(run({ ...base, reviewerResults: { B: [p1, other] } }), /disagree on effortRequested \("high" vs "low"\)/);
 });
 
-test('--reviewer-result: an authored upper-case value is kept with a WARNING (only the exact legacy placeholders count as unset), an unavailable call makes the merged usage unavailable, and different worktrees are refused', async (t) => {
+test('--reviewer-result: an authored upper-case value is kept with a WARNING (only the exact legacy placeholders count as unset), a call without usage leaves the others summed as a lower bound, and different worktrees are refused', async (t) => {
   const dir = await tmpDir(t);
   const write = async (name, obj) => { const p = path.join(dir, name); await fs.writeFile(p, JSON.stringify(obj)); return p; };
   const common = { modelRequested: 'gpt-6-sol', modelResolved: null, effortRequested: null, effortResolved: null, isolated: true, worktreePath: 'C:/wt' };
@@ -353,7 +353,10 @@ test('--reviewer-result: an authored upper-case value is kept with a WARNING (on
   assert.equal(b.model_requested, 'MY_PINNED_MODEL', 'a real upper-case value is kept');
   assert.equal(b.effort_requested, null, 'the exact legacy placeholder counts as unset');
   assert.match(out.warnings.join('\n'), /model_requested is "MY_PINNED_MODEL" in the body but "gpt-6-sol"/);
-  assert.equal(b.usage.source, 'unavailable', 'a call without numbers is never counted as zero');
+  // Field run northwind-1a: one rate-limited call with no usage must not hide the calls that reported theirs.
+  assert.equal(b.usage.input_tokens, 10, 'the calls that reported usage are summed');
+  assert.equal(b.usage.calls_without_usage, 1, 'the call without numbers is named, never counted as zero');
+  assert.match(b.usage.note, /lower bound: 1 call\(s\) reported no usage/);
   await assert.rejects(run({ ...base, reviewerResults: { B: [p1, otherWt] } }), /disagree on worktreePath/);
 });
 
@@ -402,21 +405,17 @@ test('run: two runs against the same artifacts produce identical hashes but diff
   assert.notEqual(r1.run_id, r2.run_id);
 });
 
-test('CLI end-to-end: node build-manifest.mjs writes a valid stamped manifest to --out', async (t) => {
-  const { spawnSync } = await import('node:child_process');
-  const { fileURLToPath } = await import('node:url');
+test('step end-to-end: runStep writes a valid stamped manifest to --out and prints one line', async (t) => {
+  const { runStep } = await import('../build-manifest.mjs');
   const dir = await tmpDir(t);
-  const script = fileURLToPath(new URL('../build-manifest.mjs', import.meta.url));
   const inPath = path.join(dir, 'manifest.json');
   const outPath = path.join(dir, 'out.json');
   const taskPacket = path.join(dir, 'task.md');
   await fs.writeFile(inPath, JSON.stringify({ protocol: 'review-protocol-v1.3' }));
   await fs.writeFile(taskPacket, 'cli test content');
 
-  const result = spawnSync(process.execPath, [script, '--in', inPath, '--out', outPath, '--task-packet', taskPacket], {
-    encoding: 'utf8',
-  });
-  assert.equal(result.status, 0, result.stderr);
+  const result = await runStep(['--in', inPath, '--out', outPath, '--task-packet', taskPacket]);
+  assert.equal(result.code, 0, result.stderr);
   const output = JSON.parse(await fs.readFile(outPath, 'utf8'));
   assert.ok(output.run_id);
   assert.equal(output.hashes.task_packet, sha256(Buffer.from('cli test content')));
@@ -462,7 +461,7 @@ test('--seat-transcript: sums every API call once from a subagent transcript, th
   const clocked = await run(parseArgs(['--in', inPath, '--out', base.out, '--seat-transcript', 'A=a0123456789abcdef', '--seat-usage', 'A=unknown,810000,clock']));
   assert.deepEqual(clocked.seat_usage.A, { ...expected, duration_ms: 810000, duration_source: 'clock' }, 'a timed span is labeled clock, not harness');
   assert.throws(() => parseArgs(['--in', 'i', '--out', 'o', '--seat-usage', 'A=unknown,unknown,clock']), /nothing to mark clock/);
-  await assert.rejects(run({ ...base, seatUsage: {}, seatTranscripts: { A: ['a00000000deadbeef'] } }), /matched 0 transcripts/);
+  await assert.rejects(run({ ...base, seatUsage: {}, seatTranscripts: { A: ['a00000000deadbeef'] } }), /--seat-transcript A: no agent with id "a00000000deadbeef" under .*: check the id the Agent tool returned, or pass the \.jsonl path/);
 
   const empty = path.join(dir, 'empty.jsonl');
   await fs.writeFile(empty, JSON.stringify({ type: 'user', message: { content: 'hi' } }) + '\n');
@@ -472,6 +471,19 @@ test('--seat-transcript: sums every API call once from a subagent transcript, th
   assert.equal(verifiers.seat_usage.verifier.calls, 3, 'falsification verifiers are summed under their own role, each call once');
   const orchestrator = await run({ ...base, seatUsage: {}, seatTranscripts: { orchestrator: [file] } });
   assert.equal(orchestrator.seat_usage.orchestrator.total_input_tokens, 2322, 'the orchestrator session is recorded under its own role');
+  // Field feedback S1: the orchestrator's own transcript with no usage is a warning, not a failed manifest.
+  const noUsage = path.join(dir, 'no-usage.jsonl');
+  await fs.writeFile(noUsage, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'ok' } }) + '\n');
+  await assert.rejects(run({ ...base, seatUsage: {}, seatTranscripts: { orchestrator: [empty] } }), /neither a Codex rollout/, 'a file that is no transcript still stops');
+  const uncounted = await run({ ...base, seatUsage: {}, seatTranscripts: { orchestrator: [noUsage] } });
+  assert.equal(uncounted.seat_usage?.orchestrator, undefined);
+  assert.ok(uncounted.warnings.some((w) => /^seat_usage\.orchestrator is not counted: .*no API usage found/.test(w)), 'field feedback S1: named in the warnings');
+  // Linux round linux-r3 B4: a Codex rollout with no token events is the same warning.
+  const rollout = path.join(dir, 'rollout-no-usage.jsonl');
+  await fs.writeFile(rollout, JSON.stringify({ type: 'session_meta', timestamp: '2026-10-07T13:05:41.000Z', payload: { id: 'thread-x', timestamp: '2026-10-07T13:05:41.000Z' } }) + '\n');
+  const rolloutRun = await run({ ...base, seatUsage: {}, seatTranscripts: { orchestrator: [rollout] } });
+  assert.equal(rolloutRun.seat_usage.orchestrator.total_tokens, null, 'recorded as unknown');
+  assert.ok(rolloutRun.warnings.some((w) => /^seat_usage\.orchestrator is not counted: no token usage in rollout-no-usage\.jsonl/.test(w)), rolloutRun.warnings.join(' | '));
   assert.equal(parseArgs(['--in', 'i', '--out', 'o', '--seat-transcript', 'orchestrator=s.jsonl']).seatTranscripts.orchestrator[0], 's.jsonl');
 });
 test('--reviewer-result: agent threads a Codex seat spawned reach the manifest as child_threads with a WARNING; an older result.json without the field still merges', async (t) => {
@@ -755,9 +767,14 @@ test('--reviewer-result: explicit cumulative semantics wins without threadId; un
   assert.deepEqual(entry.usage, { input_tokens: 30 });
   assert.deepEqual([entry.host, entry.transport, entry.readOnly], [null, null, null]);
   await fs.writeFile(files[1], JSON.stringify({ ...common, usage: { source: 'unavailable' } }));
+  // A later call with no usage leaves the last reported total as a lower bound (overnight r1 F4), never a silent zero.
   const missing = (await build()).reviewers[0];
-  assert.equal(missing.usage, null);
-  assert.match(missing.usage_reason, /no usable usage/);
+  assert.equal(missing.usage.input_tokens, 10);
+  assert.equal(missing.usage.calls_without_usage, 1);
+  await fs.writeFile(files[0], JSON.stringify({ ...common, usage: { source: 'unavailable' } }));
+  const none = (await build()).reviewers[0];
+  assert.equal(none.usage, null);
+  assert.match(none.usage_reason, /no usable usage/);
   await fs.writeFile(files[1], JSON.stringify({ ...common, usageSemantics: 'guess' }));
   await assert.rejects(build(), /invalid usageSemantics/);
 });
@@ -1098,10 +1115,43 @@ async function fixtureRun(t) {
   await writeRunDescriptor(runDir, {
     skill: 'cross-review', skillDir: path.join(dir, 'skill'), targetDir: dir, host: 'claude-code',
     flags: { auditDepth: 'full', falsification: false, mode: 'adversarial' }, fingerprint: null,
-    seatA: actor('A', { transport: 'native' }), seatB: actor('B', { provider: 'openai', runtime: 'codex', model: 'gpt-5.6-terra' }), auditor: actor('auditor', { transport: 'native', outputDir: `${runDir}-audit-input` }), verifiers: [],
+    seatA: actor('A', { transport: 'native', selectionSource: 'saved' }), seatB: actor('B', { provider: 'openai', runtime: 'codex', model: 'gpt-5.6-terra' }), auditor: actor('auditor', { transport: 'native', outputDir: `${runDir}-audit-input` }), verifiers: [],
   });
   return { dir, runDir };
 }
+
+test('field northwind-1a: a usage window that starts after the first brief was written is warned, with the start to pass', async (t) => {
+  const { dir, runDir } = await fixtureRun(t);
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir])), null);
+  const at = (s) => new Date(Date.UTC(2026, 9, 17, 6, 0, s)).toISOString();
+  const brief = path.join(runDir, 'phase1', 'brief-A.txt');
+  await fs.writeFile(brief, 'brief');
+  await fs.utimes(brief, new Date(at(0)), new Date(at(0)));
+  const u = { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 };
+  const file = path.join(dir, 'session.jsonl');
+  await fs.writeFile(file, [10, 700].map((s, i) => JSON.stringify({ type: 'assistant', timestamp: at(s), message: { id: `m${i}`, stop_reason: 'end_turn', usage: u } })).join('\n') + '\n');
+  const late = await run(parseArgs(['--run-dir', runDir, '--seat-transcript', `orchestrator=${file}@${at(600)}`]));
+  assert.match(late.warnings.join('\n'), new RegExp(`seat_usage\\.orchestrator counts from ${at(600).replace(/[.]/g, '\\.')}, but the first brief was written at ${at(0).replace(/[.]/g, '\\.')}.*pass @${at(0).replace(/[.]/g, '\\.')}`));
+  await fs.rm(path.join(runDir, 'manifest.json'), { force: true });
+  const onTime = await run(parseArgs(['--run-dir', runDir, '--seat-transcript', `orchestrator=${file}@${at(0)}`]));
+  assert.ok(!onTime.warnings.some((w) => w.includes('the first brief was written')));
+  assert.ok(!onTime.warnings.some((w) => w.includes('no --seat-transcript orchestrator was given')));
+  // No orchestrator transcript at all: one warning names the flag, its start the first brief time.
+  await fs.rm(path.join(runDir, 'manifest.json'), { force: true });
+  const none = await run(parseArgs(['--run-dir', runDir]));
+  assert.deepEqual(none.warnings.filter((w) => w.includes('orchestrator')), [`seat_usage.orchestrator is not counted: no --seat-transcript orchestrator was given; to count this session's own cost, rerun review-run manifest with --seat-transcript orchestrator=auto@${at(0)} (the first brief time; or the session .jsonl path with that @start)`]);
+  // A body orchestrator entry silences the warning only when it holds a number; an empty placeholder does not.
+  const bodyPath = path.join(runDir, 'phase3', 'manifest-body.json');
+  const body = JSON.parse(await fs.readFile(bodyPath, 'utf8'));
+  const warned = async (entry) => {
+    await fs.writeFile(bodyPath, JSON.stringify({ ...body, seat_usage: { orchestrator: entry } }));
+    await fs.rm(path.join(runDir, 'manifest.json'), { force: true });
+    return (await run(parseArgs(['--run-dir', runDir]))).warnings.some((w) => w.includes('no --seat-transcript orchestrator was given'));
+  };
+  for (const entry of [null, {}, '', 0, { total_tokens: null }]) assert.equal(await warned(entry), true, `placeholder ${JSON.stringify(entry)}`);
+  assert.equal(await warned({ final_context_tokens: null, duration_ms: 5000, source: 'clock' }), false, 'a hand-timed entry counts');
+  assert.equal(await warned({ total_tokens: 0, calls: 0 }), false, 'measured zeros count');
+});
 
 test('--init writes the minimal body from run.json and refuses to overwrite it', async (t) => {
   const { runDir } = await fixtureRun(t);
@@ -1111,13 +1161,91 @@ test('--init writes the minimal body from run.json and refuses to overwrite it',
   assert.equal(await run(parseArgs(['--init', '--run-dir', runDir, '--out', out])), null);
   const body = JSON.parse(await fs.readFile(out, 'utf8'));
   assert.deepEqual(body.reviewers.map((r) => [r.role, r.provider]), [['A', 'anthropic'], ['B', 'openai']]);
+  assert.deepEqual(body.reviewers.map((r) => r.selection_source), ['saved', 'explicit'], 'from run.json; a seat without a recorded source stays explicit');
   assert.equal(body.topology, 'cross-vendor');
   assert.equal(body.mode, 'adversarial');
   assert.equal(body.status, 'incomplete', 'no findings.json yet');
-  assert.deepEqual(body.exchange, { blinded: true, seat_to_audit_label: { A: 'Y', B: 'X' }, auditor_model_family: 'same-as-reviewer-A', auditor: 'fresh-context', audit_depth: 'full' });
+  // Restructure round 2 F7: nothing was exchanged or audited yet, so the body says so (the report reads these fields).
+  assert.deepEqual(body.exchange, { blinded: false, seat_to_audit_label: { A: 'Y', B: 'X' }, auditor_model_family: 'same-as-reviewer-A', auditor: 'none', audit_depth: 'full' });
+  // Restructure round 3 F7: peer views alone (a run stopped mid-exchange) are no exchange; a rebuttal section in an
+  // older run's Phase 1 file is, and so is an exchange result that appended a seat.
+  await fs.mkdir(path.join(runDir, 'phase2'), { recursive: true });
+  await fs.writeFile(path.join(runDir, 'phase2', 'peer-view-for-A.md'), '## P1\n');
+  await fs.mkdir(path.join(runDir, 'phase3'), { recursive: true });
+  await fs.writeFile(path.join(runDir, 'phase3', 'findings.audit.json'), '{}');
+  const bodyAt = async (name) => {
+    assert.equal(await run(parseArgs(['--init', '--run-dir', runDir, '--out', path.join(runDir, name)])), null);
+    return JSON.parse(await fs.readFile(path.join(runDir, name), 'utf8'));
+  };
+  const viewsOnly = await bodyAt('body-views.json');
+  assert.equal(viewsOnly.exchange.blinded, false, 'peer views without rebuttals are no exchange');
+  assert.equal(viewsOnly.exchange.auditor, 'fresh-context');
+  await fs.writeFile(path.join(runDir, 'phase1', 'B-findings.md'), '## B1 x\n\n## Rebuttals (from A) of B claims\n\n### P1\nAction: CONCEDE\n');
+  assert.equal((await bodyAt('body-old.json')).exchange.blinded, true, 'an older run with a rebuttal section had its exchange');
+  // Linux round linux-r3 B5: an older record with counts and no appended list: the rebuttal section decides.
+  await fs.writeFile(path.join(runDir, 'phase2', 'exchange-result.json'), JSON.stringify({ concede: 1, dispute: 0 }));
+  assert.equal((await bodyAt('body-older-counts.json')).exchange.blinded, true, 'linux-r3 B5: an older count-only record with a rebuttal section');
+  await fs.writeFile(path.join(runDir, 'phase2', 'exchange-result.json'), JSON.stringify({ appended: [], incomplete: ['A', 'B'] }));
+  assert.equal((await bodyAt('body-none.json')).exchange.blinded, false, 'an exchange result that appended nothing is no exchange');
+  await fs.writeFile(path.join(runDir, 'phase2', 'exchange-result.json'), JSON.stringify({ appended: ['B'], incomplete: ['A'] }));
+  assert.equal((await bodyAt('body-ran.json')).exchange.blinded, true);
   assert.deepEqual(body.falsification, { requested: false, verifiers_run: 0 });
   await assert.rejects(run(parseArgs(['--init', '--run-dir', runDir, '--out', out])), /EEXIST|exists/);
   assert.throws(() => parseArgs(['--init', '--out', out]), /--init needs --run-dir/);
+});
+
+test('review rules: run.json reviewRules becomes review_rules (mode, changed_by_target, files) and review-rules.md is hashed', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const file = path.join(runDir, 'run.json');
+  const files = [{ dir: runDir, path: 'REVIEW.md', ref: 'HEAD abc1234', changed: true }];
+  await fs.writeFile(file, JSON.stringify({ ...JSON.parse(await fs.readFile(file, 'utf8')), reviewRules: { mode: 'head', sha256: 'x', changedByTarget: true, files } }));
+  await fs.writeFile(path.join(runDir, 'review-rules.md'), '### r/REVIEW.md (HEAD abc1234)\n\nrules\n');
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir])), null);
+  const manifest = await run(parseArgs(['--run-dir', runDir]));
+  assert.deepEqual(manifest.review_rules, { mode: 'head', changed_by_target: true, files });
+  assert.match(manifest.hashes.review_rules, /^[0-9a-f]{64}$/);
+  const plain = await fixtureRun(t);
+  assert.equal(await run(parseArgs(['--init', '--run-dir', plain.runDir])), null);
+  const none = await run(parseArgs(['--run-dir', plain.runDir]));
+  assert.equal('review_rules' in none, false);
+  assert.equal('review_rules' in (none.hashes ?? {}), false);
+});
+
+test('overnight r1 B5: a Codex seat (cumulative, one thread) whose last call was rate-limited keeps the last reported total as a lower bound', async (t) => {
+  const entry = await usageOf(t, [
+    { threadId: 'th', usage: { source: 'provider', input_tokens: 2549424, cached_input_tokens: 2389760, output_tokens: 35950 } },
+    { threadId: 'th', usage: { source: 'provider', input_tokens: 3799667, cached_input_tokens: 3610496, output_tokens: 46603 } },
+    { threadId: 'th', status: 'rate-limited', usage: { source: 'unavailable' }, usage_delta: { source: 'unavailable' } },
+  ], 'B');
+  assert.equal(entry.usage.input_tokens, 3799667);
+  assert.equal(entry.usage.output_tokens, 46603);
+  assert.equal(entry.usage.calls_without_usage, 1);
+  assert.match(entry.usage.note, /lower bound: 1 call\(s\) reported no usage/);
+});
+
+test('fix review R2/R3: a rate-limited call on one of several cumulative threads neither switches the merge to per-call nor drops its thread', async (t) => {
+  const calls = [
+    { threadId: 'th1', usage: { source: 'provider', input_tokens: 100, output_tokens: 1 } },
+    { threadId: 'th2', usage: { source: 'provider', input_tokens: 3000, output_tokens: 2 } },
+    { threadId: 'th2', usage: { source: 'provider', input_tokens: 5000, output_tokens: 3 } },
+  ];
+  const clean = await usageOf(t, calls, 'B');
+  assert.equal(clean.usage.input_tokens, 5100);
+  const failed = await usageOf(t, [...calls, { threadId: 'th2', status: 'rate-limited', usage: { source: 'unavailable' }, usage_delta: { source: 'unavailable' } }], 'B');
+  assert.equal(failed.usage.input_tokens, 5100, 'each thread keeps its last reported total, not a per-call sum');
+  assert.equal(failed.usage.calls_without_usage, 1);
+  assert.match(failed.usage.note, /^lower bound: 1 call\(s\) reported no usage/);
+  const lastFailed = await usageOf(t, [calls[0], calls[2], { threadId: 'th2', status: 'rate-limited', usage: { source: 'unavailable' } }], 'B');
+  assert.equal(lastFailed.usage.input_tokens, 5100, 'a thread whose last call failed keeps its earlier total');
+});
+
+test('round 4 F1: one usable cumulative result counts its usage_delta, not the thread total from before the review', async (t) => {
+  const resumed = { threadId: 'th', usageSemantics: 'cumulative', usage: { source: 'provider', input_tokens: 90000, output_tokens: 900 }, usage_delta: { source: 'provider', input_tokens: 4000, output_tokens: 40 } };
+  assert.equal((await usageOf(t, [resumed], 'B')).usage.input_tokens, 4000, 'alone');
+  const withFailed = (await usageOf(t, [resumed, { threadId: 'th', status: 'rate-limited', usage: { source: 'unavailable' }, usage_delta: { source: 'unavailable' } }], 'B')).usage;
+  assert.deepEqual([withFailed.input_tokens, withFailed.calls_without_usage], [4000, 1], 'next to a call with no usage');
+  const perCall = { usageSemantics: 'per-call', usage: { source: 'provider', input_tokens: 7, output_tokens: 1 }, usage_delta: { source: 'provider', input_tokens: 3, output_tokens: 1 } };
+  assert.equal((await usageOf(t, [perCall], 'B')).usage.input_tokens, 7, 'a per-call result keeps its own usage');
 });
 
 test('--run-dir after --init reads the edited body without --in', async (t) => {
@@ -1133,16 +1261,282 @@ test('--run-dir after --init reads the edited body without --in', async (t) => {
   assert.equal(manifest.status, 'incomplete', 'the status is read from the run again (no findings.json), not from an older body');
 });
 
+test('--run-dir after --init stops on an edited body that does not parse or is not an object, instead of dropping its fields', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir])), null);
+  const bodyPath = path.join(runDir, 'phase3', 'manifest-body.json');
+  const body = JSON.parse(await fs.readFile(bodyPath, 'utf8'));
+  body.source_write = 'edited by the orchestrator';
+  const manifestPath = path.join(runDir, 'manifest.json');
+  for (const text of [JSON.stringify(body, null, 2).replace(/\n}$/, ',\n}'), '', '[]', 'null\r\n']) {
+    await fs.writeFile(bodyPath, text);
+    await assert.rejects(run(parseArgs(['--run-dir', runDir])), (err) => err.message.includes(bodyPath));
+    await assert.rejects(fs.access(manifestPath), 'no manifest is written without the hand-added fields');
+  }
+  // An exchange-result.json that does not parse is not read as "no seat incomplete".
+  await fs.writeFile(bodyPath, JSON.stringify(body));
+  await fs.mkdir(path.join(runDir, 'phase2'), { recursive: true });
+  await fs.writeFile(path.join(runDir, 'phase2', 'exchange-result.json'), '{"incomplete": ["B"],');
+  await assert.rejects(run(parseArgs(['--run-dir', runDir])), /exchange-result\.json is not valid JSON/);
+  await fs.writeFile(path.join(runDir, 'phase2', 'exchange-result.json'), 'null');
+  await assert.rejects(run(parseArgs(['--run-dir', runDir])), /exchange-result\.json must hold one JSON object/);
+});
+
+test('--seat-transcript given to --init (the orchestrator, as SKILL.md says) is used by the run without --init', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const transcript = path.join(runDir, '..', 'orchestrator.jsonl');
+  const u = { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 5 };
+  await fs.writeFile(transcript, [
+    { type: 'user', timestamp: '2026-10-16T10:00:00.000Z', message: { role: 'user', content: 'review' } },
+    { type: 'assistant', timestamp: '2026-10-16T10:00:30.000Z', message: { id: 'o1', stop_reason: 'end_turn', usage: u } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir, '--seat-transcript', `orchestrator=${transcript}`])), null);
+  const manifest = await run(parseArgs(['--run-dir', runDir]));
+  assert.ok(manifest.seat_usage?.orchestrator, JSON.stringify(manifest.seat_usage));
+  assert.equal(manifest.seat_usage.orchestrator.calls, 1);
+});
+
+// A copy of one session transcript: the same file name in another project folder.
+async function sessionCopy(runDir, folder, lines, name = 'session.jsonl') {
+  const dir = path.join(runDir, '..', folder);
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, name);
+  await fs.writeFile(file, lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n');
+  return file;
+}
+
+const orchestratorUsage = async (runDir, ...files) => (await run(parseArgs(['--run-dir', runDir, ...files.flatMap((f) => ['--seat-transcript', `orchestrator=${f}`])]))).seat_usage.orchestrator;
+
+// prompt 10:00, Bash call 10:01, its successful result 10:02, final reply 10:03.
+function shellHistory() {
+  const u = { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 5 };
+  return [
+    { uuid: 'e1', type: 'user', timestamp: '2026-10-16T10:00:00.000Z', message: { role: 'user', content: 'review' } },
+    { uuid: 'e2', type: 'assistant', timestamp: '2026-10-16T10:01:00.000Z', message: { id: 'm1', stop_reason: 'tool_use', usage: u, content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'true' } }] } },
+    { uuid: 'e3', type: 'user', timestamp: '2026-10-16T10:02:00.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', is_error: false, content: '' }] } },
+    { uuid: 'e4', type: 'assistant', timestamp: '2026-10-16T10:03:00.000Z', message: { id: 'm2', stop_reason: 'end_turn', usage: u } },
+  ];
+}
+
+test('copies of one session: a shorter copy listed first is not counted; the result is the full copy alone', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const prefix = await sessionCopy(runDir, 'old-project', shellHistory().slice(0, 2));
+  const full = await sessionCopy(runDir, 'new-project', shellHistory());
+  const alone = await orchestratorUsage(runDir, full);
+  assert.deepEqual([alone.calls, alone.active_ms, alone.commands.tried, alone.commands.failed], [2, 180000, 1, 0]);
+  assert.deepEqual(alone.transcripts, ['session.jsonl']);
+  assert.equal(JSON.stringify(await orchestratorUsage(runDir, prefix, full)), JSON.stringify(alone));
+});
+
+test('copies of one session: either order gives the full copy alone, also when a suffix copy starts at a queued message with an earlier time', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const [e1, e2, e3, e4] = shellHistory();
+  const queued = { uuid: 'q1', type: 'user', timestamp: '2026-10-16T09:59:00.000Z', message: { role: 'user', content: 'queued' } };
+  const full = await sessionCopy(runDir, 'new-project', [e1, e2, queued, e3, e4]);
+  const suffix = await sessionCopy(runDir, 'old-project', [queued, e3, e4]);
+  const alone = JSON.stringify(await orchestratorUsage(runDir, full));
+  assert.equal(JSON.parse(alone).active_ms, 300000);
+  assert.equal(JSON.stringify(await orchestratorUsage(runDir, suffix, full)), alone, 'suffix first');
+  assert.equal(JSON.stringify(await orchestratorUsage(runDir, full, suffix)), alone, 'full first');
+});
+
+test('copies of one session: a tail-only copy listed first ends at the same entry; the longer copy is counted', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const tail = await sessionCopy(runDir, 'old-project', shellHistory().slice(2));
+  const full = await sessionCopy(runDir, 'new-project', shellHistory());
+  assert.equal(JSON.stringify(await orchestratorUsage(runDir, tail, full)), JSON.stringify(await orchestratorUsage(runDir, full)));
+});
+
+test('copies of one session: one window spelled two ways is one window', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const prefix = await sessionCopy(runDir, 'old-project', shellHistory().slice(0, 2));
+  const full = await sessionCopy(runDir, 'new-project', shellHistory());
+  const alone = await orchestratorUsage(runDir, `${full}@2026-10-16T10:00:00Z`);
+  assert.equal(alone.active_ms, 180000);
+  assert.equal(JSON.stringify(await orchestratorUsage(runDir, `${prefix}@2026-10-16T10:00:00.000Z`, `${full}@2026-10-16T10:00:00Z`)), JSON.stringify(alone));
+});
+
+test('copies of one session: the copy with the latest entry is counted, before a longer copy and whatever the file times say', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const [e1, e2, e3, e4] = shellHistory();
+  const u = e2.message.usage;
+  // Equal latest entry: the longer copy wins, though the shorter one was written last.
+  const tail = await sessionCopy(runDir, 'tie-old', [e3, e4]);
+  const full = await sessionCopy(runDir, 'tie-new', [e1, e2, e3, e4]);
+  await fs.utimes(full, new Date('2026-10-16T10:00:00Z'), new Date('2026-10-16T10:00:00Z'));
+  await fs.utimes(tail, new Date('2026-10-17T10:00:00Z'), new Date('2026-10-17T10:00:00Z'));
+  assert.equal(JSON.stringify(await orchestratorUsage(runDir, tail, full)), JSON.stringify(await orchestratorUsage(runDir, full)));
+  // A later latest entry beats more lines.
+  const stale = await sessionCopy(runDir, 'later-old', [e1, e2, e3, e4]);
+  const live = await sessionCopy(runDir, 'later-new', [
+    e4,
+    { uuid: 'e5', type: 'user', timestamp: '2026-10-16T10:10:00.000Z', message: { role: 'user', content: 'more' } },
+    { uuid: 'e6', type: 'assistant', timestamp: '2026-10-16T10:12:00.000Z', message: { id: 'm3', stop_reason: 'end_turn', usage: u } },
+  ]);
+  const liveAlone = await orchestratorUsage(runDir, live);
+  assert.deepEqual([liveAlone.calls, liveAlone.active_ms, liveAlone.commands.tried], [2, 120000, 0]);
+  assert.equal(JSON.stringify(await orchestratorUsage(runDir, stale, live)), JSON.stringify(liveAlone));
+});
+
+test('field: a stale copy whose entries all end before the window, listed first, and the live copy that holds it count the live copy alone', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const u = shellHistory()[1].message.usage;
+  const early = [
+    { uuid: 's1', type: 'user', timestamp: '2026-10-16T08:00:00.000Z', message: { role: 'user', content: 'earlier' } },
+    { uuid: 's2', type: 'assistant', timestamp: '2026-10-16T08:01:00.000Z', message: { id: 's-m1', stop_reason: 'end_turn', usage: u } },
+  ];
+  const stale = await sessionCopy(runDir, 'old-folder', early);
+  const live = await sessionCopy(runDir, 'new-folder', [...early, ...shellHistory()]);
+  const window = '@2026-10-16T10:00:00Z';
+  const alone = await orchestratorUsage(runDir, `${live}${window}`);
+  assert.deepEqual([alone.calls, alone.active_ms, alone.commands.tried, alone.commands.failed], [2, 180000, 1, 0]);
+  const both = await orchestratorUsage(runDir, `${stale}${window}`, `${live}${window}`);
+  assert.deepEqual(both.transcripts, ['session.jsonl']);
+  assert.equal(JSON.stringify(both), JSON.stringify(alone));
+});
+
+test('two different agent transcripts of one role are timed apart: the gap between them is not working time', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const [prompt, call] = shellHistory();
+  const u = call.message.usage;
+  const first = await sessionCopy(runDir, 'agents', [prompt, call], 'agent-first.jsonl');
+  const second = await sessionCopy(runDir, 'agents', [
+    { uuid: 'f1', type: 'user', timestamp: '2026-10-16T11:00:00.000Z', message: { role: 'user', content: 'again' } },
+    { uuid: 'f2', type: 'assistant', timestamp: '2026-10-16T11:02:00.000Z', message: { id: 'm9', stop_reason: 'end_turn', usage: u } },
+  ], 'agent-second.jsonl');
+  const usage = await orchestratorUsage(runDir, first, second);
+  assert.deepEqual([usage.calls, usage.active_ms, usage.commands.tried, usage.commands.failed], [2, 180000, 1, 1]);
+  assert.deepEqual(usage.transcripts, ['agent-first.jsonl', 'agent-second.jsonl']);
+});
+
+test('copies of one session: broken lines are those of the counted copy only', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const [e1, e2, e3, e4] = shellHistory();
+  const lines = [e1, e2, '{"cut', e3, e4];
+  const one = await sessionCopy(runDir, 'old-project', lines);
+  const two = await sessionCopy(runDir, 'new-project', lines);
+  const alone = await orchestratorUsage(runDir, one);
+  assert.equal(alone.unparsed_lines, 1);
+  assert.equal(JSON.stringify(await orchestratorUsage(runDir, one, two)), JSON.stringify(alone));
+  const stale = await sessionCopy(runDir, 'stale-project', [e1, '{"cut', e2]);
+  const full = await sessionCopy(runDir, 'full-project', shellHistory());
+  const both = await orchestratorUsage(runDir, stale, full);
+  assert.equal(both.unparsed_lines, undefined);
+  assert.equal(JSON.stringify(both), JSON.stringify(await orchestratorUsage(runDir, full)));
+});
+
+test('field: the orchestrator\'s usage across two transcripts of one session (an old project folder and the current one) counts each call once', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const u = { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 5 };
+  const entry = (id, at) => ({ type: 'assistant', timestamp: at, message: { id, stop_reason: 'end_turn', usage: u } });
+  const stale = await sessionCopy(runDir, 'old-folder', [entry('o1', '2026-10-16T08:00:00.000Z')]);
+  const current = await sessionCopy(runDir, 'new-folder', [entry('o1', '2026-10-16T08:00:00.000Z'), entry('o2', '2026-10-16T10:00:30.000Z'), entry('o3', '2026-10-16T10:05:00.000Z')]);
+  const all = await run(parseArgs(['--run-dir', runDir, '--seat-transcript', `orchestrator=${stale}`, '--seat-transcript', `orchestrator=${current}`]));
+  assert.equal(all.seat_usage.orchestrator.calls, 3, 'o1 is in both files and counted once');
+  const windowed = await run(parseArgs(['--run-dir', runDir, '--seat-transcript', `orchestrator=${stale}@2026-10-16T10:00:00Z`, '--seat-transcript', `orchestrator=${current}@2026-10-16T10:00:00Z`]));
+  assert.equal(windowed.seat_usage.orchestrator.calls, 2, 'the stale file has no call in the window and is not an error');
+});
+
+test('--seat-transcript orchestrator=auto skips a copy of the session with no reply while another copy has one; a lone non-transcript names its full path', async (t) => {
+  const { resolveAutoTranscript } = await import('../build-manifest.mjs');
+  const config = await tmpDir(t);
+  const id = '11111111-2222-3333-4444-555555555555';
+  const copy = async (project, lines) => {
+    await fs.mkdir(path.join(config, 'projects', project), { recursive: true });
+    const file = path.join(config, 'projects', project, `${id}.jsonl`);
+    await fs.writeFile(file, lines.map((l) => JSON.stringify(l)).join('\n'));
+    return file;
+  };
+  const real = await copy('a-current', [
+    { type: 'user', timestamp: '2026-10-29T12:00:00Z', message: { content: 'review' } },
+    { type: 'assistant', timestamp: '2026-10-29T12:00:05Z', message: { id: 'r1', stop_reason: 'end_turn', usage: { input_tokens: 7 } } },
+  ]);
+  await copy('b-stub', [{ type: 'user', timestamp: '2026-10-29T12:00:00Z', message: { content: 'new location' } }]);
+  await copy('c-summary', [{ type: 'summary', summary: 'earlier work', leafUuid: 'x' }]);
+  const env = { CLAUDE_CONFIG_DIR: config, CLAUDE_CODE_SESSION_ID: id };
+  assert.deepEqual(await resolveAutoTranscript('auto@2026-10-29T11:00:00Z', env), [`${real}@2026-10-29T11:00:00Z`]);
+  const { runDir } = await fixtureRun(t);
+  const [usage] = await resolveAutoTranscript('auto', env);
+  assert.equal((await run(parseArgs(['--run-dir', runDir, '--seat-transcript', `orchestrator=${usage}`]))).seat_usage.orchestrator.calls, 1);
+  const stub = path.join(config, 'projects', 'b-stub', `${id}.jsonl`);
+  await assert.rejects(run(parseArgs(['--run-dir', runDir, '--seat-transcript', `A=${stub}`])), (err) => err.message.includes(stub));
+});
+
+test('--seat-transcript orchestrator=auto finds this session from CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID, or says what is missing', async (t) => {
+  const { resolveAutoTranscript } = await import('../build-manifest.mjs');
+  const config = await tmpDir(t);
+  const id = '3f17176e-a848-43b3-a69e-634fc0609935';
+  await fs.mkdir(path.join(config, 'projects', 'some-project'), { recursive: true });
+  const file = path.join(config, 'projects', 'some-project', `${id}.jsonl`);
+  await fs.writeFile(file, '');
+  assert.deepEqual(await resolveAutoTranscript('auto@2026-10-16T10:00:00Z/2026-10-16T11:00:00Z', { CLAUDE_CONFIG_DIR: config, CLAUDE_CODE_SESSION_ID: id }), [`${file}@2026-10-16T10:00:00Z/2026-10-16T11:00:00Z`]);
+  // Field: a session that moved to another project folder has a transcript of the same name in each; both are given.
+  await fs.mkdir(path.join(config, 'projects', 'other-project'), { recursive: true });
+  const moved = path.join(config, 'projects', 'other-project', `${id}.jsonl`);
+  await fs.writeFile(moved, '');
+  assert.deepEqual((await resolveAutoTranscript('auto', { CLAUDE_CONFIG_DIR: config, CLAUDE_CODE_SESSION_ID: id })).sort(), [moved, file].sort());
+  assert.equal(await resolveAutoTranscript('auto', { CODEX_THREAD_ID: 'thread-1' }), 'thread-1');
+  assert.equal(await resolveAutoTranscript('C:/x.jsonl', {}), 'C:/x.jsonl', 'a path is kept');
+  await assert.rejects(resolveAutoTranscript('auto', {}), /needs CLAUDE_CODE_SESSION_ID \(Claude Code\) or CODEX_THREAD_ID/);
+  await assert.rejects(resolveAutoTranscript('auto', { CLAUDE_CONFIG_DIR: config, CLAUDE_CODE_SESSION_ID: '00000000-0000-0000-0000-000000000000' }), /no transcript/);
+});
+
+test('--run-dir after --init keeps a hand-added field of a reviewer entry, merged by role', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir])), null);
+  const bodyPath = path.join(runDir, 'phase3', 'manifest-body.json');
+  const body = JSON.parse(await fs.readFile(bodyPath, 'utf8'));
+  body.reviewers = body.reviewers.map((r) => (r.role === 'B' ? { ...r, verification_note: 'checked by hand' } : r));
+  await fs.writeFile(bodyPath, JSON.stringify(body));
+  const manifest = await run(parseArgs(['--run-dir', runDir]));
+  const b = manifest.reviewers.find((r) => r.role === 'B');
+  assert.equal(b.verification_note, 'checked by hand');
+  assert.equal(b.provider, 'openai', 'the run\'s own value is still there');
+  assert.equal(manifest.reviewers.length, 2);
+});
+
+test('Linux round: a seat file restored after --init clears missing_seat_files on the rebuild', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  await fs.mkdir(path.join(runDir, 'phase1'), { recursive: true });
+  await fs.writeFile(path.join(runDir, 'phase1', 'A-findings.md'), '## A1\nSame shape elsewhere: none found\n\n## Checks performed\n- AC-1: ok. MET\nBlocked: none\n');
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir])), null);
+  const body = JSON.parse(await fs.readFile(path.join(runDir, 'phase3', 'manifest-body.json'), 'utf8'));
+  assert.deepEqual(body.missing_seat_files, ['B']);
+  await fs.writeFile(path.join(runDir, 'phase1', 'B-findings.md'), '## B1\nSame shape elsewhere: none found\n\n## Checks performed\n- AC-1: ok. MET\nBlocked: none\n');
+  await fs.writeFile(path.join(runDir, 'phase3', 'findings.json'), '{"findings":[]}');
+  const manifest = await run(parseArgs(['--run-dir', runDir]));
+  assert.equal(manifest.status, 'completed');
+  assert.equal(manifest.missing_seat_files, undefined);
+});
+
+test('--run-dir after --init drops exchange keys the run no longer reports (a seat that was missing completed) and keeps a hand-added one', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir])), null);
+  const bodyPath = path.join(runDir, 'phase3', 'manifest-body.json');
+  const body = JSON.parse(await fs.readFile(bodyPath, 'utf8'));
+  body.exchange = { ...body.exchange, incomplete_seats: ['B'], reason: 'the exchange finished without seat B', no_peer_claims: ['A'], operator_note: 'kept' };
+  await fs.writeFile(bodyPath, JSON.stringify(body));
+  await fs.mkdir(path.join(runDir, 'phase2'), { recursive: true });
+  await fs.writeFile(path.join(runDir, 'phase2', 'exchange-result.json'), JSON.stringify({ appended: ['A', 'B'], incomplete: [], no_peer_claims: [] }));
+  await fs.writeFile(path.join(runDir, 'phase3', 'findings.json'), '{"findings":[]}');
+  await fs.mkdir(path.join(runDir, 'phase1'), { recursive: true });
+  for (const role of ['A', 'B']) await fs.writeFile(path.join(runDir, 'phase1', `${role}-findings.md`), `## ${role}1\nSame shape elsewhere: none found\n\n## Checks performed\n- AC-1: ok. MET\nBlocked: none\n`);
+  const manifest = await run(parseArgs(['--run-dir', runDir]));
+  assert.equal(manifest.status, 'completed');
+  for (const key of ['incomplete_seats', 'reason', 'no_peer_claims']) assert.ok(!(key in manifest.exchange), `${key} is not kept from the older body`);
+  assert.equal(manifest.exchange.operator_note, 'kept');
+});
+
 test('--run-dir alone collects the packet, both phases, findings and every completed result.json; an explicit flag wins', async (t) => {
   const { dir, runDir } = await fixtureRun(t);
   const write = (file, text) => fs.mkdir(path.dirname(file), { recursive: true }).then(() => fs.writeFile(file, text));
   await write(path.join(runDir, 'task-packet.md'), 'packet');
   for (const role of ['A', 'B']) {
-    await write(path.join(runDir, 'phase1', 'original', `${role}-findings.md`), `## ${role}1\n`);
+    await write(path.join(runDir, 'phase1', 'original', `${role}-findings.md`), `## ${role}1\nSame shape elsewhere: none found\n\n## Checks performed\n- AC-1: ok. MET\nBlocked: none\n`);
     await write(path.join(runDir, 'phase1', `${role}-findings.md`), `## ${role}1\nrebuttal appended\n`);
     await write(path.join(runDir, 'phase2', `peer-view-for-${role}.md`), '## P1\n');
   }
-  await write(path.join(runDir, 'phase3', 'findings.json'), '{}');
+  await write(path.join(runDir, 'phase3', 'findings.json'), '{"findings":[]}');
   await write(path.join(runDir, 'phase3', 'verification-X1.md'), 'v');
   const results = await Promise.all(resultFixtures.map(async (url) => fs.readFile(url, 'utf8')));
   await write(path.join(runDir, 'phase1', 'B', 'result.json'), results[0]);
@@ -1155,13 +1549,17 @@ test('--run-dir alone collects the packet, both phases, findings and every compl
   assert.equal(Object.keys(manifest.hashes.phase1).length, 2);
   assert.equal(Object.keys(manifest.hashes.phase2).length, 2);
   const b = manifest.reviewers.find((r) => r.role === 'B');
-  assert.equal(b.usage_per_call.length, 2, 'both completed B calls are summed; the attempt file is not');
+  assert.equal(b.usage_per_call.length, 3, 'both completed B calls and the archived exchange attempt are summed');
   assert.ok(await fs.stat(path.join(runDir, 'manifest.json')), 'default output is <run-dir>/manifest.json');
   const explicit = await run(parseArgs(['--run-dir', runDir, '--out', path.join(dir, 'm2.json'), '--task-packet', path.join(runDir, 'phase1', 'A-findings.md')]));
   assert.equal(explicit.hashes.task_packet, sha256(Buffer.from('## A1\nrebuttal appended\n')), 'an explicit --task-packet is kept');
   assert.deepEqual(Object.keys(manifest.hashes.phase1).sort(), ['A-findings.md', 'B-findings.md'], 'the untouched originals are hashed, not the working files');
-  assert.equal(manifest.hashes.phase1['A-findings.md'], sha256(Buffer.from('## A1\n')));
+  assert.equal(manifest.hashes.phase1['A-findings.md'], sha256(Buffer.from('## A1\nSame shape elsewhere: none found\n\n## Checks performed\n- AC-1: ok. MET\nBlocked: none\n')));
   assert.deepEqual(Object.keys(manifest.hashes.phase2).sort(), ['peer-view-for-A.md', 'peer-view-for-B.md']);
+  // A Phase 1 format rewrite keeps the first call as result.attempt-1.json: its tokens count too.
+  await write(path.join(runDir, 'phase1', 'B', 'result.attempt-1.json'), results[1]);
+  const rewritten = await run(parseArgs(['--run-dir', runDir, '--out', path.join(dir, 'm3.json')]));
+  assert.equal(rewritten.reviewers.find((r) => r.role === 'B').usage_per_call.length, 4, 'the Phase 1 attempt before the rewrite is summed');
 });
 
 // CODEX_HOME and CLAUDE_CONFIG_DIR point at a temp folder, so no test reads this machine's real sessions.
@@ -1234,22 +1632,121 @@ test('commands: a native seat transcript records its Bash calls in seat_usage, i
   assert.ok(!('commands' in (await build('--seat-transcript', 'A=' + fixture('codex-child-no-items.jsonl'))).seat_usage.A), 'items missing: unknown');
 });
 
+test('initBody: each reviewer records the model run.json requested, so a native seat has one too', async (t) => {
+  const dir = await tmpDir(t);
+  const descriptor = {
+    skill: 'cross-review', flags: { falsification: false, mode: 'adversarial', auditDepth: 'light' },
+    seatA: { provider: 'anthropic', model: 'opus', transport: 'native' }, seatB: { provider: 'openai', model: 'gpt-6.1-sol' }, auditor: { provider: 'anthropic' },
+  };
+  const body = await initBody(descriptor, dir);
+  assert.deepEqual(body.reviewers.map((r) => r.model_requested), ['opus', 'gpt-6.1-sol']);
+  assert.equal(body.seat_blind_lines, undefined);
+  assert.equal(body.stop_incomplete, undefined);
+  // Closing round 2: review-run's side files reach the manifest, so the report shows their caveats.
+  await fs.writeFile(path.join(dir, 'seat-warnings-phase1.json'), JSON.stringify({ blind: { B: ['Blocked: rg missing'] } }));
+  await fs.writeFile(path.join(dir, 'stop-incomplete.json'), JSON.stringify({ 'seat B (phase1)': true, 'auditor (audit)': true }));
+  const marked = await initBody(descriptor, dir);
+  assert.deepEqual(marked.seat_blind_lines, { B: ['Blocked: rg missing'] });
+  assert.deepEqual(marked.stop_incomplete, ['seat B (phase1)', 'auditor (audit)']);
+});
+
 test('initBody: a run whose exchange finished with an incomplete seat is incomplete, and the exchange record names the seat and the no-claims seats', async (t) => {
   const dir = await tmpDir(t);
   await fs.mkdir(path.join(dir, 'phase2'), { recursive: true });
   await fs.mkdir(path.join(dir, 'phase3'), { recursive: true });
-  await fs.writeFile(path.join(dir, 'phase3', 'findings.json'), '{}');
+  await fs.writeFile(path.join(dir, 'phase3', 'findings.json'), '{"findings":[]}');
   const descriptor = {
     skill: 'cross-review', flags: { falsification: false, mode: 'adversarial', auditDepth: 'light' },
     seatA: { provider: 'anthropic' }, seatB: { provider: 'openai' }, auditor: { provider: 'anthropic' },
   };
+  // macOS round: a missing Phase 1 seat file makes the run incomplete and names the seat.
+  await fs.mkdir(path.join(dir, 'phase1'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 — a claim\nSame shape elsewhere: none found\n\n## Checks performed\n- AC-1: ok. MET\nBlocked: none\n');
+  const oneSeat = await initBody(descriptor, dir);
+  assert.equal(oneSeat.status, 'incomplete');
+  assert.deepEqual(oneSeat.missing_seat_files, ['B']);
+  // Closing round 3: an empty file, or one cut off before any claim heading, counts as missing too.
+  for (const text of ['', '# Seat B findings\n', '# Seat B findings\n\nI started checking the', '# Seat B findings\n\n## B1 — a claim cut off before its checks\n', '# Seat B findings\n\n```text\n## No findings\n## Checks performed\n```\n']) {
+    await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), text);
+    assert.deepEqual((await initBody(descriptor, dir)).missing_seat_files, ['B'], JSON.stringify(text));
+  }
+  // The gate reads the file with the one seat-file reader review-run uses: only the exact section headings pass.
+  const { parseSeatFile } = await import('../seat-file.mjs');
+  const claim = '# Seat B findings\n\n## B1 — a claim\nSame shape elsewhere: none found\n\n';
+  for (const text of [`${claim}## Checks performed\n- AC-1: ok. MET\nBlocked: none\n`, '# Seat B findings\n\n## No findings\nBlocked: none\n']) {
+    await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), text);
+    assert.equal((await initBody(descriptor, dir)).missing_seat_files, undefined, text);
+    assert.deepEqual(parseSeatFile(text, 'B').problems, [], `review-run takes ${JSON.stringify(text)}`);
+  }
+  for (const heading of ['### Checks performed', '## 4. Checks performed', '## (1) Checks performed', '## **Checks performed**', '# Checks performed', '## `Checks performed`', '#### Checks Performed (partial)']) {
+    await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), `${claim}${heading}\n- AC-1: ok. MET\nBlocked: none\n`);
+    assert.deepEqual((await initBody(descriptor, dir)).missing_seat_files, ['B'], heading);
+  }
+  for (const heading of ['### No findings', '## **No findings**', '## 1. No findings']) {
+    await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), `# Seat B findings\n\n${heading}\nBlocked: none\n`);
+    assert.deepEqual((await initBody(descriptor, dir)).missing_seat_files, ['B'], heading);
+  }
+  for (const text of ['# Seat B findings\n\n## Checks performed\n- AC-1: ok. MET\nBlocked: none\n', '# Seat B findings\n\n### Checks performed\n', `${claim}    ## Checks performed\n- AC-1: ok. MET\n`, '# Seat B findings\n\n    ## No findings\n']) {
+    await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), text);
+    assert.deepEqual((await initBody(descriptor, dir)).missing_seat_files, ['B'], JSON.stringify(text));
+  }
+  // A finished file from before the Blocked: rule (claims and the section, no Blocked: line) is not missing: a format note.
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), `${claim}## Checks performed\n- AC-1: ok. MET\n`);
+  const preRule = await initBody(descriptor, dir);
+  assert.equal(preRule.missing_seat_files, undefined);
+  assert.match(preRule.seat_format_notes.B, /has no line "Blocked: none"/);
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## No findings\nBlocked: none\n');
   // No exchange-result.json (a run that never recorded one): the old behavior, completed.
   assert.equal((await initBody(descriptor, dir)).status, 'completed');
+  assert.equal((await initBody(descriptor, dir)).missing_seat_files, undefined);
+  // Linux round linux-r2 F7: an empty object is no finished audit.
+  await fs.writeFile(path.join(dir, 'phase3', 'findings.json'), '{}');
+  assert.equal((await initBody(descriptor, dir)).status, 'incomplete', 'linux-r2 F7: findings.json {}');
+  await fs.writeFile(path.join(dir, 'phase3', 'findings.json'), '{"findings":[]}');
   await fs.writeFile(path.join(dir, 'phase2', 'exchange-result.json'), JSON.stringify({ appended: ['B'], incomplete: [], no_peer_claims: ['A'] }));
   const clean = await initBody(descriptor, dir);
   assert.equal(clean.status, 'completed');
   assert.deepEqual(clean.exchange.no_peer_claims, ['A']);
   assert.equal(clean.exchange.incomplete_seats, undefined);
+  // A seat file refused again after its one rewrite (review-run's phase1/format-refused.json): incomplete, reasons kept.
+  await fs.writeFile(path.join(dir, 'phase1', 'format-refused.json'), JSON.stringify({ B: ['no "## Checks performed" heading after the claims'] }));
+  const refused = await initBody(descriptor, dir);
+  assert.equal(refused.status, 'incomplete');
+  assert.deepEqual(refused.format_refused, { B: ['no "## Checks performed" heading after the claims'] });
+  await fs.rm(path.join(dir, 'phase1', 'format-refused.json'));
+  assert.equal((await initBody(descriptor, dir)).format_refused, undefined);
+  // Restructure round 1 F2: a finished seat file written before the strict format (no Blocked: line, unquoted "blocked:"
+  // text) stays a completed review with a format note; only a file with no pass content counts as missing.
+  for (const old of ['# Seat B findings\n\n## No findings\nNothing found.\n', '# Seat B findings\n\n## No findings\nBlocked: none\nThe port was blocked: by the proxy.\n']) {
+    await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), old);
+    const body = await initBody(descriptor, dir);
+    assert.equal(body.status, 'completed', JSON.stringify(old));
+    assert.equal(body.missing_seat_files, undefined, JSON.stringify(old));
+    assert.equal(typeof body.seat_format_notes?.B, 'string', JSON.stringify(old));
+  }
+  // Restructure round 2 F5: a seat refused twice in a new run gets the refusal, not the "written before the rule" note.
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## No findings\nNothing found.\n');
+  await fs.writeFile(path.join(dir, 'phase1', 'format-refused.json'), JSON.stringify({ B: ['"## No findings" has no line "Blocked: none"'] }));
+  const twice = await initBody(descriptor, dir);
+  assert.equal(twice.status, 'incomplete');
+  assert.ok(twice.format_refused?.B);
+  assert.equal(twice.seat_format_notes, undefined);
+  await fs.rm(path.join(dir, 'phase1', 'format-refused.json'));
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## No findings\nBlocked: none\n');
+  assert.equal((await initBody(descriptor, dir)).seat_format_notes, undefined);
+  // A No findings seat that names a block (review-run stops it; a run built without review-run gets here): incomplete,
+  // and its block is a caveat even with no seat-warnings-phase1.json.
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## No findings\nBlocked: every file in the target: EACCES\n');
+  const blockedSeat = await initBody(descriptor, dir);
+  assert.equal(blockedSeat.status, 'incomplete');
+  assert.deepEqual(blockedSeat.blocked_no_findings, ['B']);
+  assert.deepEqual(blockedSeat.seat_blind_lines, { B: ['Blocked: every file in the target: EACCES'] });
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## No findings\nBlocked: none\n');
+  assert.equal((await initBody(descriptor, dir)).blocked_no_findings, undefined);
+  // A run written before every claim needed "Same shape elsewhere:" is still read as complete; that rule is validate's.
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## B1 — older claim\n\n## Checks performed\nBlocked: none\n');
+  assert.equal((await initBody(descriptor, dir)).missing_seat_files, undefined);
+  await fs.writeFile(path.join(dir, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## No findings\nBlocked: none\n');
   await fs.writeFile(path.join(dir, 'phase2', 'exchange-result.json'), JSON.stringify({ appended: ['B'], incomplete: ['A'], no_peer_claims: [] }));
   const lost = await initBody(descriptor, dir);
   assert.equal(lost.status, 'incomplete');
@@ -1274,4 +1771,143 @@ test('falsification completeness is decided by claim: a verification file for an
   assert.ok(wrong.warnings.some((w) => /no verification file names Y2/.test(w)), wrong.warnings.join(' | '));
   const right = await build('verification-Y2.md');
   assert.notEqual(right.status, 'incomplete');
+});
+
+test('--run-dir counts a completed result.attempt-<n>.json of every actor (exchange, redaction, auditor, verifier); an attempt that ended without completing is not counted and not warned', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const write = async (rel, obj) => {
+    const f = path.resolve(runDir, rel);
+    await fs.mkdir(path.dirname(f), { recursive: true });
+    await fs.writeFile(f, JSON.stringify(obj));
+  };
+  const call = (input, ms, status = 'completed') => ({ status, modelRequested: 'opus', usageSemantics: 'per-call', usage: { input_tokens: input }, durationMs: ms });
+  await write('phase1/B/result.json', call(10, 10));
+  await write('phase2/B/result.attempt-1.json', call(900, 9000));
+  await write('phase2/B/result.json', call(100, 1000));
+  await write('phase3/redact-A/result.attempt-1.json', call(900, 9000));
+  await write('phase3/redact-A/result.json', call(100, 1000));
+  // A launch or rate-limit failure: its usage is not counted, and no warning is printed for it.
+  await write('phase2/A/result.attempt-1.json', call(5000, 50000, 'error'));
+  await write('../run-audit-dispatch/result.attempt-1.json', call(900, 9000));
+  await write('../run-audit-dispatch/result.json', call(100, 1000));
+  await write('phase3/verifier-1/result.attempt-1.json', call(900, 9000));
+  await write('phase3/verifier-1/result.json', call(100, 1000));
+  const manifest = await run(parseArgs(['--run-dir', runDir]));
+  const entry = (list, role) => list.find((r) => r.role === role);
+  assert.deepEqual([entry(manifest.reviewers, 'B').usage.input_tokens, entry(manifest.reviewers, 'B').duration_ms], [1010, 10010], 'phase 1, the archived exchange attempt and the exchange call');
+  assert.deepEqual([entry(manifest.reviewers, 'A').usage.input_tokens, entry(manifest.reviewers, 'A').duration_ms], [1000, 10000], 'both redaction calls; the failed exchange attempt is left out');
+  for (const role of ['auditor', 'verifier-1']) {
+    assert.deepEqual([entry(manifest.actors, role).usage.input_tokens, entry(manifest.actors, role).duration_ms], [1000, 10000], `${role}: the archived attempt and the retry`);
+  }
+  assert.equal(manifest.warnings.filter((w) => /not passed to --reviewer-result/.test(w)).length, 0);
+});
+
+test('--run-dir: a retried auditor or verifier whose attempts ran in different temporary worktrees is merged, with the last worktree; a seat still is not', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const write = async (rel, obj) => {
+    const f = path.resolve(runDir, rel);
+    await fs.mkdir(path.dirname(f), { recursive: true });
+    await fs.writeFile(f, JSON.stringify(obj));
+  };
+  const call = (input, ms, worktreePath) => ({ status: 'completed', modelRequested: 'opus', modelResolved: 'claude-opus-x', isolated: true, worktreePath, usageSemantics: 'per-call', usage: { input_tokens: input }, durationMs: ms });
+  await write('../run-audit-dispatch/result.attempt-1.json', call(900, 9000, '/tmp/rv-aaaa1111'));
+  await write('../run-audit-dispatch/result.json', call(100, 1000, '/tmp/rv-bbbb2222'));
+  await write('phase3/verifier-1/result.attempt-1.json', call(900, 9000, '/tmp/rv-cccc3333'));
+  await write('phase3/verifier-1/result.json', call(100, 1000, '/tmp/rv-dddd4444'));
+  const manifest = await run(parseArgs(['--run-dir', runDir]));
+  const entry = (role) => manifest.actors.find((r) => r.role === role);
+  assert.deepEqual([entry('auditor').usage.input_tokens, entry('auditor').duration_ms, entry('auditor').worktreePath], [1000, 10000, '/tmp/rv-bbbb2222']);
+  assert.deepEqual([entry('verifier-1').usage.input_tokens, entry('verifier-1').duration_ms, entry('verifier-1').worktreePath], [1000, 10000, '/tmp/rv-dddd4444']);
+  await write('phase1/B/result.attempt-1.json', call(900, 9000, '/tmp/rv-eeee5555'));
+  await write('phase1/B/result.json', call(100, 1000, '/tmp/rv-ffff6666'));
+  await assert.rejects(run(parseArgs(['--run-dir', runDir])), /--reviewer-result B: the result files disagree on worktreePath/);
+});
+
+test('a completed auditor attempt in <run-dir>-audit-dispatch that no --reviewer-result names is reported as a WARNING', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const dispatch = `${runDir}-audit-dispatch`;
+  await fs.mkdir(dispatch, { recursive: true });
+  const call = (input) => JSON.stringify({ status: 'completed', modelRequested: 'opus', usageSemantics: 'per-call', usage: { input_tokens: input }, durationMs: 10 });
+  await fs.writeFile(path.join(dispatch, 'result.attempt-1.json'), call(900));
+  await fs.writeFile(path.join(dispatch, 'result.json'), call(100));
+  const manifest = await run(parseArgs(['--run-dir', runDir, '--reviewer-result', `auditor=${path.join(dispatch, 'result.json')}`]));
+  assert.equal(manifest.actors.find((r) => r.role === 'auditor').usage.input_tokens, 100);
+  const missing = manifest.warnings.filter((w) => /not passed to --reviewer-result/.test(w));
+  assert.equal(missing.length, 1, missing.join(' | '));
+  assert.match(missing[0], /run-audit-dispatch[\\/]result\.attempt-1\.json/);
+});
+
+test('with --run-dir the left-out-call WARNING scans the run dir, wherever --out writes the manifest', async (t) => {
+  const { dir, runDir } = await fixtureRun(t);
+  const call = JSON.stringify({ status: 'completed', modelRequested: 'opus', usageSemantics: 'per-call', usage: { input_tokens: 10 }, durationMs: 10 });
+  await fs.writeFile(path.join(runDir, 'phase1', 'B', 'result.json'), call);
+  await fs.mkdir(path.join(runDir, 'phase2', 'B'), { recursive: true });
+  await fs.writeFile(path.join(runDir, 'phase2', 'B', 'result.attempt-1.json'), call);
+  for (const out of [path.join(runDir, 'exports', 'm.json'), path.join(dir, 'outside', 'm.json')]) {
+    await fs.mkdir(path.dirname(out), { recursive: true });
+    const manifest = await run(parseArgs(['--run-dir', runDir, '--out', out, '--reviewer-result', `B=${path.join(runDir, 'phase1', 'B', 'result.json')}`]));
+    const missing = manifest.warnings.filter((w) => /not passed to --reviewer-result/.test(w));
+    assert.equal(missing.length, 1, `${out}: ${missing.join(' | ')}`);
+    assert.match(missing[0], /phase2[\\/]B[\\/]result\.attempt-1\.json/);
+  }
+});
+
+test('a completed result.attempt-<n>.json under the run dir that no --reviewer-result names is reported as a WARNING', async (t) => {
+  const { runDir } = await fixtureRun(t);
+  const write = async (rel, obj) => {
+    const f = path.join(runDir, rel);
+    await fs.mkdir(path.dirname(f), { recursive: true });
+    await fs.writeFile(f, JSON.stringify(obj));
+  };
+  const call = (status) => ({ status, modelRequested: 'opus', usageSemantics: 'per-call', usage: { input_tokens: 10 }, durationMs: 10 });
+  await write('phase1/B/result.json', call('completed'));
+  await write('phase2/B/result.attempt-1.json', call('completed'));
+  await write('phase2/B/result.attempt-2.json', call('timed-out'));
+  const manifest = await run(parseArgs(['--run-dir', runDir, '--reviewer-result', `B=${path.join(runDir, 'phase1', 'B', 'result.json')}`]));
+  const missing = manifest.warnings.filter((w) => /not passed to --reviewer-result/.test(w));
+  assert.equal(missing.length, 1, 'only the completed attempt; the timed-out one is not warned');
+  assert.match(missing[0], /phase2[\\/]B[\\/]result\.attempt-1\.json/);
+});
+
+test('--seat-transcript with several windows: counted_from is the earliest start and counted_until the latest end in either order; a bound is left out when one transcript lacks it', async (t) => {
+  const dir = await tmpDir(t);
+  const at = (m) => new Date(Date.UTC(2026, 9, 16, 10, m, 0)).toISOString();
+  const u = (i) => ({ input_tokens: i, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 });
+  const lines = [[1, 'c1', 10], [11, 'c2', 20]].map(([m, id, i]) => JSON.stringify({ type: 'assistant', timestamp: at(m), message: { id, stop_reason: 'end_turn', usage: u(i) } }));
+  const file = path.join(dir, 'session.jsonl');
+  await fs.writeFile(file, lines.join('\n') + '\n');
+  const other = path.join(dir, 'other.jsonl');
+  await fs.writeFile(other, JSON.stringify({ type: 'assistant', timestamp: at(30), message: { id: 'c3', stop_reason: 'end_turn', usage: u(5) } }) + '\n');
+  const inPath = path.join(dir, 'm.json');
+  await fs.writeFile(inPath, JSON.stringify({ protocol: 'review-protocol-v1.3' }));
+  const usage = async (...specs) => (await run(parseArgs(['--in', inPath, '--out', path.join(dir, 'o.json'), ...specs.flatMap((s) => ['--seat-transcript', `orchestrator=${s}`])]))).seat_usage.orchestrator;
+  const first = `${file}@${at(0)}/${at(2)}`;
+  const second = `${file}@${at(10)}/${at(12)}`;
+  for (const specs of [[first, second], [second, first]]) {
+    const o = await usage(...specs);
+    assert.deepEqual([o.calls, o.input_tokens, o.counted_from, o.counted_until], [2, 30, at(0), at(12)]);
+  }
+  const open = await usage(first, `${file}@${at(10)}`);
+  assert.deepEqual([open.calls, open.counted_from], [2, at(0)]);
+  assert.ok(!('counted_until' in open), 'an open window runs to the end of the transcript, so there is no end to record');
+  const bare = await usage(first, other);
+  assert.deepEqual([bare.calls, bare.counted_until], [2, undefined]);
+  assert.ok(!('counted_from' in bare), 'a transcript given without a window counts from its first entry');
+});
+
+test('the late-start warning reads the earliest start of several windows, given in either order', async (t) => {
+  const { dir, runDir } = await fixtureRun(t);
+  assert.equal(await run(parseArgs(['--init', '--run-dir', runDir])), null);
+  const at = (s) => new Date(Date.UTC(2026, 9, 17, 6, 0, s)).toISOString();
+  const brief = path.join(runDir, 'phase1', 'brief-A.txt');
+  await fs.writeFile(brief, 'brief');
+  await fs.utimes(brief, new Date(at(0)), new Date(at(0)));
+  const u = { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 };
+  const file = path.join(dir, 'session.jsonl');
+  await fs.writeFile(file, [10, 700].map((s, i) => JSON.stringify({ type: 'assistant', timestamp: at(s), message: { id: `m${i}`, stop_reason: 'end_turn', usage: u } })).join('\n') + '\n');
+  const late = (w) => w.includes('the first brief was written');
+  const build = async (n, ...windows) => (await run(parseArgs(['--run-dir', runDir, '--out', path.join(runDir, `m${n}.json`), ...windows.flatMap((w) => ['--seat-transcript', `orchestrator=${file}@${w}`])]))).warnings;
+  assert.ok(!(await build(1, `${at(0)}/${at(300)}`, `${at(600)}/${at(900)}`)).some(late), 'the earliest start is on time');
+  assert.ok(!(await build(2, `${at(600)}/${at(900)}`, `${at(0)}/${at(300)}`)).some(late));
+  assert.ok((await build(3, `${at(650)}/${at(900)}`, `${at(600)}/${at(640)}`)).some(late), 'every window starts late');
 });

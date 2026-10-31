@@ -1,49 +1,45 @@
-#!/usr/bin/env node
 // Builds the review report from the run's own files, so IDs, counts and states are never retyped.
 // The terminal report is the default output; --out writes a markdown copy, --html an optional standalone page.
-import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { readFile, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-import { isMainModule } from './path-utils.mjs';
 import { parseFenceLines } from './blind-relabel.mjs';
+import { parseSeatFile } from './seat-file.mjs';
+import { makeIo, refuseDirectRun, runStep as runStepWith } from './step-io.mjs';
+
+// Which skill wrote a report or scorecard: its name and version from this copy's SKILL.md (the version that ran, from the
+// manifest, wins) and the project's home page. Printed as one line at the end of each output.
+export const PROJECT_URL = 'https://github.com/M-khalifa/SkillArray';
+let ownSkill;
+export function generatorInfo(version = null) {
+  if (ownSkill === undefined) {
+    try {
+      const md = readFileSync(path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'SKILL.md'), 'utf8');
+      ownSkill = { name: /^name:\s*(\S+)\s*$/m.exec(md)?.[1] ?? null, version: /^\s+version:\s*(\S+)\s*$/m.exec(md)?.[1] ?? null };
+    } catch {
+      ownSkill = { name: null, version: null };
+    }
+  }
+  return { skill: ownSkill.name ?? 'SkillArray review', version: typeof version === 'string' && version !== '' ? version : ownSkill.version, url: PROJECT_URL };
+}
+
+export function generatorLine(g = generatorInfo()) {
+  return `Reviewed with ${g.skill}${g.version ? ` ${g.version}` : ''} (SkillArray, MIT license): ${g.url}`;
+}
 
 class ReportError extends Error {}
-
-const HELP = `build-report.mjs: the review report, built from the run's files.
-
-Usage:
-  node build-report.mjs --run-dir <dir> [--format text|chat [--all]] [--notes <file>] [--color auto|always|never]
-                        [--out <report.md>] [--json <report.json>] [--html <report.html>]
-
---format chat prints the report as plain markdown for a chat window (a quote banner, severity bars, an action table and a red/green diff
-block); paste it verbatim into the reply. --all adds every finding, criterion and the cost. No colour codes are used.
-Default (--format text): print the terminal report (ASCII). Colour appears on a real terminal, or when FORCE_COLOR is set, or with
---color always (use it when the output is captured by a tool, for example an agent session); NO_COLOR or --color never turns it off.
---out    also write a plain markdown copy for a ticket or pull request.
---json   also write the facts the report is built from.
---html   also write a standalone page (no scripts, light and dark theme). Only when asked for.
---notes  a markdown file with "## Why" (one sentence) and "## Decisions needed" (a table). Default:
-         <run-dir>/phase3/report-notes.md when it exists.
-
-Reads <run-dir>/phase3/findings.json, <run-dir>/manifest.json, <run-dir>/task-packet.md and the Phase 1
-seat files (phase1/original/ when present). Nothing is recomputed by hand:
-  Status    COMPLETE when manifest.status is "completed", else INCOMPLETE. No merge/ship verdict is printed.
-  Blockers  findings whose final_state is unresolved-high-stakes, plus every finding whose final severity
-            (severity_audited, else severity) is HIGH or CRITICAL and is not settled-refuted or dropped-speculative.
-  Criteria  every "- [TAG] text" line of the task packet. A tag a finding's claim heading carries is "issue
-            found"; a tag named in a seat's "## Checks performed" section is "no issue found", unless the seat marked it
-            NOT MET or PARTIAL or reported a failing check: then it is "not met or partial (no finding)"; any other tag
-            is NOT VERIFIED (nobody stated a check for it). Absence of a finding is never shown as a pass.
-  Cost      from manifest.seat_usage; a figure that is missing prints as unknown, never an estimate.
-`;
+const io = makeIo();
 
 const SEV_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+const overlapText = (o) => `seat A only ${o.aOnly}, seat B only ${o.bOnly}, both ${o.both} (observed counts)`;
 const SEV_KEY = { CRITICAL: 'critical', HIGH: 'high', MEDIUM: 'medium', LOW: 'low' };
 
 export function parseArgs(argv) {
-  const args = { runDir: null, notes: null, color: 'auto', format: 'text', all: false, out: null, json: null, html: null, help: false };
+  const args = { runDir: null, notes: null, color: 'auto', format: 'text', all: false, out: null, json: null, html: null, changeDiffs: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const tok = argv[i];
     const value = () => {
@@ -63,11 +59,11 @@ export function parseArgs(argv) {
     else if (tok === '--out') args.out = value();
     else if (tok === '--json') args.json = value();
     else if (tok === '--html') args.html = value();
-    else if (tok === '-h' || tok === '--help') args.help = true;
+    else if (tok === '--change-diff') args.changeDiffs.push(value());
     else throw new ReportError(`unrecognized argument: ${tok}`);
   }
-  if (!args.help && !args.runDir) throw new ReportError('--run-dir <dir> is required');
-  if (args.all && args.format !== 'chat') throw new ReportError('--all is only used with --format chat');
+  if (!args.runDir) throw new ReportError('--run-dir <dir> is required');
+  // The text, markdown and HTML outputs already hold every finding, criterion and the cost, so --all changes only chat.
   return args;
 }
 
@@ -97,6 +93,9 @@ export function isBlocker(f) {
 const ABBREVIATION_RE = /(?:^|[^A-Za-z])(?:e\.g|i\.e|etc|vs|cf|approx|no)$/i;
 
 // The text up to the first sentence end, skipping a full stop that closes an abbreviation such as "e.g." or "etc.".
+// Said by the report and by recheck (before the round is paid for) from round 3 on.
+export const stepBackNote = (round) => `Round ${round}: findings keep coming from fixes. Before another round, consider a test that tries every combination of the inputs the findings name, or a redesign of the function they keep landing in.`;
+
 export function firstSentence(text) {
   const clean = String(text ?? '').replace(/\s+/g, ' ').trim();
   for (const m of clean.matchAll(/[.!?](?=\s|$)/g)) {
@@ -109,7 +108,8 @@ export function shortTitle(f, cap = 110) {
   const text = String(f.title ?? f.summary ?? '').replace(/\s+/g, ' ').trim();
   const first = firstSentence(text);
   if (first.length <= cap) return first;
-  const clause = /^(.{40,}?)[:;]/.exec(first.slice(0, cap + 1));
+  // A clause ends at ": " or "; ", never at the colon inside "${env:X}" or "C:\".
+  const clause = /^(.{40,}?)[:;](?=\s)/.exec(first.slice(0, cap + 1));
   if (clause && clause[1].length <= cap) return clause[1].trimEnd();
   const room = first.slice(0, cap - 3);
   const cut = room.lastIndexOf(' ');
@@ -131,17 +131,20 @@ const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 // A Claude transcript reports new and cache-read tokens apart; Codex reports total input with the cached part inside it,
 // so its new input is input minus cached and the cached part goes under cache read.
 export function seatCostRow(name, u, { anthropic = false } = {}) {
-  const row = { seat: name, newInput: null, cacheWrite: null, cacheRead: null, output: null, calls: null };
-  if (!u || typeof u !== 'object') return row;
+  const base = { seat: name, newInput: null, cacheWrite: null, cacheRead: null, output: null, calls: null };
+  if (!u || typeof u !== 'object') return base;
+  const row = finite(u.calls_without_usage) > 0 ? { ...base, callsWithoutUsage: u.calls_without_usage } : base;
   if (u.new_input_tokens !== undefined || u.context_reread_tokens !== undefined) {
-    // new_input_tokens holds fresh input plus the cache write; a context rebuild is a big cache write, so show them apart when both are known.
+    // new_input_tokens holds fresh input plus the cache write (all input not read from the cache); the cache write is also shown on its own.
     const write = finite(u.cache_creation_input_tokens);
     const fresh = finite(u.input_tokens);
     const split = write !== null && fresh !== null;
-    return { ...row, newInput: split ? fresh : finite(u.new_input_tokens), cacheWrite: split ? write : null, cacheRead: finite(u.context_reread_tokens), output: finite(u.output_tokens), calls: finite(u.calls) };
+    return { ...row, newInput: split ? fresh + write : finite(u.new_input_tokens), cacheWrite: split ? write : null, cacheRead: finite(u.context_reread_tokens), output: finite(u.output_tokens), calls: finite(u.calls) };
   }
   if (anthropic && u.input_tokens !== undefined) {
-    return { ...row, newInput: finite(u.input_tokens), cacheWrite: finite(u.cache_write_input_tokens), cacheRead: finite(u.cached_input_tokens), output: finite(u.output_tokens), calls: finite(u.calls) };
+    const input = finite(u.input_tokens);
+    const write = finite(u.cache_write_input_tokens);
+    return { ...row, newInput: input !== null ? input + (write ?? 0) : null, cacheWrite: write, cacheRead: finite(u.cached_input_tokens), output: finite(u.output_tokens), calls: finite(u.calls) };
   }
   if (u.input_tokens !== undefined) {
     const input = finite(u.input_tokens);
@@ -157,7 +160,7 @@ const inclusiveNew = (input, cached) => (cached > input ? null : input - cached)
 // New input of each call of a resumed Codex seat (a call's own tokens, as the manifest stores them).
 export function perCallNewInput(calls, anthropic = false) {
   return calls.map((u) => {
-    if (anthropic) return finite(u?.input_tokens);
+    if (anthropic) return finite(u?.input_tokens) === null ? null : u.input_tokens + (finite(u?.cache_write_input_tokens) ?? 0);
     const input = finite(u?.input_tokens);
     const cached = finite(u?.cached_input_tokens);
     return input !== null && cached !== null ? inclusiveNew(input, cached) : null;
@@ -169,14 +172,24 @@ export const separateCache = (u, provider, model) => provider === 'anthropic' ||
   || u?.raw?.cache_creation_input_tokens !== undefined || u?.raw?.cache_read_input_tokens !== undefined || u?.raw?.tokens?.cache !== undefined;
 
 // A native agent's transcript does not record output tokens, so the table is a lower bound for those rows.
-export const costNote = (rows) => (rows.some((r) => r.output === null && r.calls > 0) ? 'Output is unknown for native agents (their transcript does not record it); their real cost is higher than shown.' : null);
+export const costNote = (rows) => {
+  const notes = [];
+  if (rows.some((r) => r.output === null && r.calls > 0)) notes.push('Output is unknown for native agents (their transcript does not record it); their real cost is higher than shown.');
+  // A call that reported no usage (rate-limited, failed) is left out of the sum, so the row is a lower bound.
+  for (const r of rows.filter((x) => x.callsWithoutUsage > 0)) notes.push(`${r.seat}: a lower bound; ${r.callsWithoutUsage} call(s) reported no usage and are not counted.`);
+  return notes.length > 0 ? notes.join(' ') : null;
+};
 // The manifest records the calls passed to it; a preflight session probe and an attempt that was rerun are not among them.
-export const COST_SCOPE = 'The cost covers the completed review calls; session probes and earlier failed attempts are not counted.';
+export const COST_SCOPE = 'New input is the input not read from the cache, for every seat (a Claude seat: its input plus the cache write; a Codex seat: its input minus the cached part). Calls are model calls, not tool calls. The cost covers the completed review calls in tokens; session probes and earlier failed attempts are not counted. No dollar figure is shown: no price table ships with the skill.';
 
 // The shell commands a seat tried and how many failed, as the manifest counted them; a row without a count is never guessed.
-const validCommands = (c) => (c && Number.isInteger(c.tried) && Number.isInteger(c.failed) && c.failed >= 0 && c.failed <= c.tried ? { tried: c.tried, failed: c.failed } : null);
+const validScripts = (c) => Number.isInteger(c.scripts) && Number.isInteger(c.scriptsFailed) && c.scriptsFailed >= 0 && c.scriptsFailed <= c.scripts && c.scripts > 0;
+const validCommands = (c) => (c && Number.isInteger(c.tried) && Number.isInteger(c.failed) && c.failed >= 0 && c.failed <= c.tried
+  ? { tried: c.tried, failed: c.failed, ...(validScripts(c) ? { scripts: c.scripts, scriptsFailed: c.scriptsFailed } : {}) } : null);
 const withCommands = (row, c) => (validCommands(c) ? { ...row, commands: validCommands(c) } : row);
-export const commandsCell = (r) => (r.commands ? `${r.commands.tried} tried, ${r.commands.failed} failed` : 'unknown');
+export const commandsCell = (r) => (r.commands
+  ? `${r.commands.tried} tried, ${r.commands.failed} failed${r.commands.scripts ? `; ${r.commands.scripts} tool scripts, ${r.commands.scriptsFailed} failed` : ''}`
+  : 'unknown');
 
 export function costTableLines(rows) {
   const fmt = (n) => compactTokens(n);
@@ -246,13 +259,10 @@ function claimHeadingTags(seatText, known = []) {
   return out;
 }
 
-function checksPerformed(seatText) {
-  const lines = unfenced(seatText).split('\n');
-  const start = lines.findIndex((l) => /^##\s+Checks performed\s*$/i.test(l));
-  if (start < 0) return '';
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex((l) => /^##\s/.test(l));
-  return (end < 0 ? rest : rest.slice(0, end)).join('\n');
+// The seat's checks: its "## Checks performed" section, or its "## No findings" section when it has no claim, as the one
+// format reader finds it (unfenced lines; empty when it has neither).
+export function checksPerformed(seatText, role) {
+  return parseSeatFile(seatText, role ?? (/^##\s+([AB])\d+\b/m.exec(unfenced(seatText))?.[1] ?? 'A')).sectionLines.join('\n');
 }
 
 export function criteriaGroup(tag) {
@@ -419,7 +429,7 @@ const groupsOf = (tag, hypothesis, ticketMap) => {
   return [group];
 };
 
-export function buildCriteria(criteria, findings, headingTags, checksBySeat, ticketMap = new Map()) {
+export function buildCriteria(criteria, findings, headingTags, checksBySeat, ticketMap = new Map(), { fixWordedFlips = true } = {}) {
   if (criteria.size === 0) return null;
   const tagToFindings = new Map();
   const tagToRefuted = new Map();
@@ -461,17 +471,24 @@ export function buildCriteria(criteria, findings, headingTags, checksBySeat, tic
     // Failure and "could not" words only count on lines with no verdict word: an explicit verdict is what the seat decided.
     const failedSeats = status === 'clean' && !hypothesis ? named.filter((seat) => seatVerdict[seat] === 'NOT MET' || (seatVerdict[seat] === null && linesOf(seat).some(failedCheck))) : [];
     const doubt = named.filter((seat) => seatVerdict[seat] === null && linesOf(seat).some((l) => INCOMPLETE_CHECK_RE.test(l)));
-    const outcomes = hypothesis ? Object.fromEntries(named.map((seat) => [seat, seatVerdict[seat]]).filter(([, o]) => o)) : {};
+    // A 1.1.0 re-review packet worded each hypothesis as a fix ("Confirm it is fixed") and never defined CONFIRMED, so there it
+    // meant fixed: its outcomes are flipped and REFUTED keeps one meaning in every report, the suspected defect is gone.
+    const fixWorded = fixWordedFlips && hypothesis && /\bconfirm it is fixed\b/i.test(text);
+    const flip = (o) => (fixWorded ? ({ CONFIRMED: 'REFUTED', REFUTED: 'CONFIRMED' }[o] ?? o) : o);
+    const outcomes = hypothesis ? Object.fromEntries(named.map((seat) => [seat, flip(seatVerdict[seat])]).filter(([, o]) => o)) : {};
     const seatMet = hypothesis ? null : worstVerdict(Object.values(seatVerdict).filter(Boolean));
     const met = !hypothesis && found.length > 0 && (seatMet === null || seatMet === 'MET') ? 'PARTIAL' : seatMet;
     const values = Object.values(outcomes);
+    // A hypothesis names a suspected defect: a standing finding tagged to it confirms it, unless a seat found it only partly
+    // there (the finding may prove just the part still broken).
     const verdict = !hypothesis || status === 'not-verified' ? null
+      : found.length > 0 ? (values.some((o) => o === 'PARTLY' || o === 'MIXED') ? 'partly' : 'confirmed')
       : values.some((o) => o === 'REFUTED') ? (values.every((o) => o === 'REFUTED') ? 'refuted' : 'split')
         : values.some((o) => o === 'PARTLY' || o === 'MIXED') ? 'partly'
           : values.length > 0 && values.length === seats.length ? 'confirmed' : 'unparsed';
     const reasonLine = hypothesis || found.length > 0 ? null : named.flatMap((seat) => linesOf(seat)).find((l) => ['NOT MET', 'PARTIAL'].includes(parseVerdict(l, tag)));
     const reason = reasonLine ? reasonOf(reasonLine, tag) : '';
-    return { refuted, doubt, failedSeats, outcomes, verdict, met, reason, tag, text, kind: hypothesis ? 'hypothesis' : 'criterion', group: groupsOf(tag, hypothesis, ticketMap)[0], groups: groupsOf(tag, hypothesis, ticketMap), status, findings: found, seats };
+    return { fixWorded, refuted, doubt, failedSeats, outcomes, verdict, met, reason, tag, text, kind: hypothesis ? 'hypothesis' : 'criterion', group: groupsOf(tag, hypothesis, ticketMap)[0], groups: groupsOf(tag, hypothesis, ticketMap), status, findings: found, seats };
   });
   const stats = (list) => ({ total: list.length, issue: list.filter((r) => r.status === 'issue').length, clean: list.filter((r) => r.status === 'clean').length, unmet: list.filter(isUnmet).length, doubtful: list.filter((r) => r.status === 'clean' && r.doubt.length > 0).length, failedClean: list.filter((r) => r.failedSeats.length > 0).length, notVerified: list.filter((r) => r.status === 'not-verified').length });
   const critRows = rows.filter((r) => r.kind === 'criterion');
@@ -510,14 +527,150 @@ export function notesSections(text) {
   return Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, v.join('\n').trim()]));
 }
 
-export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {} }) {
+// "A1: text" lines from translate joined into one; with skipNone, "A1: none found ..." entries are left out.
+function seatLines(list, skipNone = false) {
+  if (!Array.isArray(list)) return '';
+  return list.map((s) => String(s).replace(/\s+/g, ' ').trim())
+    .filter((s) => s !== '' && !(skipNone && /^(?:[AB]\d+:\s*)?none\b/i.test(s))).join(' | ');
+}
+
+// file:line in an evidence entry: an extension that starts with a letter (so not an IP, port or version), not inside a URL.
+const LOCATION_RE = /(?:[A-Za-z]:[\\/])?(?:[\w.-]+[\\/])*[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,5}:\d+/g;
+export function evidenceLocations(entries) {
+  const out = [];
+  for (const e of Array.isArray(entries) ? entries : []) {
+    const text = String(e);
+    for (const m of text.matchAll(LOCATION_RE)) {
+      // The word the match ends: a URL ("http://host:8080/x.js:5") is never a file:line.
+      const word = text.slice(0, m.index).split(/\s/).pop();
+      if (!word.includes('://') && !word.endsWith('//')) out.push(m[0]);
+    }
+  }
+  return out;
+}
+
+// A path from a diff header: git quotes names with unusual characters as "a/dir/caf\303\251.md"; plain diff -u adds a tab
+// and a time stamp.
+export function diffPath(raw) {
+  let text = raw.trim().replace(/\t.*$/, '');
+  if (text.startsWith('"') && text.endsWith('"')) {
+    const bytes = [];
+    const body = text.slice(1, -1);
+    for (let i = 0; i < body.length; i += 1) {
+      const octal = /^\\([0-7]{3})/.exec(body.slice(i));
+      if (octal) {
+        bytes.push(parseInt(octal[1], 8));
+        i += 3;
+      } else if (body[i] === '\\' && 'tnr"\\'.includes(body[i + 1])) {
+        bytes.push({ t: 9, n: 10, r: 13, '"': 34, '\\': 92 }[body[i + 1]]);
+        i += 1;
+      } else bytes.push(...Buffer.from(body[i], 'utf8'));
+    }
+    text = Buffer.from(bytes).toString('utf8');
+  }
+  return text.replace(/^[ab]\//, '');
+}
+
+// Per file of a unified diff: the new-side lines it added and the new-side span of each hunk. Hunk headers say how many lines
+// a hunk holds, so an added line that starts with "++" is never a file header. A deleted file is kept under its old name.
+export function diffHunks(text) {
+  const files = new Map();
+  let cur = null;
+  let line = 0;
+  let oldLeft = 0;
+  let newLeft = 0;
+  let oldPath = null;
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (raw.startsWith('+')) { cur?.added.add(line); line += 1; newLeft -= 1; continue; }
+      if (raw.startsWith('-')) { oldLeft -= 1; continue; }
+      if (raw.startsWith(' ') || raw === '') { line += 1; oldLeft -= 1; newLeft -= 1; continue; }
+      if (raw.startsWith('\\')) continue;
+    }
+    if (raw.startsWith('--- ')) { oldPath = diffPath(raw.slice(4)); continue; }
+    if (raw.startsWith('+++ ')) {
+      const p = diffPath(raw.slice(4));
+      const name = (p === '/dev/null' ? oldPath : p)?.replace(/\\/g, '/');
+      cur = name && name !== '/dev/null' ? files.get(name) ?? { added: new Set(), spans: [] } : null;
+      if (cur) files.set(name, cur);
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(raw);
+    if (hunk && cur) {
+      oldLeft = Number(hunk[1] ?? 1);
+      line = Number(hunk[2]);
+      newLeft = Number(hunk[3] ?? 1);
+      if (newLeft > 0) cur.spans.push([line, line + newLeft - 1]);
+    }
+  }
+  return files;
+}
+
+const NEAR_LINES = 20;
+const WHERE_RANK = ['added lines', 'near the change', 'changed file', 'unknown', 'outside the change'];
+const tagIn = (entry, n) => (entry.added.has(n) ? 'added lines'
+  : entry.spans.some(([a, b]) => n >= a - NEAR_LINES && n <= b + NEAR_LINES) ? 'near the change' : 'changed file');
+// Where a finding's evidence locations sit in the change: the best over all its file:line locations and all diffs (one Map
+// per diff), "unknown" without a location. A path matches at a "/" boundary. A file name alone (bare, or under a snapshot
+// folder such as REVIEW/head/) is a guess marked byName: the tag its diff files agree on, else "unknown".
+export function whereInChange(evidence, hunkMaps) {
+  const fold = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const maps = hunkMaps instanceof Map ? [hunkMaps] : hunkMaps;
+  let best = null;
+  for (const loc of evidenceLocations(evidence)) {
+    const m = /^(.*):(\d+)$/.exec(loc.replace(/\\/g, '/'));
+    const [file, n] = [fold(m[1].replace(/^\.\//, '')), Number(m[2])];
+    const base = file.split('/').pop();
+    for (const hunks of maps) {
+      const paths = [...hunks.keys()];
+      const byPath = paths.filter((p) => { const fp = fold(p); return fp === file || (file.includes('/') && ((fp.includes('/') && file.endsWith(`/${fp}`)) || fp.endsWith(`/${file}`))); });
+      const sameName = byPath.length > 0 ? [] : paths.filter((p) => fold(p).split('/').pop() === base);
+      // A root diff file alone never claims a cited file in a folder.
+      const named = file.includes('/') && sameName.every((p) => !p.includes('/')) ? [] : sameName;
+      // The cited path itself, or the longest diff path it ends with, is a real match; a partial path (src/x.py) that two
+      // diff files end with (a/src/x.py, b/src/x.py) is a guess like a shared file name.
+      const whole = byPath.filter((p) => { const fp = fold(p); return fp === file || file.endsWith(`/${fp}`); });
+      const guesses = whole.length > 0 ? [] : byPath.length > 1 ? byPath : named;
+      let found;
+      if (whole.length > 0 || byPath.length === 1) found = { tag: tagIn(hunks.get((whole.length > 0 ? whole : byPath).reduce((a, b) => (b.length > a.length ? b : a))), n), at: loc };
+      else if (guesses.length === 0) found = { tag: 'outside the change', at: loc };
+      else {
+        const tags = guesses.map((p) => tagIn(hunks.get(p), n));
+        found = new Set(tags).size === 1
+          ? { tag: tags[0], at: `${loc}, matched by file name to ${guesses.join(', ')}`, byName: true }
+          : { tag: 'unknown', at: `${loc}, file name shared by ${guesses.length} changed files`, byName: true, addedInOne: tags.includes('added lines') };
+      }
+      // A path match outranks a file-name guess of the same tag.
+      if (best === null || WHERE_RANK.indexOf(found.tag) < WHERE_RANK.indexOf(best.tag) || (found.tag === best.tag && best.byName && !found.byName)) best = found;
+    }
+  }
+  return best ?? { tag: 'unknown', at: null };
+}
+
+// Wall time from the first brief to findings.json, next to the orchestrator's own working time from its transcript.
+function runTime(timing, m) {
+  const span = timing?.start && timing?.end ? Date.parse(timing.end) - Date.parse(timing.start) : NaN;
+  const orchestrator = Number(m.seat_usage?.orchestrator?.duration_ms);
+  return { wallMs: Number.isFinite(span) && span >= 0 ? span : null, orchestratorMs: Number.isFinite(orchestrator) && orchestrator > 0 ? orchestrator : null };
+}
+
+const minutes = (ms) => (ms === null ? 'unknown' : ms < 60000 ? 'under 1 min' : `${Math.round(ms / 60000)} min`);
+export const timeText = (t) => `${minutes(t.wallMs)} wall (first brief to findings.json; packet writing not counted); orchestrator working time ${minutes(t.orchestratorMs)}`;
+
+export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {}, timing = null, changeDiffs = [], briefText = null, staleManifest = false }) {
   if (!findingsDoc || !Array.isArray(findingsDoc.findings)) throw new ReportError('findings.json has no "findings" array');
+  const hunks = changeDiffs.map((d) => diffHunks(d.text));
   const findings = findingsDoc.findings.map((f) => ({
+    where: changeDiffs.length > 0 ? whereInChange(f.evidence, hunks) : null,
     id: f.id,
     severity: finalSeverity(f) || 'UNKNOWN',
     claimedSeverity: f.severity_audited && f.severity && f.severity_audited !== f.severity ? f.severity : null,
     fix: String(f.recommended_fix ?? f.suggested_fix ?? '').replace(/\s+/g, ' ').trim(),
     severityReason: String(f.auditor_check?.severity_reason ?? '').replace(/\s+/g, ' ').trim(),
+    trigger: seatLines(f.trigger),
+    sameShape: seatLines(f.same_shape, true),
+    // The seats' own "Pre-existing:" words ("A1: yes"); any "no" outweighs a "yes".
+    seatPreExisting: Array.isArray(f.pre_existing) && f.pre_existing.some((l) => /:\s*yes$/i.test(String(l))) && !f.pre_existing.some((l) => /:\s*no$/i.test(String(l))),
     state: f.final_state ?? 'unknown',
     title: shortTitle(f),
     origins: f.origins ?? [],
@@ -527,15 +680,26 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
     blocker: isBlocker(f),
   }));
   findings.sort((a, b) => (SEV_ORDER.indexOf(a.severity) + 1 || 9) - (SEV_ORDER.indexOf(b.severity) + 1 || 9) || idNumber(a.id) - idNumber(b.id));
-  const counts = Object.fromEntries(SEV_ORDER.map((s) => [SEV_KEY[s], findings.filter((f) => f.severity === s).length]));
-  counts.other = findings.filter((f) => !SEV_ORDER.includes(f.severity)).length;
   const states = {};
   for (const f of findings) states[f.state] = (states[f.state] ?? 0) + 1;
 
+  const notes = notesSections(notesText);
+  const statusById = findingStatus(notes['finding status'] ?? '');
+  for (const f of findings) f.status = statusById.get(f.id) ?? null;
+  // A finding the author marked wrong (with a reason, when it is a blocker) is withdrawn: it leaves the blockers, the severity
+  // counts and the criteria, where it reads like a refuted claim.
+  const markedWrong = findings.filter(authorWithdrawn);
+  for (const f of markedWrong) Object.assign(f, { authorWithdrawn: true, blocker: false });
+  const withdrawnIds = new Set(markedWrong.map((f) => f.id));
+  const criteriaInput = findingsDoc.findings.map((f) => (withdrawnIds.has(f.id) ? { ...f, final_state: 'settled-refuted' } : f));
   const headingTags = new Map();
   for (const text of Object.values(seatTexts)) for (const [id, tags] of claimHeadingTags(text, [...packetCriteria(packetText).keys()])) headingTags.set(id, tags);
-  const checksBySeat = Object.fromEntries(Object.entries(seatTexts).map(([seat, text]) => [seat, checksPerformed(text)]));
-  const criteria = buildCriteria(packetCriteria(packetText), findingsDoc.findings, headingTags, checksBySeat, packetTicketMap(packetText));
+  const checksBySeat = Object.fromEntries(Object.entries(seatTexts).map(([seat, text]) => [seat, checksPerformed(text, seat)]));
+  // Seats whose brief or packet defines CONFIRMED (the defect exists) answered for the defect, whatever a line's wording; the
+  // run's seat brief decides when it is there, since a hand-written packet need not repeat the definition.
+  const defines = (text) => /CONFIRMED\s+\(the\s+(?:previous\s+)?defect\s+(?:is\s+still\s+there|it\s+names\s+exists)\)/.test(text);
+  const fixWordedFlips = briefText != null ? !defines(briefText) : !defines(packetText);
+  const criteria = buildCriteria(packetCriteria(packetText), criteriaInput, headingTags, checksBySeat, packetTicketMap(packetText), { fixWordedFlips });
   if (criteria) {
     const byId = new Map(findings.map((f) => [f.id, f]));
     for (const r of criteria.rows) r.findings = r.findings.filter((id) => byId.has(id));
@@ -544,7 +708,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
     for (const t of criteria.tickets) {
       const ids = new Set((t.findings ?? []).filter((id) => byId.has(id)));
       for (const f of findingsDoc.findings) {
-        if (!byId.has(f.id) || f.final_state === 'settled-refuted' || f.final_state === 'dropped-speculative') continue;
+        if (!byId.has(f.id) || withdrawnIds.has(f.id) || f.final_state === 'settled-refuted' || f.final_state === 'dropped-speculative') continue;
         const tags = (f.origins ?? []).flatMap((origin) => headingTags.get(origin) ?? []);
         if (tags.some((tag) => groupsOf(tag, false, ticketMap).includes(t.id))) ids.add(f.id);
       }
@@ -553,11 +717,22 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   }
 
   const m = manifest ?? {};
-  const status = m.status === 'completed' ? 'COMPLETE' : 'INCOMPLETE';
+  // An audited run whose manifest is not built yet, or was built before today's findings, is not final, not incomplete: the manifest step decides.
+  const notFinal = (manifest == null || staleManifest) && findingsDoc.synthesized !== true;
+  const status = notFinal ? 'NOT FINAL' : m.status === 'completed' && findingsDoc.synthesized !== true ? 'COMPLETE' : 'INCOMPLETE';
   const zeroClaims = findingsDoc.zero_claims === true;
   const depth = zeroClaims ? 'not run (no claims)' : (findingsDoc.audit_depth ?? m.exchange?.audit_depth ?? null);
   const verifiers = m.falsification?.verifiers_run;
+  // Observed counts only, from each finding's origins; nothing is estimated from them.
+  const overlap = { aOnly: 0, bOnly: 0, both: 0 };
+  for (const f of Array.isArray(findingsDoc.findings) ? findingsDoc.findings : []) {
+    const seats = new Set((Array.isArray(f.origins) ? f.origins : []).map((id) => String(id)[0]).filter((s) => s === 'A' || s === 'B'));
+    if (seats.size === 2) overlap.both++;
+    else if (seats.has('A')) overlap.aOnly++;
+    else if (seats.has('B')) overlap.bOnly++;
+  }
   const coverage = {
+    overlap: overlap.aOnly + overlap.bOnly + overlap.both > 0 ? overlap : null,
     auditDepth: depth,
     lightNote: !zeroClaims && depth === 'light' ? 'agreed claims were not re-checked by the auditor' : null,
     reviewerPasses: Array.isArray(m.reviewers) ? m.reviewers.length : null,
@@ -568,8 +743,38 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   };
 
   const caveats = [];
-  if (zeroClaims) caveats.push("Neither seat raised a claim, so no auditor ran and there is no scorecard; the criteria below come from the seats' own checks.");
+  if (findingsDoc.phase1_only === true) caveats.push("phase3/findings.json is missing, so the run stopped before the audit: these are each seat's own Phase 1 claims under the seat's claim IDs, neither cross-examined nor checked by the auditor, and one defect may appear once per seat. Read this report as incomplete.");
+  if (zeroClaims && findingsDoc.synthesized === true) caveats.push("Neither seat raised a claim, so no auditor ran; but phase3/findings.json is missing, so the zero-claim step that checks the target against the Phase 1 snapshot did not run (run review-run audit --prepare): read this report as incomplete. The criteria below come from the seats' own checks.");
+  else if (zeroClaims) caveats.push("Neither seat raised a claim, so no auditor ran and there is no scorecard (the target was still checked against the Phase 1 snapshot); the criteria below come from the seats' own checks.");
+  if (notFinal && !staleManifest) caveats.push('manifest.json is not built yet, so this report is not final (status, pass counts and cost are unknown): run review-run manifest, then the report again.');
   if (status === 'INCOMPLETE') caveats.push(`The review is incomplete (manifest status "${m.status ?? 'missing'}"). Do not read it as a completed review.`);
+  if (m.seat_blind_lines && typeof m.seat_blind_lines === 'object') {
+    for (const [seat, lines] of Object.entries(m.seat_blind_lines)) {
+      if (Array.isArray(lines) && lines.length > 0) caveats.push(`Seat ${seat} may have reviewed blind: it reported a blocked read or command ("${String(lines[0]).slice(0, 140)}"). A short or clean result from it is weaker than it looks.`);
+    }
+  }
+  for (const seat of Array.isArray(m.blocked_no_findings) ? m.blocked_no_findings : []) {
+    caveats.push(`Seat ${seat} wrote "No findings" but says it was blocked, so its pass is not a clean result and this is not a two-seat review.`);
+  }
+  for (const [seat, reasons] of Object.entries(m.format_refused && typeof m.format_refused === 'object' ? m.format_refused : {})) {
+    caveats.push(`Seat ${seat}'s findings file was refused by the format check again after its one rewrite (${String(Array.isArray(reasons) ? reasons[0] : reasons).slice(0, 140)}), so this is not a two-seat review.`);
+  }
+  for (const [seat, reason] of Object.entries(m.seat_format_notes && typeof m.seat_format_notes === 'object' ? m.seat_format_notes : {})) {
+    caveats.push(`Seat ${seat}'s findings file does not follow the current seat file format (${String(reason).slice(0, 140)}); it was written before that rule, so its Blocked: line may not have been read.`);
+  }
+  if (Array.isArray(m.stop_incomplete) && m.stop_incomplete.length > 0) caveats.push(`Stopped after its answer, but its output stayed open: ${m.stop_incomplete.join(', ')}. A process it started may still be running; check the process list.`);
+  if (Array.isArray(m.drift_accepted) && m.drift_accepted.length > 0) {
+    const files = [...new Set(m.drift_accepted.flatMap((d) => (Array.isArray(d?.files) ? d.files : [])))];
+    const named = files.length > 0 ? files.slice(0, 5).join(', ') + (files.length > 5 ? ` and ${files.length - 5} more` : '') : 'files not listed';
+    // phase1 and phase2 can accept drift too: then a seat may have read the changed files, not only the auditor.
+    const seatsSaw = m.drift_accepted.some((d) => d?.step === 'phase1' || d?.step === 'phase2');
+    caveats.push(seatsSaw
+      ? `The target changed while the seats were reviewing it and the review went on with --accept-drift (${named}); a seat or the auditor may have read the changed version of those files.`
+      : `The target changed after Phase 1 and the audit went on with --accept-drift (${named}); the auditor reads the current target, so its checks of those files may describe the changed version.`);
+  }
+  const rulesCopy = m.review_rules?.mode === 'worktree' ? 'working-tree' : m.review_rules?.base_unknown ? 'branch-tip (HEAD)' : 'merge-base';
+  if (m.review_rules?.changed_by_target === true) caveats.push(`The review rules (REVIEW.md) differ from the committed copy (the working tree or the branch changed them, possibly another session); the seats used the ${rulesCopy} copy.`);
+  else if (m.review_rules?.base_unknown === true) caveats.push('The review rules (REVIEW.md) were read at the branch tip: with no default branch to compare with, a branch edit to them could not be detected.');
   if (m.source_write && (Array.isArray(m.source_write) ? m.source_write.length > 0 : Object.keys(m.source_write).length > 0)) caveats.push('A write to the reviewed source was recorded; see manifest source_write.');
   for (const row of Array.isArray(m.support) ? m.support : []) {
     if (row.status && row.status !== 'supported') caveats.push(`Seat ${row.role} runs on a ${row.status} route (${row.runtime}, ${row.transport}).`);
@@ -584,8 +789,18 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
     caveats.push(`${one ? 'Criterion' : 'Criteria'} ${failing.map((r) => `${r.tag} (seat ${r.failedSeats.join(', ')})`).join(', ')}: the seat wrote NOT MET or reported a failing check, but no finding is tagged to ${one ? 'it, so it is not a clean result' : 'them, so they are not clean results'}. Put the criterion tag in the claim heading.`);
   }
   for (const t of criteria?.tickets ?? []) {
-    if (new Set(Object.values(t.seats)).size > 1) caveats.push(`Ticket ${t.id}: the seats disagree (${Object.entries(t.seats).map(([seat, v]) => `${seat} ${v}`).join(', ')}); the exchange did not reconcile it, so read both seat files before you act.`);
+    if (new Set(Object.values(t.seats)).size <= 1) continue;
+    const split = `Ticket ${t.id}: the seats disagree (${Object.entries(t.seats).map(([seat, v]) => `${seat} ${v}`).join(', ')})`;
+    // A NO GO that rests on a finding the auditor confirmed is settled by that finding, not by either seat's word.
+    const confirmed = (t.findings ?? []).filter((id) => findings.some((f) => f.id === id && f.auditorCheck === 'CONFIRMED' && !WITHDRAWN_STATES.includes(f.state)));
+    caveats.push(t.verdict === 'NO GO' && confirmed.length > 0
+      ? `${split}; the auditor confirmed ${confirmed.join(' ')}, so the ticket stays NO GO until ${confirmed.length === 1 ? 'it is' : 'they are'} fixed.`
+      : `${split}; the exchange did not reconcile it, so read both seat files before you act.`);
   }
+  const splitHyp = (criteria?.rows ?? []).filter((r) => r.kind === 'hypothesis' && r.verdict === 'split').map((r) => r.tag);
+  if (splitHyp.length > 0) caveats.push(`${splitHyp.join(', ')}: the seats disagree; the auditor rules on findings, not hypotheses, so no one decided between them: read both seats' lines for ${splitHyp.length === 1 ? 'it' : 'them'}.`);
+  const fixWorded = (criteria?.rows ?? []).filter((r) => r.fixWorded && r.status !== 'not-verified').map((r) => r.tag);
+  if (fixWorded.length > 0) caveats.push(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a run whose seats were not told what CONFIRMED means (a 1.1.0 run), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`);
   if (criteria?.silentSeats.length > 0) caveats.push(`${criteria.silentSeats.map((x) => `Seat ${x}`).join(', ')} wrote checks but named no criterion or hypothesis tag, so the criteria and hypotheses counts reflect only the seat(s) that did.`);
   // A CLI seat whose usage sits in seat_usage keeps its count on its reviewers[] or actors[] entry.
   const entryCommands = (role) => [...(m.reviewers ?? []), ...(m.actors ?? [])].find((x) => x?.role === role)?.commands;
@@ -603,14 +818,39 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   }
   const costRank = (seat) => (seat.startsWith('seat ') ? 0 : seat === 'auditor' ? 1 : seat === 'orchestrator' ? 3 : 2);
   cost.sort((a, b) => costRank(a.seat) - costRank(b.seat) || a.seat.localeCompare(b.seat));
-  const notes = notesSections(notesText);
-  const statusById = findingStatus(notes['finding status'] ?? '');
-  for (const f of findings) f.status = statusById.get(f.id) ?? null;
+  // "F3: wontfix: ..." looks like an outcome word but is not one; say so instead of reading it as free text silently.
+  for (const [id, status] of statusById) {
+    // A line that starts with a link ("https://dev.azure.com/...") is not a mistyped outcome word.
+    const word = /^\s*([a-z]+(?:-[a-z]+)*)\s*:(?!\/\/)/i.exec(status)?.[1];
+    if (word && !outcomeOf(status)) caveats.push(`${id}'s line in the report notes starts with "${word}:", which is not an outcome word (${OUTCOMES.join(', ')}); it is read as free text.`);
+  }
+  // A finding the author marked wrong (with a reason, when it is a blocker) is withdrawn: it leaves the blockers and the severity counts.
+  if (markedWrong.length > 0) caveats.push(`${markedWrong.map((f) => f.id).join(', ')} ${markedWrong.length === 1 ? 'is' : 'are'} marked wrong in the report notes, so ${markedWrong.length === 1 ? 'it is' : 'they are'} counted as withdrawn, not under ${markedWrong.length === 1 ? 'its' : 'their'} severity or as a blocker; the auditor's result is unchanged.`);
+  // A refuted or dropped finding is not counted under its severity; it is counted as withdrawn.
+  const standing = findings.filter((f) => f.state !== 'settled-refuted' && f.state !== 'dropped-speculative' && !f.authorWithdrawn);
+  const counts = Object.fromEntries(SEV_ORDER.map((s) => [SEV_KEY[s], standing.filter((f) => f.severity === s).length]));
+  counts.other = standing.filter((f) => !SEV_ORDER.includes(f.severity)).length;
+  counts.withdrawn = findings.length - standing.length;
+  const preMarked = changeDiffs.length > 0 ? [] : findings.filter((f) => noteKinds(f.status).pre);
+  const preOnAdded = changeDiffs.length > 0 ? findings.filter((f) => noteKinds(f.status).pre && f.where?.tag === 'added lines' && !f.where.byName) : [];
+  // A file-name guess never moves a finding, but a pre-existing note against one that points at added lines is worth a look.
+  const preOnGuess = changeDiffs.length > 0 ? findings.filter((f) => noteKinds(f.status).pre && f.where?.byName && (f.where.tag === 'added lines' || f.where.addedInOne)) : [];
+  for (const f of preOnGuess) caveats.push(`${f.id} is marked pre-existing in the report notes; its evidence matches lines the change added only by file name (${f.where.at}), so check it is not the same file.`);
+  if (preOnAdded.length > 0) caveats.push(`${preOnAdded.map((f) => f.id).join(', ')} ${preOnAdded.length === 1 ? 'is' : 'are'} marked pre-existing in the report notes, but ${preOnAdded.length === 1 ? 'its' : 'their'} evidence is on lines the change added, so ${preOnAdded.length === 1 ? 'it stays' : 'they stay'} where ${preOnAdded.length === 1 ? 'its' : 'their'} severity puts ${preOnAdded.length === 1 ? 'it' : 'them'}.`);
+  if (preMarked.length > 0) caveats.push(`${preMarked.map((f) => f.id).join(', ')} ${preMarked.length === 1 ? 'is' : 'are'} marked pre-existing in the report notes, but this report has no change diff (since.diff in the run folder, or --change-diff), so nothing tells what the change was; ${preMarked.length === 1 ? 'it stays' : 'they stay'} where ${preMarked.length === 1 ? 'its' : 'their'} severity puts ${preMarked.length === 1 ? 'it' : 'them'}.`);
+  for (const f of findings.filter((x) => x.blocker && outcomeOf(x.status)?.word === 'wrong' && outcomeOf(x.status).reason === '')) {
+    caveats.push(`${f.id} is marked wrong in the report notes with no reason, so it stays a blocker; write the reason after "wrong:" to withdraw it.`);
+  }
   const isFixed = (text) => noteKinds(text).fixed;
   if ([...statusById.values()].some(isFixed)) caveats.push(`Changes made after the reviewed snapshot were not re-reviewed (${[...statusById.entries()].filter(([, s]) => isFixed(s)).map(([id]) => id).join(', ')}); the findings describe the code the reviewers read.`);
   const blockers = findings.filter((f) => f.blocker);
+  // build-recheck-packet writes "Review round: N" under the packet title.
+  const round = Number(/^Review round:\s*(\d+)\s*$/m.exec(packetText)?.[1]) || null;
+  if (round >= 3) caveats.push(stepBackNote(round));
 
   return {
+    generator: generatorInfo(m.skill_version),
+    round,
     status,
     manifestStatus: m.status ?? null,
     mode: m.mode ?? null,
@@ -625,6 +865,8 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
     coverage,
     caveats,
     cost,
+    time: runTime(timing, m),
+    changeDiffs: changeDiffs.map((d) => ({ name: d.name, sha256: createHash('sha256').update(d.text).digest('hex') })),
     why: notes.why || null,
     decisions: notes['decisions needed'] || null,
     openItems: notes['open items'] || null,
@@ -691,9 +933,9 @@ export function renderText(report, { color = false } = {}) {
   const sevSummary = SEV_ORDER.map((s) => {
     const n = report.counts[SEV_KEY[s]];
     return n > 0 ? paint([SEV_COLOR[s], 'bold'], `${n} ${SEV_KEY[s]}`) : paint(['dim'], `${n} ${SEV_KEY[s]}`);
-  }).join('  ') + (report.counts.other > 0 ? `  ${paint(['yellow', 'bold'], `${report.counts.other} other`)}` : '');
+  }).join('  ') + (report.counts.other > 0 ? `  ${paint(['yellow', 'bold'], `${report.counts.other} other`)}` : '') + (report.counts.withdrawn > 0 ? `  ${paint(['dim'], `${report.counts.withdrawn} withdrawn`)}` : '');
   out.push(`${paint(statusStyle, `STATUS ${report.status}`)}   ${paint(report.blockers.length > 0 ? ['red', 'bold'] : ['green'], `Blockers: ${report.blockers.length}`)}   ${plural(report.total, 'finding')}: ${sevSummary}`);
-  const meta = [report.topology, report.mode && `${report.mode} mode`, report.runId && `run ${String(report.runId).slice(0, 8)}`].filter(Boolean).join(' | ');
+  const meta = [report.topology, report.mode && `${report.mode} mode`, report.round && `round ${report.round}`, report.runId && `run ${String(report.runId).slice(0, 8)}`].filter(Boolean).join(' | ');
   if (meta) out.push(paint(['dim'], meta));
   out.push(`Why: ${report.why ?? paint(['dim'], '(not written; add "## Why" to report-notes.md)')}`);
   out.push('');
@@ -703,6 +945,9 @@ export function renderText(report, { color = false } = {}) {
     for (const f of report.findings.filter((x) => x.blocker)) {
       out.push(`  ${paint([SEV_COLOR[f.severity] ?? 'dim', 'bold'], f.severity.padEnd(8))} ${String(f.id ?? '?').padEnd(4)} ${f.title}${f.status ? ` ${paint(['yellow'], `[${f.status}]`)}` : ''}`);
       out.push(paint(['dim'], `           ${f.state} | ${f.basis} ${f.evidenceStrength} | auditor ${f.auditorCheck}${f.claimedSeverity ? ` | claimed ${f.claimedSeverity}` : ''}`));
+      if (f.where) out.push(`           Where: ${f.where.tag}${f.where.at ? ` (${f.where.at})` : ''}`);
+      if (f.trigger) out.push(`           Trigger: ${f.trigger}`);
+      if (f.sameShape) out.push(`           Same shape: ${f.sameShape}`);
     }
     out.push('');
   }
@@ -722,7 +967,9 @@ export function renderText(report, { color = false } = {}) {
     const split = criteriaSplit(c.rows.filter((r) => r.kind === 'criterion'));
     const stat = (st) => `${paint(['red'], `${st.issue} issue found`)} | ${st.unmet > 0 ? `${paint(['red', 'bold'], `${st.unmet} not met or partial (no finding)`)} | ` : ''}${paint(['green'], `${st.clean} no issue found${c.criteriaStats.doubtful > 0 ? ` (${c.criteriaStats.doubtful} where a seat said the check was incomplete)` : ''}`)} | ${paint(st.notVerified > 0 ? ['magenta', 'bold'] : ['dim'], `${st.notVerified} NOT VERIFIED`)}`;
     if (c.criteriaCount > 0) out.push(paint(['bold'], `CRITERIA (${c.criteriaCount})`) + `  ${stat(split)}`);
-    if (c.hypothesisCount > 0) out.push(paint(['bold'], `HYPOTHESES (${c.hypothesisCount})`) + `  ${paint(c.hypothesisStats.refuted > 0 ? ['red', 'bold'] : ['green'], hypothesisParts(c.hypothesisStats).join(' | '))}`);
+    // A confirmed, partly confirmed or split hypothesis is a defect that may exist; all refuted is the good outcome.
+    const hypBad = c.hypothesisStats.confirmed + c.hypothesisStats.partly + c.hypothesisStats.split > 0;
+    if (c.hypothesisCount > 0) out.push(paint(['bold'], `HYPOTHESES (${c.hypothesisCount})`) + `  ${paint(hypBad ? ['red', 'bold'] : ['green'], hypothesisParts(c.hypothesisStats).join(' | '))}`);
     if (c.silentSeats.length > 0) out.push(paint(['yellow'], `  ${c.silentSeats.map((x) => `Seat ${x}`).join(', ')} wrote checks but named no criterion or hypothesis tag, so ${c.silentSeats.length > 1 ? 'their' : 'its'} checks are not counted below.`));
     if (report.criteriaSource) out.push(paint(['dim'], `  Source: ${report.criteriaSource.replace(/\s+/g, ' ')}`));
     for (const [group, rows] of criteriaGroups(c)) {
@@ -731,7 +978,7 @@ export function renderText(report, { color = false } = {}) {
         : `  ${paint(['bold'], groupTitle(group))}: ${splitText(criteriaSplit(rows), ', ')}`);
       for (const r of rows) {
         const result = r.status === 'issue' ? paint(['red'], `issue found: ${r.findings.join(', ')}`)
-          : r.status === 'clean' ? paint(r.verdict === 'refuted' || r.verdict === 'split' || r.met === 'NOT MET' || r.failedSeats?.length > 0 ? ['red', 'bold'] : r.met === 'PARTIAL' ? ['yellow'] : ['green'], cleanLabel(r))
+          : r.status === 'clean' ? paint(['confirmed', 'partly', 'split'].includes(r.verdict) || r.met === 'NOT MET' || r.failedSeats?.length > 0 ? ['red', 'bold'] : r.met === 'PARTIAL' ? ['yellow'] : ['green'], cleanLabel(r))
             : paint(['magenta', 'bold'], `NOT VERIFIED (no seat named this tag${c.silentSeats.length > 0 ? `; ${c.silentSeats.map((x) => `seat ${x}`).join(', ')} named no tags` : ''})`);
         out.push(`    ${r.tag.padEnd(12)} ${result}  ${paint(['dim'], clip(r.text, 56))}`);
         if (sharedNote(r)) out.push(paint(['dim'], `                 (${sharedNote(r)})`));
@@ -749,7 +996,10 @@ export function renderText(report, { color = false } = {}) {
     cv.verifiersRun !== null && `falsification verifiers run: ${cv.verifiersRun}${cv.falsificationRequested === false ? ' (not requested)' : ''}`,
   ].filter(Boolean);
   out.push(`  Audit depth: ${cv.auditDepth ?? 'unknown'}${cv.lightNote ? ` (${cv.lightNote})` : ''}`);
+  if (cv.overlap) out.push(`  Raised by: ${overlapText(cv.overlap)}`);
   if (passes.length > 0) out.push(`  Passes: ${passes.join('; ')}`);
+  if (report.time) out.push(`  Time: ${timeText(report.time)}`);
+  if (report.changeDiffs?.length > 0) out.push(`  Where tags from: ${report.changeDiffs.map((d) => `${d.name} sha256 ${d.sha256.slice(0, 12)}`).join(', ')}`);
   out.push('');
 
   if (report.openItems) out.push(paint(['bold'], 'OPEN ITEMS (not findings)'), ...report.openItems.split('\n').map((l) => `  ${l}`), '');
@@ -764,6 +1014,7 @@ export function renderText(report, { color = false } = {}) {
   }
   const fileList = Object.values(report.files).filter(Boolean);
   if (fileList.length > 0) out.push(paint(['dim'], `FILES  ${fileList.join(' | ')}`));
+  out.push(paint(['dim'], generatorLine(report.generator ?? undefined)));
   return `${out.join('\n').replace(/\n+$/, '')}\n`;
 }
 
@@ -771,14 +1022,17 @@ const mdEsc = (text) => String(text ?? '').replace(/[\\`*_{}[\]<>|#]/g, '\\$&');
 const cell = (text) => mdEsc(text).replace(/\r?\n/g, ' ');
 
 export function renderMarkdown(report) {
-  const out = [`# Review report: ${report.status}`, '', `**Status:** ${report.status} | **Blockers:** ${report.blockers.length} | **Findings:** ${report.total} (${[...SEV_ORDER.map((s) => `${report.counts[SEV_KEY[s]]} ${SEV_KEY[s]}`), ...(report.counts.other > 0 ? [`${report.counts.other} other`] : [])].join(', ')})`, ''];
+  const out = [`# Review report: ${report.status}${report.round ? ` (round ${report.round})` : ''}`, '', `**Status:** ${report.status} | **Blockers:** ${report.blockers.length} | **Findings:** ${report.total} (${[...SEV_ORDER.map((s) => `${report.counts[SEV_KEY[s]]} ${SEV_KEY[s]}`), ...(report.counts.other > 0 ? [`${report.counts.other} other`] : []), ...(report.counts.withdrawn > 0 ? [`${report.counts.withdrawn} withdrawn`] : [])].join(', ')})`, ''];
   if (report.why) out.push(`**Why:** ${report.why}`, '');
   const listing = (title, items) => {
     if (items.length === 0) return;
     out.push(`## ${title}`, '');
     for (const f of items) {
       out.push(`- **${f.severity}** ${f.id}: ${mdEsc(f.title)} (${f.state}; ${f.basis} ${f.evidenceStrength}; auditor ${f.auditorCheck}${f.claimedSeverity ? `; claimed ${f.claimedSeverity}` : ''})${f.status ? ` **[${mdEsc(f.status)}]**` : ''}`);
+      if (f.where) out.push(`  Where: ${f.where.tag}${f.where.at ? ` (${mdEsc(f.where.at)})` : ''}`);
+      if (f.trigger) out.push(`  Trigger: ${mdEsc(f.trigger)}`);
       if (f.fix) out.push(`  Fix: ${mdEsc(f.fix)}`);
+      if (f.sameShape) out.push(`  Same shape: ${mdEsc(f.sameShape)}`);
     }
     out.push('');
   };
@@ -803,7 +1057,10 @@ export function renderMarkdown(report) {
   }
   const cv = report.coverage;
   out.push('## Coverage', '', `- Audit depth: ${cv.auditDepth ?? 'unknown'}${cv.lightNote ? ` (${cv.lightNote})` : ''}`);
+  if (cv.overlap) out.push(`- Raised by: ${overlapText(cv.overlap)}`);
   if (cv.reviewerPasses !== null) out.push(`- Reviewer passes: ${cv.reviewerPasses}; blind exchange: ${cv.blindExchange === null ? 'unknown' : cv.blindExchange ? 'yes' : 'no'}; fresh auditor: ${cv.freshAuditor ?? 'unknown'}; falsification verifiers run: ${cv.verifiersRun ?? 'unknown'}`);
+  if (report.time) out.push(`- Time: ${timeText(report.time)}`);
+  if (report.changeDiffs?.length > 0) out.push(`- Where tags (a hint from evidence file:line, never a grouping): ${report.changeDiffs.map((d) => `${mdEsc(d.name)} sha256 ${d.sha256.slice(0, 12)}`).join(', ')}`);
   out.push('');
   if (report.openItems) out.push('## Open items (not findings)', '', report.openItems, '');
   if (report.decisions) out.push('## Decisions needed', '', report.decisions, '');
@@ -818,6 +1075,7 @@ export function renderMarkdown(report) {
     for (const r of report.cost.filter((x) => x.perCall)) out.push('', `${r.seat} new input per call: ${r.perCall.map(compactTokens).join(', ')}`);
     out.push('');
   }
+  out.push('', `_${mdEsc(generatorLine(report.generator))}_`);
   return `${out.join('\n').replace(/\n+$/, '')}\n`;
 }
 
@@ -843,13 +1101,14 @@ table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;p
 pre{white-space:pre-wrap;margin:0;font:13px ui-monospace,Consolas,monospace}`;
 
 export function renderHtml(report) {
+  const gen = report.generator ?? generatorInfo();
   const chip = (sev) => `<span class="chip ${SEV_KEY[sev] ?? 'zero'}">${esc(sev)}</span>`;
   const row = (f) => `<div class="row">${chip(f.severity)}<span class="id">${esc(f.id)}</span><span>${esc(f.title)}${f.claimedSeverity ? ` <span class="meta">(claimed ${esc(f.claimedSeverity)})</span>` : ''}${f.status ? ` <span class="chip medium">${esc(f.status)}</span>` : ''}<br><span class="meta">${esc(f.state)} | ${esc(f.basis)} ${esc(f.evidenceStrength)} | auditor ${esc(f.auditorCheck)}</span></span></div>`;
-  const counts = SEV_ORDER.map((s) => { const n = report.counts[SEV_KEY[s]]; return `<div class="count ${n ? SEV_KEY[s] : 'zero'}"><b>${n}</b><span>${SEV_KEY[s]}</span></div>`; }).join('') + (report.counts.other > 0 ? `<div class="count medium"><b>${report.counts.other}</b><span>other</span></div>` : '');
+  const counts = SEV_ORDER.map((s) => { const n = report.counts[SEV_KEY[s]]; return `<div class="count ${n ? SEV_KEY[s] : 'zero'}"><b>${n}</b><span>${SEV_KEY[s]}</span></div>`; }).join('') + (report.counts.other > 0 ? `<div class="count medium"><b>${report.counts.other}</b><span>other</span></div>` : '') + (report.counts.withdrawn > 0 ? `<div class="count zero"><b>${report.counts.withdrawn}</b><span>withdrawn</span></div>` : '');
   const blockers = report.findings.filter((f) => f.blocker);
   const others = report.findings.filter((f) => !f.blocker);
   const parts = [
-    `<section><span class="status ${report.status.toLowerCase()}">${esc(report.status)}</span> <span class="meta">Blockers: ${report.blockers.length}</span><h1>${esc(report.why ?? 'Review report')}</h1><div class="counts">${counts}</div></section>`,
+    `<section><span class="status ${report.status === 'COMPLETE' ? 'complete' : 'incomplete'}">${esc(report.status)}</span> <span class="meta">Blockers: ${report.blockers.length}</span><h1>${esc(report.why ?? 'Review report')}</h1><div class="counts">${counts}</div></section>`,
   ];
   if (blockers.length) parts.push(`<section><h2>Fix or decide first</h2>${blockers.map(row).join('')}</section>`);
   if (others.length) parts.push(`<section><h2>Other findings</h2>${others.map(row).join('')}</section>`);
@@ -857,10 +1116,10 @@ export function renderHtml(report) {
     const c = report.criteria;
     const cs = criteriaSplit(c.rows.filter((r) => r.kind === 'criterion'));
     const pct = (n) => `${c.criteriaCount > 0 ? ((100 * n) / c.criteriaCount).toFixed(1) : '0.0'}%`;
-    parts.push(`<section><h2>Criteria (${c.criteriaCount}${c.hypothesisCount > 0 ? ` + ${c.hypothesisCount} hypotheses` : ''})</h2><div class="bar" role="img" aria-label="Criteria: ${splitText(cs, ', ')}"><i style="width:${pct(cs.issue)};background:var(--high)"></i>${cs.unmet > 0 ? `<i style="width:${pct(cs.unmet)};background:var(--med)"></i>` : ''}<i style="width:${pct(cs.clean)};background:var(--ok)"></i><i style="width:${pct(cs.notVerified)};background:repeating-linear-gradient(45deg,var(--nv) 0 5px,var(--nv-bg) 5px 10px)"></i></div>${c.silentSeats.length > 0 ? `<p class="meta">${esc(c.silentSeats.map((x) => `Seat ${x}`).join(', '))} wrote checks but named no criterion or hypothesis tag; their checks are not counted here.</p>` : ''}<p class="meta">Criteria: ${splitText(cs, ' | ')}${c.hypothesisCount > 0 ? ` &nbsp;|&nbsp; Hypotheses: ${esc(hypothesisParts(c.hypothesisStats).join(' | '))}` : ''}</p><table><thead><tr><th>Group</th><th>Criterion</th><th>Result</th><th>Text</th></tr></thead><tbody>${criteriaGroups(c).flatMap(([group, rows]) => rows.map((r) => [group, r])).map(([group, r]) => `<tr><td>${esc(groupTitle(group))}</td><td>${esc(r.tag)}</td><td>${r.status === 'issue' ? `<span class="chip high">Issue found</span> ${esc(r.findings.join(', '))}${sharedNote(r) ? ` <span class="meta">(${esc(sharedNote(r))})</span>` : ''}` : r.status === 'clean' ? `<span class="chip ${r.verdict === 'refuted' || r.met === 'NOT MET' || r.failedSeats?.length > 0 ? 'high' : r.met === 'PARTIAL' ? 'medium' : 'ok'}">${r.kind === 'hypothesis' ? (r.verdict === 'refuted' ? 'Refuted' : 'Checked') : (unmetWord(r) ?? 'No issue found')}</span> ${esc(r.kind === 'hypothesis' ? cleanLabel(r) : r.seats.join(', '))}${r.kind !== 'hypothesis' && r.refuted?.length ? ` <span class="meta">(claim refuted: ${esc(r.refuted.join(', '))})</span>` : ''}` : '<span class="chip nv">Not verified</span>'}${r.kind !== 'hypothesis' && r.status === 'clean' && r.doubt.length > 0 ? ` <span class="meta">(${esc(r.doubt.join(', '))} said the check was incomplete)</span>` : ''}</td><td>${esc(clip(r.text, 70))}</td></tr>`).join('')}</tbody></table></section>`);
+    parts.push(`<section><h2>Criteria (${c.criteriaCount}${c.hypothesisCount > 0 ? ` + ${c.hypothesisCount} hypotheses` : ''})</h2><div class="bar" role="img" aria-label="Criteria: ${splitText(cs, ', ')}"><i style="width:${pct(cs.issue)};background:var(--high)"></i>${cs.unmet > 0 ? `<i style="width:${pct(cs.unmet)};background:var(--med)"></i>` : ''}<i style="width:${pct(cs.clean)};background:var(--ok)"></i><i style="width:${pct(cs.notVerified)};background:repeating-linear-gradient(45deg,var(--nv) 0 5px,var(--nv-bg) 5px 10px)"></i></div>${c.silentSeats.length > 0 ? `<p class="meta">${esc(c.silentSeats.map((x) => `Seat ${x}`).join(', '))} wrote checks but named no criterion or hypothesis tag; their checks are not counted here.</p>` : ''}<p class="meta">Criteria: ${splitText(cs, ' | ')}${c.hypothesisCount > 0 ? ` &nbsp;|&nbsp; Hypotheses: ${esc(hypothesisParts(c.hypothesisStats).join(' | '))}` : ''}</p><table><thead><tr><th>Group</th><th>Criterion</th><th>Result</th><th>Text</th></tr></thead><tbody>${criteriaGroups(c).flatMap(([group, rows]) => rows.map((r) => [group, r])).map(([group, r]) => `<tr><td>${esc(groupTitle(group))}</td><td>${esc(r.tag)}</td><td>${r.status === 'issue' ? `<span class="chip high">Issue found</span> ${esc(r.findings.join(', '))}${sharedNote(r) ? ` <span class="meta">(${esc(sharedNote(r))})</span>` : ''}` : r.status === 'clean' ? `<span class="chip ${['confirmed', 'partly', 'split'].includes(r.verdict) || r.met === 'NOT MET' || r.failedSeats?.length > 0 ? 'high' : r.met === 'PARTIAL' ? 'medium' : 'ok'}">${r.kind === 'hypothesis' ? ({ refuted: 'Refuted', confirmed: 'Confirmed', partly: 'Partly confirmed', split: 'Seats disagree' }[r.verdict] ?? 'Checked') : (unmetWord(r) ?? 'No issue found')}</span> ${esc(r.kind === 'hypothesis' ? cleanLabel(r) : r.seats.join(', '))}${r.kind !== 'hypothesis' && r.refuted?.length ? ` <span class="meta">(claim refuted: ${esc(r.refuted.join(', '))})</span>` : ''}` : '<span class="chip nv">Not verified</span>'}${r.kind !== 'hypothesis' && r.status === 'clean' && r.doubt.length > 0 ? ` <span class="meta">(${esc(r.doubt.join(', '))} said the check was incomplete)</span>` : ''}</td><td>${esc(clip(r.text, 70))}</td></tr>`).join('')}</tbody></table></section>`);
   }
   const cv = report.coverage;
-  parts.push(`<section><h2>Coverage</h2><p>Audit depth: ${esc(cv.auditDepth ?? 'unknown')}${cv.lightNote ? ` (${esc(cv.lightNote)})` : ''}</p></section>`);
+  parts.push(`<section><h2>Coverage</h2><p>Audit depth: ${esc(cv.auditDepth ?? 'unknown')}${cv.lightNote ? ` (${esc(cv.lightNote)})` : ''}</p>${cv.overlap ? `<p>Raised by: ${esc(overlapText(cv.overlap))}</p>` : ''}</section>`);
   if (report.openItems) parts.push(`<section><h2>Open items (not findings)</h2><pre>${esc(report.openItems)}</pre></section>`);
   if (report.decisions) parts.push(`<section><h2>Decisions needed</h2><pre>${esc(report.decisions)}</pre></section>`);
   if (report.caveats.length) parts.push(`<section><h2>Caveats</h2><ul>${report.caveats.map((c) => `<li>${esc(c)}</li>`).join('')}</ul></section>`);
@@ -872,7 +1131,7 @@ export function renderHtml(report) {
     const calls = report.cost.filter((x) => x.perCall).map((r) => `<p class="meta">${esc(r.seat)} new input per call: ${esc(r.perCall.map(compactTokens).join(', '))}</p>`).join('');
     parts.push(`<section><h2>Cost (tokens)</h2><table><thead><tr><th>Seat</th><th>New input</th>${hasWrite ? '<th>Cache write</th>' : ''}<th>Cache read</th><th>Output</th><th>Calls</th>${hasCmds ? '<th>Commands</th>' : ''}</tr></thead><tbody>${rows}</tbody></table>${note}${calls}</section>`);
   }
-  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Review report</title><style>${HTML_CSS}</style></head><body><main>${parts.join('')}</main></body></html>\n`;
+  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Review report</title><style>${HTML_CSS}</style></head><body><main>${parts.join('')}<footer class="meta">${esc(generatorLine({ ...gen, url: '' }).replace(/: $/, ':'))} <a href="${esc(gen.url)}">${esc(gen.url)}</a></footer></main></body></html>\n`;
 }
 
 // ---- chat format: plain markdown that a chat window draws (quote, table, bars, a red/green diff block) ----
@@ -901,15 +1160,38 @@ export function noteKinds(note) {
 
 const clipTo = (text, n) => (text.length > n ? `${text.slice(0, Math.max(0, n - 3)).trimEnd()}...` : text);
 
+// The author's outcome is the status line's first word, alone or followed by ":", ";", ",", ".", " - " or "(" ("F2: wrong: the
+// cap is never reached"); "wrong value returned" or a word later in free text is not an outcome.
+export const OUTCOMES = ['fixed', 'wrong', 'intentional', 'not-worth-it', 'pre-existing', 'decided'];
+export function outcomeOf(note) {
+  const m = /^\s*([a-z]+(?:-[a-z]+)*)(?:\s*$|\s*[:;,.]\s*|\s+[-—–]\s+|\s*(?=\())(.*)$/i.exec(String(note ?? ''));
+  if (!m || !OUTCOMES.includes(m[1].toLowerCase())) return null;
+  return { word: m[1].toLowerCase(), reason: m[2].trim() };
+}
+
+// A "wrong" outcome withdraws a finding only with a reason when the finding is a blocker.
+const authorWithdrawn = (f) => {
+  const o = outcomeOf(f.status);
+  return f.authorWithdrawn === true || (o?.word === 'wrong' && (!f.blocker || o.reason !== ''));
+};
+
 // What the reader must do with each finding, from the final state and the audited severity alone.
 export function groupFindings(report) {
   const groups = { fixNow: [], decide: [], fixNext: [], canWait: [], withdrawn: [], fixed: [], preExisting: [] };
   for (const f of report.findings) {
     const kinds = noteKinds(f.status);
-    if (WITHDRAWN_STATES.includes(f.state)) groups.withdrawn.push(f);
+    const outcome = outcomeOf(f.status)?.word;
+    if (WITHDRAWN_STATES.includes(f.state) || authorWithdrawn(f)) groups.withdrawn.push(f);
     else if (kinds.fixed) groups.fixed.push(f);
-    else if (f.state === 'unresolved-high-stakes' || kinds.decide) groups.decide.push(f);
-    else if (kinds.pre) groups.preExisting.push(f);
+    else if (['intentional', 'not-worth-it', 'decided'].includes(outcome)) groups.canWait.push(f);
+    // An unresolved blocker is a decision, not a fix: the seats still disagree, and the report gives both positions.
+    else if (f.state === 'unresolved-high-stakes' || (String(f.state).startsWith('unresolved') && f.blocker) || kinds.decide) groups.decide.push(f);
+    // "Pre-existing" means "not from this change": a report with no change diff cannot tell, so the label groups nothing.
+    // Evidence on lines the change added is not pre-existing, whatever the notes say; a file-name guess does not overrule the notes.
+    else if (kinds.pre && report.changeDiffs?.length > 0 && !(f.where?.tag === 'added lines' && !f.where.byName)) groups.preExisting.push(f);
+    // The seats' own word counts only with no author note, never for a blocker (only the author moves those), and under the same
+    // added-lines rule as the notes.
+    else if (f.seatPreExisting && !String(f.status ?? '').trim() && !f.blocker && report.changeDiffs?.length > 0 && !(f.where?.tag === 'added lines' && !f.where.byName)) groups.preExisting.push(f);
     else if (kinds.wait) groups.canWait.push(f);
     else if (f.blocker) groups.fixNow.push(f);
     else if (f.severity === 'LOW') groups.canWait.push(f);
@@ -933,33 +1215,40 @@ function trafficLight(report, groups) {
     const head = `${mark} ${label.padEnd(LABEL_WIDTH)}${(f ? chatId(f) : '').padEnd(5)}${f && chatId(f).length >= 5 ? ' ' : ''}`;
     return `${head}${f ? clipTo(String(f.title ?? ''), CHAT_LINE - head.length - suffix.length) : ''}${suffix}`.trimEnd();
   };
+  // Every blocker and every open decision gets its own row: an unresolved HIGH finding sits under DECIDE.
   for (const [label, list] of [['FIX NOW', groups.fixNow], ['DECIDE', groups.decide]]) {
-    for (const f of list.slice(0, 5)) lines.push(row('-', label, f));
-    if (list.length > 5) lines.push(`- ${label.padEnd(LABEL_WIDTH)}(+${list.length - 5} more)`);
+    for (const f of list) lines.push(row('-', label, f));
   }
   for (const [label, list] of [['FIX NEXT', groups.fixNext], ['CAN WAIT', groups.canWait]]) {
     const rest = list.slice(1);
     if (list.length > 0) lines.push(row(' ', label, list[0], rest.length > 0 ? `  (+${rest.slice(0, 6).map(chatId).join(' ')}${rest.length > 6 ? ` and ${rest.length - 6} more` : ''})` : ''));
   }
   if (groups.preExisting.length > 0) lines.push(clipTo(`  ${'PRE-EXISTING'.padEnd(LABEL_WIDTH)}${groups.preExisting.length} not caused by this change: ${idList(groups.preExisting, 8)}`, CHAT_LINE));
-  if (groups.withdrawn.length > 0) lines.push(clipTo(`  ${'WITHDRAWN'.padEnd(LABEL_WIDTH)}${groups.withdrawn.length} claim(s) refuted or dropped: ${idList(groups.withdrawn, 8)}`, CHAT_LINE));
-  const changed = report.findings.filter((f) => f.claimedSeverity && !WITHDRAWN_STATES.includes(f.state));
+  if (groups.withdrawn.length > 0) lines.push(clipTo(`  ${'WITHDRAWN'.padEnd(LABEL_WIDTH)}${groups.withdrawn.length} claim(s) refuted or dropped${groups.withdrawn.some(authorWithdrawn) ? ', or marked wrong by the author' : ''}: ${idList(groups.withdrawn, 8)}`, CHAT_LINE));
+  const changed = report.findings.filter((f) => f.claimedSeverity && !WITHDRAWN_STATES.includes(f.state) && !f.authorWithdrawn);
   for (const f of changed.slice(0, 3)) {
     lines.push(clipTo(`  ${'SEVERITY'.padEnd(LABEL_WIDTH)}${chatId(f)} ${f.claimedSeverity} to ${f.severity}${f.severityReason ? `: ${firstSentence(f.severityReason)}` : ''}`, CHAT_LINE));
   }
   if (changed.length > 3) lines.push(`  ${'SEVERITY'.padEnd(LABEL_WIDTH)}(+${changed.length - 3} more changed by the auditor)`);
-  const active = report.findings.filter((f) => !WITHDRAWN_STATES.includes(f.state));
+  const active = report.findings.filter((f) => !WITHDRAWN_STATES.includes(f.state) && !f.authorWithdrawn);
   const audited = report.coverage.freshAuditor && active.length > 0;
   if (audited) {
     const confirmed = active.filter((f) => f.auditorCheck === 'CONFIRMED').length;
-    const open = active.filter((f) => String(f.state).startsWith('unresolved')).length;
-    const tail = `${open > 0 ? `; ${open} unresolved (not settled)` : ''}${groups.withdrawn.length > 0 ? `; ${groups.withdrawn.length} withdrawn` : ''}`;
+    const openIds = active.filter((f) => String(f.state).startsWith('unresolved')).map(chatId);
+    const open = openIds.length;
+    // A light audit leaves agreed findings unchecked by design; saying so keeps "0 of N confirmed" from reading as a failure.
+    const unchecked = report.coverage.lightNote ? active.filter((f) => f.auditorCheck === 'NOT_CHECKED').length : 0;
+    // Unresolved and withdrawn first: the line is cut at 100 characters, and the light-audit note is the least needed.
+    const tail = `${open > 0 ? `; ${open} unresolved (${openIds.slice(0, 3).join(' ')}${open > 3 ? ' ...' : ''})` : ''}${groups.withdrawn.length > 0 ? `; ${groups.withdrawn.length} withdrawn` : ''}${unchecked > 0 ? `; ${unchecked} not re-checked (light audit)` : ''}`;
     lines.push(clipTo(confirmed === active.length && open === 0 ? `+ ${'VERIFIED'.padEnd(LABEL_WIDTH)}${active.length === 1 ? 'the finding is' : `all ${active.length} findings are`} confirmed by the auditor${tail}` : `  ${'CHECKED'.padEnd(LABEL_WIDTH)}${confirmed} of ${active.length} findings confirmed by the auditor${tail}`, CHAT_LINE));
   }
   // A seat with no command that succeeded only read the code, whatever it concluded; partial failures stay in the --all table.
   for (const r of report.cost.filter((x) => /^seat [AB]$/.test(x.seat) && x.commands && x.commands.failed === x.commands.tried)) {
     const what = r.commands.tried === 0 ? 'ran no commands' : `tried ${plural(r.commands.tried, 'command')}, ${r.commands.tried === 1 ? 'it' : 'all'} failed`;
-    lines.push(clipTo(`- ${'COMMANDS'.padEnd(LABEL_WIDTH)}${r.seat} ${what}; its result rests on reading alone`, CHAT_LINE));
+    // Scripts a tool server ran (node_repl) executed code, so the seat did more than read.
+    const ran = (r.commands.scripts ?? 0) - (r.commands.scriptsFailed ?? 0);
+    const rest = ran > 0 ? `; it ran ${plural(ran, 'tool script')} instead` : '; its result rests on reading alone';
+    lines.push(clipTo(`- ${'COMMANDS'.padEnd(LABEL_WIDTH)}${r.seat} ${what}${rest}`, CHAT_LINE));
   }
   const ticketRows = report.criteria?.tickets ?? [];
   for (const t of ticketRows.some((x) => x.verdict) ? ticketRows : []) {
@@ -973,7 +1262,7 @@ function trafficLight(report, groups) {
     lines.push(clipTo(`${flagLabel(r) === 'PARTIAL' ? ' ' : '-'} ${flagLabel(r).padEnd(LABEL_WIDTH)}${r.tag}${r.findings.length > 0 ? `  findings ${r.findings.join(' ')}` : '  no finding tagged'}`, CHAT_LINE));
     if (r.findings.length === 0 && r.reason) for (const part of wrapText(r.reason, CHAT_LINE - LABEL_WIDTH - 4, 5)) lines.push(`  ${''.padEnd(LABEL_WIDTH)}${part}`);
   }
-  if (flagged.length > 8) lines.push(`- ${'CRITERION'.padEnd(LABEL_WIDTH)}(+${flagged.length - 8} more)`);
+  if (flagged.length > 8) lines.push(clipTo(`- ${'MORE'.padEnd(LABEL_WIDTH)}${flagged.length - 8} more flagged: ${flagged.slice(8).map((r) => r.tag).join(' ')} (--all lists them)`, CHAT_LINE));
   const cs = report.criteria?.criteriaStats;
   if (report.criteria && report.criteria.criteriaCount > 0) {
     // Coverage, the verdict counts and the failing-check count on separate lines, so none is cut at 100 characters.
@@ -990,10 +1279,12 @@ function trafficLight(report, groups) {
     const refuted = hyp.filter((r) => word(r) === 'REFUTED');
     const split = hyp.filter((r) => r.verdict === 'split');
     if (split.length > 0) lines.push(clipTo(`- ${'SPLIT'.padEnd(LABEL_WIDTH)}${split.map((r) => `${r.tag} (${Object.entries(r.outcomes).map(([seat, o]) => `${seat} ${outcomeWord[o] ?? o}`).join(', ')})`).join('; ')}`, CHAT_LINE));
-    if (refuted.length > 0) lines.push(clipTo(`- ${'REFUTED'.padEnd(LABEL_WIDTH)}${refuted.map((r) => r.tag).join(' ')}`, CHAT_LINE));
-    const others = hyp.filter((r) => word(r) !== 'REFUTED' && word(r) !== 'seats disagree');
-    const confirmed = others.filter((r) => word(r) === 'confirmed').length;
-    const parts = [...others.filter((r) => word(r) !== 'confirmed').map((r) => `${r.tag} ${word(r)}`), ...(confirmed > 0 ? [`${confirmed} confirmed`] : [])];
+    // A hypothesis names a suspected defect: CONFIRMED (it exists) is the red line, REFUTED (it does not) is good news.
+    const confirmedRows = hyp.filter((r) => word(r) === 'confirmed');
+    if (confirmedRows.length > 0) lines.push(clipTo(`- ${'CONFIRMED'.padEnd(LABEL_WIDTH)}${confirmedRows.map((r) => r.tag).join(' ')}`, CHAT_LINE));
+    if (refuted.length > 0) lines.push(clipTo(`${refuted.length === hyp.length ? '+' : ' '} ${'REFUTED'.padEnd(LABEL_WIDTH)}${refuted.map((r) => r.tag).join(' ')}`, CHAT_LINE));
+    const others = hyp.filter((r) => word(r) !== 'REFUTED' && word(r) !== 'seats disagree' && word(r) !== 'confirmed');
+    const parts = others.map((r) => `${r.tag} ${word(r)}`);
     if (parts.length > 0) lines.push(clipTo(`  ${'HYPOTHESES'.padEnd(LABEL_WIDTH)}${parts.join(', ')}`, CHAT_LINE));
     if (hyp.some((r) => word(r) === 'outcome not parsed')) lines.push(`  ${''.padEnd(LABEL_WIDTH)}fix: end its Checks performed line with CONFIRMED, REFUTED or PARTLY CONFIRMED`);
   }
@@ -1006,8 +1297,11 @@ export function renderChat(report, { all = false } = {}) {
   const blockers = report.blockers.length;
   const moved = report.findings.filter((f) => f.blocker && !groups.fixNow.includes(f) && !groups.decide.includes(f));
   const ids = (list) => `${list.slice(0, 3).map(chatId).join(', ')}${list.length > 3 ? ', ...' : ''}`;
-  const blockParts = [...(groups.fixNow.length > 0 ? [`fix ${ids(groups.fixNow)} first`] : []), ...(moved.length > 0 ? [`${ids(moved)} marked in the report notes`] : [])];
-  const head = report.status === 'COMPLETE' ? 'REVIEW COMPLETE' : 'REVIEW INCOMPLETE';
+  // A blocker the notes moved is named with the group it went to, so the banner agrees with the table (it is not "fix now").
+  const movedTo = (f) => [['pre-existing', groups.preExisting], ['fixed', groups.fixed], ['can wait', groups.canWait], ['withdrawn', groups.withdrawn]].find(([, list]) => list.includes(f))?.[0] ?? 'moved';
+  const movedText = [...new Set(moved.map(movedTo))].map((to) => `${ids(moved.filter((f) => movedTo(f) === to))} marked ${to} in the report notes, not fix now`);
+  const blockParts = [...(groups.fixNow.length > 0 ? [`fix ${ids(groups.fixNow)} first`] : []), ...movedText];
+  const head = `REVIEW ${report.status}`;
   const blockText = blockers === 0 ? 'no blockers' : `${blockers} blocker${blockers === 1 ? '' : 's'}${blockParts.length > 0 ? ` (${blockParts.join('; ')})` : ''}`;
   const decideText = groups.decide.length > 0 ? ` · ${groups.decide.length} to decide (${groups.decide.slice(0, 3).map(chatId).join(', ')})` : '';
   const findingsText = report.total === 0 ? 'no findings' : `${report.total} finding${report.total === 1 ? '' : 's'}`;
@@ -1016,13 +1310,17 @@ export function renderChat(report, { all = false } = {}) {
   const notMet = critRows.filter((r) => r.status === 'clean' && (r.met === 'NOT MET' || r.failedSeats.length > 0)).map((r) => r.tag);
   const tagList = (list) => `${list.slice(0, 8).join(', ')}${list.length > 8 ? ', ...' : ''}`;
   const criteriaText = `${withFindings.length > 0 ? ` · ${withFindings.length} criteri${withFindings.length === 1 ? 'on' : 'a'} with findings (${tagList(withFindings)})` : ''}${notMet.length > 0 ? ` · ${notMet.length} not met, no finding (${tagList(notMet)})` : ''}`;
-  const out = [`> **${head} · ${blockText}${decideText}${criteriaText} · ${findingsText}**`, ''];
+  const out = [`> **${head}${report.round ? ` · round ${report.round}` : ''} · ${blockText}${decideText}${criteriaText} · ${findingsText}**`, ''];
   if (report.why) out.push(`Why: ${report.why}`, '');
   if (report.total > 0) {
-    out.push('```', ...severityBars(report.counts), '```', '');
+    // Every finding withdrawn leaves no bar; no empty code block then.
+    const bars = severityBars(report.counts);
+    if (bars.length > 0) out.push('```', ...bars, '```', '');
     out.push('| Do this | Items | Count |', '|---|---|---|');
     for (const [label, list] of [['Fix now', groups.fixNow], ['Fix next', groups.fixNext], ['Can wait', groups.canWait], ['Decide', groups.decide]]) {
-      out.push(`| ${label} | ${label === 'Decide' && list.length === 0 && report.decisions ? 'see Decisions needed below' : idList(list)} | ${list.length} |`);
+      // Decisions written in the notes are not findings: their row says so instead of a count of 0 next to them.
+      const notesOnly = label === 'Decide' && list.length === 0 && report.decisions;
+      out.push(`| ${label} | ${notesOnly ? 'see Decisions needed below' : idList(list)} | ${notesOnly ? '-' : list.length} |`);
     }
     if (groups.preExisting.length > 0) out.push(`| Pre-existing | ${idList(groups.preExisting)} | ${groups.preExisting.length} |`);
     if (groups.fixed.length > 0) out.push(`| Fixed, not re-reviewed | ${idList(groups.fixed)} | ${groups.fixed.length} |`);
@@ -1035,15 +1333,87 @@ export function renderChat(report, { all = false } = {}) {
   for (const caveat of report.caveats) out.push(`> Caveat: ${caveat}`, '');
   if (!all) out.push('_Every finding, criterion and the cost: run with `--format chat --all`._');
   else out.push('---', '', renderMarkdown(report).trimEnd());
+  if (!all) out.push('', generatorLine(report.generator));
   return `${out.join('\n').replace(/\n+$/, '')}\n`;
 }
 
 // ---- command ----
 
-const NO_FINDINGS_MARKER_RE = /^##\s+No findings\s*$/m;
-const CLAIM_HEADING_RE = /^##\s+[AB]\d+\b/m;
 
-export async function loadRun(runDir, notesPath = null) {
+// --change-diff files, or <run-dir>/since.diff when none is given and it exists.
+async function readChangeDiffs(dir, paths) {
+  const files = paths.length > 0 ? paths.map((p) => path.resolve(p)) : existsSync(path.join(dir, 'since.diff')) ? [path.join(dir, 'since.diff')] : [];
+  const out = [];
+  for (const file of files) {
+    if (!existsSync(file)) throw new ReportError(`--change-diff ${file} does not exist`);
+    out.push({ name: path.basename(file), text: noBom(await readFile(file, 'utf8')) });
+  }
+  return out;
+}
+
+// Start: the earliest "at" in skill-versions.jsonl (build-brief writes one line per brief). End: findings.json's file time.
+async function runTiming(dir, findingsFile) {
+  const times = (await readOptional(path.join(dir, 'skill-versions.jsonl'))).split(/\r?\n/).map((line) => {
+    try {
+      return Date.parse(JSON.parse(line).at);
+    } catch {
+      return NaN;
+    }
+  }).filter(Number.isFinite);
+  const end = await stat(findingsFile).then((s) => s.mtime.toISOString(), () => null);
+  return { start: times.length > 0 ? new Date(Math.min(...times)).toISOString() : null, end };
+}
+
+// A native seat's brief is phase1/brief-<seat>.txt, a CLI seat's phase1/<seat>/brief.txt; null when the run kept none.
+async function firstBrief(dir) {
+  for (const rel of [['brief-A.txt'], ['A', 'brief.txt'], ['brief-B.txt'], ['B', 'brief.txt']]) {
+    const file = path.join(dir, 'phase1', ...rel);
+    if (existsSync(file)) return readOptional(file);
+  }
+  return null;
+}
+
+// Each seat's claims as findings for a run stopped after Phase 1: the claim ID, its heading and its Severity: line.
+export function phase1Claims(seatTexts) {
+  const out = [];
+  for (const [seat, text] of Object.entries(seatTexts)) {
+    const fileLines = String(text ?? '').split(/\r?\n/);
+    const claims = parseSeatFile(text, seat).claims;
+    claims.forEach((c, i) => {
+      const block = fileLines.slice(c.line - 1, i + 1 < claims.length ? claims[i + 1].line - 1 : undefined);
+      const end = block.findIndex((l, j) => j > 0 && /^##\s/.test(l));
+      const own = end < 0 ? block : block.slice(0, end);
+      const severity = /^\s*Severity:\s*\**\s*(CRITICAL|HIGH|MEDIUM|LOW)\b/im.exec(own.join('\n'))?.[1]?.toUpperCase() ?? 'UNKNOWN';
+      const title = own[0].replace(/^#+\s*[AB]\d+\b/, '').replace(/^(?:\s*\[[^\]]*\])+/, '').replace(/^[\s\p{Pd}:.-]+/u, '').trim();
+      out.push({ id: c.id, severity, title, origins: [c.id], final_state: 'phase1-only' });
+    });
+  }
+  return out;
+}
+
+// Both seat files finished: each reached its closing section and, where its brief stated the rule, holds the Blocked: line
+// and every claim's "Same shape elsewhere:" line. A run older than a rule is read without it.
+async function phase1Finished(dir, seatTexts) {
+  const whole = (await firstBrief(dir)) ?? '';
+  // The protocol's own wording of each rule, read outside the frozen packet (which may quote that wording).
+  const start = whole.indexOf('# Task packet (frozen)');
+  // The closing reminder's last occurrence: the packet may quote it too.
+  const end = start < 0 ? -1 : whole.lastIndexOf('Last rule, easy to miss');
+  const brief = start < 0 ? whole : whole.slice(0, start) + (end < 0 ? '' : whole.slice(end));
+  const strict = brief.includes('`Blocked: none` (nothing after it)');
+  const sameShape = brief.includes('`Same shape elsewhere:` is required in every claim');
+  return Object.entries(seatTexts).every(([seat, text]) => {
+    const p = parseSeatFile(text, seat, { sameShape });
+    // An unclosed fence is a file cut off mid-write, whatever its closing lines say.
+    // A run older than the Blocked: rule is excused only that rule; every other format problem still counts.
+    // The Blocked-line rules by their own wording (a structural problem may quote a seat line that holds the word).
+    const blockedRule = /has no line "Blocked: none"|write exactly "Blocked: none"|Blocked: lines \(|is not in the exact shape "Blocked: none"|says "blocked:" (?:in|outside)/;
+    const problems = strict ? p.problems : p.problems.filter((x) => !blockedRule.test(x));
+    return !parseFenceLines(String(text ?? '')).unterminated && p.section !== null && problems.length === 0 && (p.claims.length > 0 || p.section === 'No findings');
+  });
+}
+
+export async function loadRun(runDir, notesPath = null, changeDiffPaths = []) {
   const dir = path.resolve(runDir);
   const findingsFile = path.join(dir, 'phase3', 'findings.json');
   const seatTexts = {};
@@ -1054,8 +1424,15 @@ export async function loadRun(runDir, notesPath = null) {
   let findingsDoc;
   if (existsSync(findingsFile)) {
     findingsDoc = await readJson(findingsFile, 'findings');
-  } else if (Object.values(seatTexts).map(unfenced).every((text) => NO_FINDINGS_MARKER_RE.test(text) && !CLAIM_HEADING_RE.test(text))) {
-    findingsDoc = { zero_claims: true, findings: [] };
+  } else if (existsSync(path.join(dir, 'phase1', 'format-refused.json'))) {
+    // A seat file refused again after its one rewrite stopped the run before the exchange: nothing was audited.
+    findingsDoc = { findings: [], synthesized: true };
+  } else if (Object.entries(seatTexts).every(([seat, text]) => { const p = parseSeatFile(text, seat); return p.section === 'No findings' && p.claims.length === 0; }) && await phase1Finished(dir, seatTexts)) {
+    // No findings.json: the zero-claim finish step, which checks the target, never ran, so the report is incomplete.
+    findingsDoc = { zero_claims: true, findings: [], synthesized: true };
+  } else if (await phase1Finished(dir, seatTexts)) {
+    // A run stopped before the audit with both seat files written: each seat's own claims, neither cross-examined nor audited.
+    findingsDoc = { findings: phase1Claims(seatTexts), synthesized: true, phase1_only: true };
   } else {
     findingsDoc = await readJson(findingsFile, 'findings');
   }
@@ -1063,42 +1440,53 @@ export async function loadRun(runDir, notesPath = null) {
   const manifest = existsSync(manifestFile) ? await readJson(manifestFile, 'manifest') : null;
   const notesFile = notesPath ? path.resolve(notesPath) : path.join(dir, 'phase3', 'report-notes.md');
   if (notesPath && !existsSync(notesFile)) throw new ReportError(`--notes ${notesFile} does not exist`);
+  // A manifest built before the audit finished (a failed chain) records another hash of today's findings, or none and no
+  // completed status (a completed manifest built without --findings is trusted).
+  const staleManifest = manifest != null && existsSync(findingsFile) && (manifest.hashes?.findings_json ? manifest.hashes.findings_json !== createHash('sha256').update(await readFile(findingsFile)).digest('hex') : manifest.status !== 'completed');
   const report = buildReport({
     findingsDoc,
     manifest,
     packetText: await readOptional(path.join(dir, 'task-packet.md')),
     seatTexts,
     notesText: await readOptional(notesFile),
-    files: { scorecard: existsSync(path.join(dir, 'phase3', 'scorecard.md')) ? 'phase3/scorecard.md' : null, findings: 'phase3/findings.json', manifest: manifest ? 'manifest.json' : null },
+    files: { scorecard: existsSync(path.join(dir, 'phase3', 'scorecard.md')) ? 'phase3/scorecard.md' : null, findings: existsSync(findingsFile) ? 'phase3/findings.json' : null, manifest: manifest ? 'manifest.json' : null },
+    timing: await runTiming(dir, findingsFile),
+    changeDiffs: await readChangeDiffs(dir, changeDiffPaths),
+    briefText: await firstBrief(dir),
+    staleManifest,
   });
-  if (!manifest) report.caveats.unshift('manifest.json was not found; status, pass counts and cost are unknown.');
+  if (!manifest) {
+    if (report.status !== 'NOT FINAL') report.caveats.unshift('manifest.json was not found; status, pass counts and cost are unknown.');
+  } else if (staleManifest) {
+    report.caveats.unshift('manifest.json was built before the current phase3/findings.json, so its status and cost are stale: run review-run manifest, then the report again.');
+  }
+  // audit --finish refused the auditor's file and has not passed since: the audit ran, its result is pending.
+  if (!existsSync(findingsFile) && existsSync(path.join(dir, 'phase3', 'prompt-auditor-fix.txt'))) {
+    report.caveats.unshift("The auditor's file was refused and review-run audit --finish has not passed since (phase3/prompt-auditor-fix.txt): finish the audit as that step's last output says, then run review-run manifest and the report again. Until then this report holds the seats' unaudited claims.");
+  }
   return report;
 }
 
-async function main(argv) {
-  const args = parseArgs(argv);
-  if (args.help) {
-    process.stdout.write(HELP);
-    return;
+// tty: whether the output goes to a terminal (colour in auto mode).
+async function main(argv, tty = false) {
+  try {
+    const args = parseArgs(argv);
+    const report = await loadRun(args.runDir, args.notes, args.changeDiffs);
+    const forced = process.env.FORCE_COLOR !== undefined && process.env.FORCE_COLOR !== '' && process.env.FORCE_COLOR !== '0';
+    const color = args.color === 'always' || (args.color === 'auto' && !process.env.NO_COLOR && (forced || tty));
+    // The files first: a reader that closes stdout early must not cost a requested file.
+    if (args.out) await writeFile(path.resolve(args.out), renderMarkdown(report), 'utf8');
+    if (args.json) await writeFile(path.resolve(args.json), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    if (args.html) await writeFile(path.resolve(args.html), renderHtml(report), 'utf8');
+    io.out(args.format === 'chat' ? renderChat(report, { all: args.all }) : renderText(report, { color }));
+    return 0;
+  } catch (err) {
+    io.err(`build-report: ${err.message}\n`);
+    return err instanceof ReportError ? 1 : 2;
   }
-  const report = await loadRun(args.runDir, args.notes);
-  const forced = process.env.FORCE_COLOR !== undefined && process.env.FORCE_COLOR !== '' && process.env.FORCE_COLOR !== '0';
-  const color = args.color === 'always' || (args.color === 'auto' && !process.env.NO_COLOR && (forced || process.stdout.isTTY === true));
-  // The files first: a reader that closes stdout early must not cost a requested file.
-  if (args.out) await writeFile(path.resolve(args.out), renderMarkdown(report), 'utf8');
-  if (args.json) await writeFile(path.resolve(args.json), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  if (args.html) await writeFile(path.resolve(args.html), renderHtml(report), 'utf8');
-  process.stdout.write(args.format === 'chat' ? renderChat(report, { all: args.all }) : renderText(report, { color }));
 }
 
-if (isMainModule(import.meta.url)) {
-  // A reader that stops early (head, Select-Object -First) closes the pipe: the rest of the output is dropped, the exit code stays.
-  process.stdout.on('error', (err) => {
-    if (err.code === 'EPIPE') return;
-    throw err;
-  });
-  main(process.argv.slice(2)).catch((err) => {
-    process.stderr.write(`build-report: ${err.message}\n`);
-    process.exitCode = err instanceof ReportError ? 1 : 2;
-  });
-}
+// The report in-process: { code, stdout, stderr }.
+export const runStep = (argv, { tty = false } = {}) => runStepWith('build-report', io, (a) => main(a, tty), argv);
+
+refuseDirectRun(import.meta.url, 'build-report.mjs');

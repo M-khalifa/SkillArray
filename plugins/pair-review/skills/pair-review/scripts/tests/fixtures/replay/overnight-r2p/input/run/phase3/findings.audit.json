@@ -1,0 +1,103 @@
+{"findings": [
+{
+  "id": "F1",
+  "origins": ["X1", "Y2"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "X1", "response": "conceded" },
+    { "claim": "Y2", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Imported whereInChange from the pair-review build-report.mjs in a scratch folder (no target writes). Diff adding line 11 to A/Reporter.py and B/Reporter.py: 'Reporter.py:11' -> {\"tag\":\"outside the change\"}; 'REVIEW/head/Reporter.py:11' -> {\"tag\":\"outside the change\"}. Static read: lines 634-640 leave usable empty when two same-named files match (plainName or byName length 2), so entry is null and the tag is 'outside the change'; line 802 (preOnAdded caveat) and line 1149 (groupFindings) block a pre-existing note only for tag 'added lines', so the wrong tag also lets a pre-existing note move a blocker on added lines into Pre-existing with no caveat. Both skills' copies are byte-identical, so every shared script in this repo meets the trigger. MEDIUM stands."
+  },
+  "final_state": "settled-agree",
+  "evidence": ["see origins"],
+  "summary": "When a cited file name (bare or under a snapshot prefix) matches two or more same-named files in the change diff, the Where tag says 'outside the change' instead of 'unknown' or the agreed tag, and a 'pre-existing' note then moves a blocker on added lines out of Fix now without a caveat.",
+  "recommended_fix": "In whereInChange (build-report.mjs around line 638-640), when 2+ same-named diff files match, use the tag they all agree on, else return 'unknown' rather than 'outside the change'; keep 'outside the change' for names no diff file has. Treat 'unknown' like 'added lines' in the preOnAdded caveat (line 802) and groupFindings (line 1149). Apply to both skills' copies and update the two tests that assert the current output.",
+  "priority": 1
+},
+{
+  "id": "F2",
+  "origins": ["Y1"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "Y1", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Diff adding line 11 to CONTOSO/Reporter.py only: whereInChange(['Reporter.py:11']) -> {\"tag\":\"added lines\",\"at\":\"Reporter.py:11\"} with no byName flag; whereInChange(['HITACHI/Reporter.py:11']) -> tag 'added lines', at '..., matched by file name to CONTOSO/Reporter.py', byName true. Line 643 sets byNameOnly only when the cited file contains '/', so a bare-name guess is treated as a path match: it prints no 'matched by file name' and overrides the author's pre-existing note at lines 802 and 1149, contrary to the stated change that a name-only match does not overrule the notes."
+  },
+  "final_state": "settled-agree",
+  "evidence": ["see origins"],
+  "summary": "A bare file name that matches exactly one changed file is treated as a full path match: it is not labelled 'matched by file name' and it overrides the author's 'pre-existing' note, while the folder-qualified spelling of the same guess does not.",
+  "recommended_fix": "At build-report.mjs line 643, set byNameOnly whenever the match came from a base name (byPath empty) and the matched diff path differs from the cited path, i.e. drop the file.includes('/') condition; keep exact path equality as a real match. Both skills' copies.",
+  "priority": 1
+},
+{
+  "id": "F3",
+  "origins": ["X2"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "X2", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Called buildReport from the pair-review copy with a packet hypothesis ending 'Confirm it is fixed.' and both seats answering 'reload path still skips clear(). CONFIRMED.': without the definition sentence the row came out verdict 'refuted', outcomes REFUTED/REFUTED, fixWorded true; with the build-recheck-packet definition sentence added it came out 'confirmed'. The flip is decided only from packetText (line 700), while every current seat brief (review-protocol.md line 248) defines CONFIRMED as 'the defect it names exists' and tells seats to read a fix-worded hypothesis as its defect; task-packet-template.md has no line matching the regex. So a hand-written packet from the template, or a 1.1.0-drafted packet run on the current skill, shows a still-present defect as green REFUTED, and the printed caveat claims the opposite meaning. Trigger is narrower than a regenerated packet, so MEDIUM is kept."
+  },
+  "final_state": "settled-agree",
+  "evidence": ["see origins"],
+  "summary": "The 'Confirm it is fixed' polarity flip is keyed on the packet text, not on the brief the seats received, so a current-run seat's defect-side CONFIRMED on a packet without the definition sentence is shown as a green REFUTED with a misleading caveat.",
+  "recommended_fix": "Decide fixWordedFlips (build-report.mjs line 700) from the run's own seat brief (phase1 brief text containing 'CONFIRMED (the defect it names exists)') or the run's skill version, flipping only when the brief lacks that definition; alternatively add the definition sentence to task-packet-template.md so hand-written packets match.",
+  "priority": 2
+},
+{
+  "id": "F4",
+  "origins": ["Y3"],
+  "severity": "LOW",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    { "claim": "Y3", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Ran auditorProtocol on the pair-review references/review-protocol.md: the staged text still contains 'disputed high-severity findings\" (see the skill's own Invocation section).' (source line 450 in both skills). Invocation is a SKILL.md heading the auditor never receives, and the pointer test only matches protocol headings, so it cannot catch this shape. Cost is a wasted lookup; the quoted phrase is already inline."
+  },
+  "final_state": "settled-agree",
+  "evidence": ["see origins"],
+  "summary": "The auditor's staged protocol still points to the skill's Invocation section, which the auditor does not receive, and the new pointer test cannot detect pointers to SKILL.md sections.",
+  "recommended_fix": "Delete the '(see the skill's own Invocation section)' parenthesis at review-protocol.md line 450 in both skills; optionally widen the pointer test to also flag 'see/per/in ... section' phrases that name headings outside the staged text.",
+  "priority": 3
+},
+{
+  "id": "F5",
+  "origins": ["Y4"],
+  "severity": "LOW",
+  "basis": "STATIC_TRACE",
+  "evidence_strength": "DETERMINISTIC",
+  "peer_responses": [
+    { "claim": "Y4", "response": "conceded" }
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "Repository-wide grep for 'previous-run': only the writer at build-recheck-packet.mjs line 481 in each skill plus its tests; no script reads the file and no doc or --help text names it. With the documented --out (<run-dir>/task-packet.md) the file sits beside files seats are already told not to read, so no new leak on the documented path; an undocumented --out in a seat-readable folder would expose the previous run path."
+  },
+  "final_state": "settled-agree",
+  "evidence": ["see origins"],
+  "summary": "build-recheck-packet writes previous-run.json that nothing reads and no doc mentions; the stdout line already carries the same information.",
+  "recommended_fix": "Remove the previous-run.json write (build-recheck-packet.mjs around lines 481-486) and keep the stdout line, or document the file in --help with a note to keep it out of the seats' reach.",
+  "priority": 3
+}
+]}

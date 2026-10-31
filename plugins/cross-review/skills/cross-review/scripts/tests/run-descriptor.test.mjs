@@ -153,15 +153,35 @@ test('an unknown transport is refused and both known transports are accepted', a
   }
 });
 
-test('channelFor: a Claude actor writes files, a Codex or OpenCode actor, the auditor included, returns its final message', () => {
+test('an actor env setting holds names only: mode, pass and apiKey, for a CLI actor, apiKey for Claude only', async (t) => {
+  const s = await setup(t);
+  const write = (patch) => fs.writeFile(path.join(s.root, 'run.json'), JSON.stringify({ ...s.data, ...patch }));
+  await write({ seatA: { ...s.data.seatA, env: { mode: 'inherit', pass: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_REGION'], apiKey: true } }, seatB: { ...s.data.seatB, env: { pass: ['OPENAI_BASE_URL'] } } });
+  const desc = await readRunDescriptor(s.root);
+  assert.deepEqual(desc.seatA.env, { mode: 'inherit', pass: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_REGION'], apiKey: true });
+  const refused = [
+    [{ seatA: { ...s.data.seatA, env: { pass: ['AWS_SECRET_ACCESS_KEY=abc'] } } }, /never NAME=value/],
+    [{ seatA: { ...s.data.seatA, env: { values: { A: '1' } } } }, /unknown key\(s\) values; it holds mode, pass \(variable names\) and apiKey only, never a value/],
+    [{ seatA: { ...s.data.seatA, env: { mode: 'open' } } }, /env"\.mode must be filtered or inherit/],
+    [{ seatA: { ...s.data.seatA, env: { apiKey: 'yes' } } }, /apiKey must be true or false/],
+    [{ seatA: { ...s.data.seatA, env: [] } }, /must be an object/],
+    [{ auditor: { ...s.data.auditor, env: { pass: ['X'] } } }, /applies to a CLI actor only/],
+    [{ seatB: { ...s.data.seatB, env: { apiKey: true } } }, /for runtime "codex" name the variable in env\.pass/],
+  ];
+  for (const [patch, message] of refused) {
+    await write(patch);
+    await assert.rejects(readRunDescriptor(s.root), (e) => e instanceof RunDescriptorError && message.test(e.message), String(message));
+  }
+});
+
+test('channelFor: a Claude actor writes files, a Codex actor, the auditor included, returns its final message', () => {
   const base = { provider: 'anthropic', model: 'm', effort: null, transport: 'cli', sessionId: null, outputDir: '/x', resultPath: null, worktreePath: null };
   assert.equal(channelFor({ ...base, role: 'A', runtime: 'claude' }), 'file');
   assert.equal(channelFor({ ...base, role: 'A', runtime: 'claude', transport: 'native' }), 'file');
   assert.equal(channelFor({ ...base, role: 'auditor', runtime: 'claude' }), 'file');
   assert.equal(channelFor({ ...base, role: 'auditor', runtime: 'codex', provider: 'openai' }), 'final-message');
   assert.equal(channelFor({ ...base, role: 'B', runtime: 'codex', provider: 'openai' }), 'final-message');
-  assert.equal(channelFor({ ...base, role: 'B', runtime: 'opencode' }), 'final-message');
-  assert.equal(channelFor({ ...base, role: 'B', runtime: 'opencode', provider: 'anthropic' }), 'final-message');
+  assert.throws(() => channelFor({ ...base, role: 'B', runtime: 'opencode' }), /no output channel is defined for runtime "opencode"/);
   assert.equal(channelFor({ ...base, role: 'A', runtime: 'codex', provider: 'openai', transport: 'native' }), 'file', 'a native agent writes its own file whatever its vendor');
   assert.equal(channelFor({ ...base, role: 'auditor', runtime: 'codex', provider: 'openai', transport: 'native' }), 'file');
   assert.equal(channelFor({ ...base, role: 'B', runtime: 'codex', provider: 'openai', transport: 'cli' }), 'final-message', 'a CLI Codex actor still returns its final message');
@@ -280,7 +300,7 @@ test('writeRunDescriptor applies the reader rules and writes nothing for an inva
   await assert.rejects(fs.access(path.join(run, 'run.json')));
 });
 
-test('flags are validated: mode and audit depth are enums, falsification is a real boolean', async (t) => {
+test('flags are validated: mode is an enum, the audit depth of an older run is light or full, falsification is a real boolean', async (t) => {
   const flags = (patch) => ({ auditDepth: 'light', falsification: false, mode: 'adversarial', ...patch });
   for (const [patch, message] of [
     [{ mode: 'friendly' }, /Invalid review mode/],
@@ -299,6 +319,10 @@ test('flags are validated: mode and audit depth are enums, falsification is a re
   }
   const ok = await setup(t, { flags: flags({ falsification: true, repoOnly: true, timeoutS: 0, checklists: ['TARGET'] }) });
   assert.equal((await readRunDescriptor(ok.root)).flags.falsification, true);
+  // Every audit is full: a run.json without a depth reads as full, an older one keeps its own "light" or "full".
+  const none = await setup(t, { flags: { falsification: false, mode: 'adversarial' } });
+  assert.equal((await readRunDescriptor(none.root)).flags.auditDepth, 'full');
+  assert.equal((await readRunDescriptor(ok.root)).flags.auditDepth, 'light', 'an older run keeps the depth it ran with');
 });
 
 test('the skill layout rules apply to run.json: vendor, runtime, distinct models and mode', async (t) => {

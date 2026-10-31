@@ -89,6 +89,27 @@ number can be recomputed from `bench/score.mjs` alone, without re-running
 expensive, non-deterministic model calls. This is the plan; no run has
 happened yet to actually store anything under it.
 
+## Counting false positives on a known-clean target
+
+A run on a target believed to have no defects in scope measures how often the
+review reports a problem that is not there. It is paid (a full review), so ask
+the owner before starting it.
+
+1. Pin the target: a public repository at a fixed commit, and a scope of about
+   three components (the packet template's limit). Record the commit in the packet.
+2. Run a normal review with `preflight --host ... --keep-target-copy`, so the
+   reviewed code stays available.
+3. Write a ground truth with no defects (`{"defects": []}`) and score the run:
+   `node bench/score.mjs --findings <run>/phase3/findings.json --ground-truth <file>`.
+   Every surfaced finding then counts as a false positive. The scorer counts every
+   finding not dropped as speculative, also the `settled-refuted` ones; leave those
+   out of the count, because the review itself withdrew them.
+4. Check each surfaced finding by hand before calling it a false positive: "known
+   clean" is a belief, and a finding that is confirmed in the code is a real defect,
+   not noise. Record each finding as false positive, real defect or not settled,
+   and report the three counts apart; an unsettled finding is never counted as
+   either.
+
 ## What this isn't
 
 This document is design, not a result. No arm has actually run yet, so

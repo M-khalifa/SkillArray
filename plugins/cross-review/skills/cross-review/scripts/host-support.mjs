@@ -19,9 +19,7 @@ const TABLE = Object.freeze({
     ['claude', 'native', 'supported', ''],
     ['claude', 'cli', 'supported', ''],
     ['codex', 'cli', 'supported', ''],
-    ['opencode', 'cli', 'trial', 'an OpenCode seat has never been run end to end'],
     ['codex', 'native', 'unsupported', 'a native codex agent, but host claude-code can only start native claude agents; use transport cli'],
-    ['opencode', 'native', 'unsupported', 'a native opencode agent, but host claude-code can only start native claude agents; use transport cli'],
   ],
   codex: [
     ['codex', 'native', 'trial', NATIVE_CODEX_TRIAL],
@@ -29,8 +27,6 @@ const TABLE = Object.freeze({
     ['claude', 'cli', 'probe', CLAUDE_SEAT_NEEDS_PROBE, SEAT_ROLE],
     ['claude', 'cli', 'trial', CLAUDE_CLI_TRIAL],
     ['codex', 'cli', 'unsupported', 'a nested codex CLI start is blocked by the Codex sandbox (references/hosts/codex.md)'],
-    ['opencode', 'cli', 'unsupported', 'an OpenCode CLI start from a Codex host has not been tried and is blocked like the other nested CLI starts'],
-    ['opencode', 'native', 'unsupported', 'a native opencode agent, but host codex can only start native codex agents'],
   ],
 });
 

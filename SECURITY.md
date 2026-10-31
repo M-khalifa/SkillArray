@@ -13,9 +13,7 @@ public disclosure.
 ## Data boundaries
 
 `cross-review` sends reviewed material to every selected reviewer provider
-(Anthropic and OpenAI by default; an OpenCode-routed seat can send it to
-Google or another configured provider instead). Confirm the resolved provider
-pair before dispatch and use it only for material authorized for all of them.
+(Anthropic and OpenAI). Confirm the resolved provider pair before dispatch and use it only for material authorized for all of them.
 `pair-review` sends reviewed material to Anthropic only. Both skills can
 execute commands from the reviewed repository (e.g. running its test suite)
 as part of the review — a separate trust boundary from sending text to a
@@ -29,28 +27,25 @@ guarantees.
 
 - **`cross-review` on codex**: defaults to `--sandbox read-only`, a real
   CLI-enforced sandbox (`workspace-write`/`danger-full-access` are opt-in).
-- **`cross-review` on OpenCode**: no CLI-enforced read-only mode exists.
-  `--isolate` runs it against a disposable git worktree instead, which
-  stops writes from reaching the real target but doesn't block network
-  access or reads outside the worktree. Treat unisolated OpenCode
-  execution as unsandboxed.
+- **A Claude CLI seat**: runs against a disposable git worktree snapshot of the target, which stops writes
+  through its file tools from reaching the real target but doesn't block its shell, network access or reads
+  outside the worktree; `touchedFiles` in its result.json is the check.
 - **`pair-review`**: both seats are Claude Code subagents, not spawned
   processes — whatever the harness enforces on a subagent applies; this
   skill adds nothing on top.
 
 ## Environment variable exposure
 
-`cross-review`'s two dispatchers spawn the `codex`/`opencode` CLI as a
-child process, and default to `--env-mode filtered`: the child gets only a
+The dispatchers spawn the `claude`/`codex` CLI as a child process with a filtered environment by default: the child gets only a
 base OS allowlist (`PATH`, `HOME`/`USERPROFILE`, locale variables), each
-CLI's own credential-locator variables, and anything named with
-`--env-passthrough`. Everything else, including cloud keys, `GITHUB_TOKEN`,
+CLI's own credential-locator variables, and the variable names the seat's run.json `env` setting lists
+(`review-config seats --env <role>=NAME,...`; names only, never values). Everything else, including cloud keys, `GITHUB_TOKEN`,
 and database passwords, is excluded. The reviewed repository's own code
 can end up executing inside that environment too, not just the CLI
 itself — for example, a test suite the CLI runs to check a claim.
 
-Use `--env-mode inherit` only when a provider's auth genuinely needs a
-variable outside the allowlist; prefer `--env-passthrough <NAME>` instead,
+Use `--env-mode <role>=inherit` only when a provider's auth genuinely needs a
+variable outside the allowlist; prefer `--env <role>=NAME` instead,
 which adds one variable rather than dropping the filter entirely.
 
 `pair-review` has no dispatcher process — its seats inherit whatever
@@ -59,9 +54,8 @@ environment the harness subagent mechanism already provides.
 ## execution_policy
 
 There's no unified `execution_policy: never|ask|allow` setting spanning
-both dispatchers and `pair-review` yet. `--sandbox read-only`/`--isolate`
-approximate `never`; `--sandbox workspace-write`/`danger-full-access` or
-OpenCode without `--isolate` approximate `allow`. There is no
+both dispatchers and `pair-review` yet. `--sandbox read-only` and the snapshot worktree
+approximate `never`; `--sandbox workspace-write`/`danger-full-access` approximate `allow`. There is no
 `ask`-equivalent mid-run confirmation step today.
 
 ## Artifacts, logs, and prompt injection

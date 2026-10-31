@@ -8,8 +8,7 @@ Choose models once during setup, change them anytime, or override them for one r
 - Node.js 22 or later.
 - A harness supporting isolated Claude subagents with explicit model selection
   and resumed exchanges. Claude Code is the primary target.
-- The runtime selected for each seat: Claude harness, authenticated Codex CLI,
-  or OpenCode with an authenticated configured provider.
+- The runtime selected for each seat: Claude harness or an authenticated Codex CLI.
 - Git recommended for best-effort source-change auditing.
 
 Model/effort support is checked in your runtime; installing this skill does not
@@ -74,9 +73,6 @@ See [SKILL.md](SKILL.md) for the workflow,
 [review protocol](references/review-protocol.md) for evidence and reporting rules,
 and [review profiles](references/review-profiles.md) for the Code/Architecture/
 Document lenses applied on top of that protocol.
-
-OpenCode is an explicit provider bridge for configured non-Claude/non-Codex
-vendors. It is never a fallback provider.
 
 ## Contributing and license
 

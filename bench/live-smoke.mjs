@@ -6,7 +6,7 @@
 // spends zero API budget when run as part of a normal `node --test` sweep.
 //
 // To actually run these, a human must implement each test body against
-// real CLIs (codex, opencode, a real Claude Code harness) and a fixture
+// real CLIs (codex, a real Claude Code harness) and a fixture
 // repository under bench/fixtures/ (not yet built). This file is a
 // reviewable skeleton, not a working smoke suite yet.
 
@@ -20,10 +20,6 @@ test('Claude seat invocation returns a real Phase 1 finding shape', { skip: !LIV
 
 test('Codex invocation matches codex-dispatch.mjs\'s expected output contract', { skip: !LIVE }, async () => {
   throw new Error('not implemented: run codex-dispatch.mjs against the real codex CLI and confirm thread-started/final-message parsing still matches');
-});
-
-test('OpenCode-provider path matches opencode-dispatch.mjs\'s expected output contract', { skip: !LIVE }, async () => {
-  throw new Error('not implemented: run opencode-dispatch.mjs against a configured real OpenCode provider');
 });
 
 test('codex-dispatch.mjs --session resumes a prior thread rather than starting fresh', { skip: !LIVE }, async () => {

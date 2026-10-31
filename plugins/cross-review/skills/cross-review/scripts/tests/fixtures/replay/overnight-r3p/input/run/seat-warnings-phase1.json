@@ -1,0 +1,7 @@
+{
+  "blind": {
+    "B": [
+      "- Could not run: the test files were not run, because the instructions allow writing only this findings file and the tests create temp folders; every check above ran the shipped functions in memory..."
+    ]
+  }
+}

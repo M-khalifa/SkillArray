@@ -1,0 +1,18 @@
+{
+  "A": [
+    "line 3: \"## A1 — Blocked: reader misses a block written as a bold label, italic\" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 7: \"Trigger: the exit-0 clean pass needs a No findings seat that writes bo\" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 33: \"Same shape elsewhere: heading variants also drop the line, because own\" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 86: \"Trigger: an orchestrator on the documented manual route (no review-run\" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 100: \"Suggested fix: phase-1-independent-passes.md:243 add the step: write `\" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 124: \"- H1: ran shipped seatBlockedLine on \"    Blocked: none\", \"\\tBlocked: \" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 125: \"- H2: \"Blocked: x\" then \"Blocked: none\" returns \"x\" in both orders and\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 131: \"- H8: both SKILL.md step 3 and phase-1-independent-passes.md Completio\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 133: \"- AC-1: dispatcher stopIncomplete/stoppedAfterAnswer warnings never re\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 138: \"- AC-6: no change to manifest or seat-warnings format in the diff; old\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 140: \"- AC-8: spot-checked on current code: linux-2 F1 (existing path then \"\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 141: \"- AC-9: seatBlockedLine: old trim accepted an indented \"Blocked: none\"\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 142: \"- AC-10: codex after-answer stop tested only in cross-review's dispatc\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence"
+  ],
+  "B": []
+}

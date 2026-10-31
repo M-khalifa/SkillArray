@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import {
+  seatClaimProblems,
   splitProseAndCode,
   relabelText,
   scanText,
@@ -31,6 +32,8 @@ import {
   readTargetText,
   exemptCacheDir,
   clearExemptCache,
+  auditorProtocol,
+  runStep,
 } from '../blind-relabel.mjs';
 
 test('scorecard: totals per final_state and one row per finding, copied from findings.json with falsification verdicts inline, pipes escaped, and a Note for refuted and unresolved rows', () => {
@@ -49,9 +52,11 @@ test('scorecard: totals per final_state and one row per finding, copied from fin
   assert.equal(lines[1], 'Independently discovered: 1. HIGH/CRITICAL: 1. Auditor checked: 2. Falsification verified: 1. Peer responses: 1 conceded, 2 disputed, 0 unaddressed (33% conceded).');
   assert.equal(lines[5], '| F1 | Cache key \\| ignores ctime | A3, B1 | yes | HIGH | EXECUTED | REPRODUCED | A3: conceded; B1: disputed-no-counter-fact (verified: CONFIRMED) | CONFIRMED | settled-agree |  |');
   assert.equal(lines[6], '| F2 | Roadmap date conflicts | A7 | no | MEDIUM | INFERENCE | SUPPORTED | A7: disputed-with-counter-fact | REFUTED | settled-refuted | refuted by peer counter-fact, auditor check |');
+  // The last line names the skill that wrote it, its version and the project page.
+  assert.match(lines.at(-2), /^Reviewed with (pair|cross)-review \d+\.\d+\.\d+ \(SkillArray, MIT license\): https:\/\/github\.com\/M-khalifa\/SkillArray$/);
   const unresolved = scorecardMarkdown({ findings: [{ id: 'F3', origins: ['A1', 'B3'], severity: 'HIGH', final_state: 'unresolved-high-stakes',
     peer_responses: [{ claim: 'A1', response: 'disputed-with-counter-fact' }, { claim: 'B3', response: 'conceded' }], auditor_check: { result: 'CONFIRMED' } }] });
-  assert.match(unresolved, /\| CONFIRMED \| unresolved-high-stakes \| peer counter-fact not tested; an auditor confirmation alone cannot settle it \(ask for "deep verify disputed high-severity findings"\) \|/);
+  assert.match(unresolved, /\| CONFIRMED \| unresolved-high-stakes \| peer counter-fact not tested; an auditor confirmation alone cannot settle it \(ask for "deep verify disputed high-severity findings"; with a CLI auditor, a new run with --falsification\) \|/);
 });
 
 test('scorecard: a Note line follows the totals line when the auditor checked nothing and a HIGH/CRITICAL finding stands on concession alone', () => {
@@ -59,10 +64,12 @@ test('scorecard: a Note line follows the totals line when the auditor checked no
     id, origins: [`A${id.slice(1)}`], independently_discovered: false, severity, basis: 'EXECUTED', evidence_strength: 'REPRODUCED',
     peer_responses: [{ claim: `A${id.slice(1)}`, response: 'conceded' }], auditor_check: { result: check, reason: 'light audit' }, final_state: 'settled-agree', ...extra,
   });
-  const note = (n) => `Note: no claim was independently checked by the auditor (light audit, every claim conceded); ${n} HIGH/CRITICAL finding(s) are settled by concession only. Use --audit-depth full to have the auditor re-check them.`;
-  const lines = scorecardMarkdown({ findings: [finding('F1', 'HIGH', 'NOT_CHECKED'), finding('F2', 'CRITICAL', 'NOT_CHECKED'), finding('F3', 'LOW', 'NOT_CHECKED')] }).split('\n');
+  const note = (n) => `Note: no claim was independently checked by the auditor (light audit, every claim conceded); ${n} HIGH/CRITICAL finding(s) are settled by concession only.`;
+  const lines = scorecardMarkdown({ audit_depth: 'light', findings: [finding('F1', 'HIGH', 'NOT_CHECKED'), finding('F2', 'CRITICAL', 'NOT_CHECKED'), finding('F3', 'LOW', 'NOT_CHECKED')] }).split('\n');
   assert.match(lines[0], /^3 findings: /);
-  assert.equal(lines[1], note(2));
+  assert.equal(lines[1], note(2), 'an older light audit');
+  const full = scorecardMarkdown({ audit_depth: 'full', findings: [finding('F1', 'HIGH', 'NOT_CHECKED')] }).split('\n');
+  assert.equal(full[1], 'Note: the auditor could check none of the claims; 1 HIGH/CRITICAL finding(s) are unchecked: see each auditor_check.reason.');
   assert.match(lines[2], /^Independently discovered: 0\. HIGH\/CRITICAL: 2\. Auditor checked: 0\./);
   const audited = scorecardMarkdown({ findings: [finding('F1', 'HIGH', 'NOT_CHECKED'), finding('F2', 'LOW', 'CONFIRMED')] });
   assert.doesNotMatch(audited, /no claim was independently checked/);
@@ -88,14 +95,14 @@ test('scorecard --phase1-dir: a Hypotheses column lists the bracketed tags from 
     { id: 'F1', title: 'Retry drops the error', origins: ['A1', 'B1'], independently_discovered: true, severity: 'HIGH', peer_responses: [], auditor_check: { result: 'CONFIRMED' }, final_state: 'settled-agree' },
     { id: 'F2', title: 'Minor', origins: ['A2'], severity: 'LOW', peer_responses: [], auditor_check: { result: 'NOT_CHECKED' }, final_state: 'unresolved-low-stakes' },
   ] }));
-  const r = spawnSync(process.execPath, [SCRIPT, 'scorecard', '--in', input, '--phase1-dir', p1], { encoding: 'utf8' });
+  const r = await runCli(['scorecard', '--in', input, '--phase1-dir', p1]);
   assert.equal(r.status, 0, r.stderr);
   const lines = r.stdout.split('\n');
   assert.match(lines[3], /^\| Finding \| Title \| Hypotheses \| Origins \|/);
   assert.equal(lines[4].split('|').length, lines[3].split('|').length, 'separator row has the extra column too');
   assert.match(lines[5], /^\| F1 \| Retry drops the error \| H3, CHK-7 \| A1, B1 \|/);
   assert.match(lines[6], /^\| F2 \| Minor \|  \| A2 \|/);
-  const plain = spawnSync(process.execPath, [SCRIPT, 'scorecard', '--in', input], { encoding: 'utf8' });
+  const plain = await runCli(['scorecard', '--in', input]);
   assert.doesNotMatch(plain.stdout, /Hypotheses/);
 });
 
@@ -112,7 +119,7 @@ test('scorecard --phase1-dir: with the run task packet beside it, heading tags a
     { id: 'F1', title: 'Owner item', origins: ['A1'], severity: 'HIGH', severity_audited: 'medium', peer_responses: [], auditor_check: { result: 'CONFIRMED' }, final_state: 'settled-agree' },
     { id: 'F2', title: 'Dotted', origins: ['A2'], severity: 'LOW', peer_responses: [], auditor_check: { result: 'CONFIRMED' }, final_state: 'settled-agree' },
   ] }));
-  const r = spawnSync(process.execPath, [SCRIPT, 'scorecard', '--in', input, '--phase1-dir', p1], { encoding: 'utf8' });
+  const r = await runCli(['scorecard', '--in', input, '--phase1-dir', p1]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^\| F1 \| Owner item \| AC-OWN-C \|/m, 'a packet tag without a digit; [DOC] is not a packet tag');
   assert.match(r.stdout, /^\| F2 \| Dotted \| AC-1\.2, AC-4 \|/m);
@@ -126,14 +133,14 @@ test('scorecard: refuses an untranslated X/Y file and a file with no findings ar
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const input = path.join(dir, 'findings.json');
   await fs.writeFile(input, '\uFEFF' + JSON.stringify({ findings: [{ id: 'F1', origins: ['B2'], severity: 'LOW', final_state: 'unresolved-low-stakes', peer_responses: [], auditor_check: { result: 'NOT_CHECKED' } }] }));
-  const printed = spawnSync(process.execPath, [SCRIPT, 'scorecard', '--in', input], { encoding: 'utf8' });
+  const printed = await runCli(['scorecard', '--in', input]);
   assert.equal(printed.status, 0, printed.stderr);
   assert.match(printed.stdout, /^1 findings: 0 settled-agree/);
   const out = path.join(dir, 'scorecard.md');
-  const written = spawnSync(process.execPath, [SCRIPT, 'scorecard', '--in', input, '--out', out], { encoding: 'utf8' });
+  const written = await runCli(['scorecard', '--in', input, '--out', out]);
   assert.equal(written.status, 0, written.stderr);
   assert.equal(await fs.readFile(out, 'utf8'), printed.stdout);
-  const bad = spawnSync(process.execPath, [SCRIPT, 'scorecard', '--in', input, '--mapping', 'm.json'], { encoding: 'utf8' });
+  const bad = await runCli(['scorecard', '--in', input, '--mapping', 'm.json']);
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /scorecard accepts only --in, --out and --phase1-dir/);
 });
@@ -149,7 +156,6 @@ process.on('exit', () => {
 });
 
 const FIXTURE_DIR = fileURLToPath(new URL('./fixtures/blind-relabel', import.meta.url));
-const SCRIPT = fileURLToPath(new URL('../blind-relabel.mjs', import.meta.url));
 
 test('parseArgs: relabel requires in/out/from/to and single-letter labels', () => {
   assert.throws(() => parseArgs(['relabel']), (err) => err instanceof RelayError);
@@ -339,11 +345,7 @@ test('CLI relabel: a file whose only seat-header-shaped text is preceded by an i
   await fs.writeFile(inPath, '`x`# Seat A findings\n');
   const outPath = path.join(dir, 'out.md');
 
-  const result = spawnSync(
-    process.execPath,
-    [SCRIPT, 'relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P'],
-    { encoding: 'utf8' }
-  );
+  const result = await runCli(['relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P']);
   assert.notEqual(result.status, 0, 'a code-span-prefixed header-shaped line must not count as a target');
   assert.match(result.stderr, /no "A" claim IDs, seat header, or rebuttal heading/);
   await assert.rejects(fs.access(outPath), 'no output file should be written on this failure');
@@ -401,7 +403,7 @@ test('scanText: an actual configured model/provider string passed via --tokens i
   const noTarget = await scanText(text, undefined, ['gpt-5.6-sol']);
   assert.equal(noTarget.identityHits.length, 1);
 
-  // With --target-dir pointed at a fixture whose own SKILL.md names this exact model ID,
+  // With --target-dir pointed at a fixture whose own references/target.md names this exact model ID,
   // the extraTokens string is now target-derived and must not hard-stop -- proves --tokens
   // strings share the same target-derived exemption path as the hardcoded vendor list,
   // not only a name-based (never checked) or unconditional pass.
@@ -941,7 +943,7 @@ test('translateFindings: with --phase1-dir, a real translated claim ID passes an
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: something\n'
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: something\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
   const real = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
@@ -949,7 +951,9 @@ test('translateFindings: with --phase1-dir, a real translated claim ID passes an
   assert.deepEqual(result.findings[0].origins, ['A1']);
 
   const hallucinated = JSON.stringify({ findings: [validFinding({ origins: ['X9'], peer_responses: [{ claim: 'X9', response: 'conceded' }] })] });
-  await assert.rejects(translateFindings(hallucinated, { A: 'X', B: 'Y' }, dir), /no "## A9" heading/);
+  await assert.rejects(translateFindings(hallucinated, { A: 'X', B: 'Y' }, dir), /no Phase 1 claim heading "## A9"/);
+  // Mac round 4 F6: review-run sends this message back to the blind auditor, so it names no seat file.
+  await assert.rejects(translateFindings(hallucinated, { A: 'X', B: 'Y' }, dir), (err) => !/[AB]-findings\.md/.test(err.message));
 });
 
 test('translateFindings: a claim heading appearing only inside a fenced Evidence block does not count as a real Phase 1 claim', async (t) => {
@@ -957,13 +961,13 @@ test('translateFindings: a claim heading appearing only inside a fenced Evidence
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — real finding\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```text\n## A99 — literal text inside evidence\n```\n'
+    '# Seat A findings\n\n## A1 — real finding\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```text\n## A99 — literal text inside evidence\n```\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
 
   // Fabrication direction: an origin citing the fenced "A99" must be refused, not accepted as real.
   const fabricated = JSON.stringify({ findings: [validFinding({ origins: ['X99'], peer_responses: [{ claim: 'X99', response: 'conceded' }] })] });
-  await assert.rejects(translateFindings(fabricated, { A: 'X', B: 'Y' }, dir), /no "## A99" heading/);
+  await assert.rejects(translateFindings(fabricated, { A: 'X', B: 'Y' }, dir), /no Phase 1 claim heading "## A99"/);
 
   // Coverage direction: the real "A1" claim, with no fenced-heading false coverage credit for "A99".
   const real = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
@@ -976,7 +980,7 @@ test('translateFindings: with --phase1-dir, basis/evidence_strength/evidence are
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nran it live\n```\n'
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```\nran it live\n```\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
   const audit = JSON.stringify({
@@ -1008,16 +1012,30 @@ test('translateFindings: with --phase1-dir, basis/evidence_strength/evidence are
   await assert.rejects(translateFindings(noReason, { A: 'X', B: 'Y' }, dir), /is HIGH with auditor_check\.result "NOT_CHECKED" and no auditor_check\.reason/);
 });
 
+test('translateFindings: with --phase1-dir, a finding with neither title nor summary takes its first origin\'s heading text; a given summary is kept', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-title-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'A-findings.md'),
+    '# Seat A findings\n\n## A1 — The parser drops the last record\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```\nran it\n```\n');
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
+  const one = (extra) => JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }], ...extra })] });
+  const bare = (await translateFindings(one({ summary: undefined, title: undefined }), { A: 'X', B: 'Y' }, dir)).findings[0];
+  assert.equal(bare.title, 'The parser drops the last record');
+  const kept = (await translateFindings(one({ summary: 'Auditor summary.' }), { A: 'X', B: 'Y' }, dir)).findings[0];
+  assert.equal(kept.summary, 'Auditor summary.');
+  assert.equal(kept.title, undefined, 'no title is invented when a summary exists');
+});
+
 test('translateFindings: with --phase1-dir, a multi-origin finding takes the single STRONGEST value per field across origins, and one evidence entry per origin in origins[] order', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-derive-multi-origin-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — weaker origin\nSeverity: MEDIUM\nBasis: SOURCE_CITATION\nEvidence strength: SUPPORTED\nEvidence:\n```\nA1 evidence text\n```\n'
+    '# Seat A findings\n\n## A1 — weaker origin\nSeverity: MEDIUM\nBasis: SOURCE_CITATION\nEvidence strength: SUPPORTED\nSame shape elsewhere: none found\nEvidence:\n```\nA1 evidence text\n```\n'
   );
   await fs.writeFile(
     path.join(dir, 'B-findings.md'),
-    '# Seat B findings\n\n## B1 — stronger origin\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nB1 evidence text\n```\n'
+    '# Seat B findings\n\n## B1 — stronger origin\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```\nB1 evidence text\n```\n'
   );
   const audit = JSON.stringify({
     findings: [validFinding({
@@ -1049,11 +1067,11 @@ test('translateFindings: with --phase1-dir, basis/evidence_strength are copied a
   // EXECUTED + REPRODUCED -- independent-per-field-max would synthesize exactly that pair.
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — executed but weakly evidenced\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: SUPPORTED\nEvidence:\n```\nA1 evidence text\n```\n'
+    '# Seat A findings\n\n## A1 — executed but weakly evidenced\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: SUPPORTED\nSame shape elsewhere: none found\nEvidence:\n```\nA1 evidence text\n```\n'
   );
   await fs.writeFile(
     path.join(dir, 'B-findings.md'),
-    '# Seat B findings\n\n## B1 — traced but strongly evidenced\nSeverity: HIGH\nBasis: STATIC_TRACE\nEvidence strength: REPRODUCED\nEvidence:\n```\nB1 evidence text\n```\n'
+    '# Seat B findings\n\n## B1 — traced but strongly evidenced\nSeverity: HIGH\nBasis: STATIC_TRACE\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```\nB1 evidence text\n```\n'
   );
   const audit = JSON.stringify({
     findings: [validFinding({
@@ -1078,11 +1096,11 @@ test('translateFindings: with --phase1-dir, when two origins tie on basis, evide
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — tied basis, weaker strength\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: SUPPORTED\nEvidence:\n```\nA1 evidence text\n```\n'
+    '# Seat A findings\n\n## A1 — tied basis, weaker strength\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: SUPPORTED\nSame shape elsewhere: none found\nEvidence:\n```\nA1 evidence text\n```\n'
   );
   await fs.writeFile(
     path.join(dir, 'B-findings.md'),
-    '# Seat B findings\n\n## B1 — tied basis, stronger strength\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nB1 evidence text\n```\n'
+    '# Seat B findings\n\n## B1 — tied basis, stronger strength\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```\nB1 evidence text\n```\n'
   );
   const audit = JSON.stringify({
     findings: [validFinding({
@@ -1105,7 +1123,7 @@ test('translateFindings: with --phase1-dir, an Evidence fence WITH an info strin
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```text\nbody line\n```\n'
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```text\nbody line\n```\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
   const audit = JSON.stringify({
@@ -1120,7 +1138,7 @@ test('translateFindings: with --phase1-dir, a bare ``` mid-fence inside a ~~~-op
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n~~~\nliteral ```\n~~~\n'
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n~~~\nliteral ```\n~~~\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
   const audit = JSON.stringify({
@@ -1135,15 +1153,15 @@ test('translateFindings: with --phase1-dir, refuses (does not silently trust the
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
 
-  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — no severity line\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — no severity line\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n');
   const missingSeverity = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
   await assert.rejects(translateFindings(missingSeverity, { A: 'X', B: 'Y' }, dir), /origin "A1" has no recognized "Severity:" line/);
 
-  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — bad basis\nSeverity: HIGH\nBasis: MADE_UP_VALUE\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — bad basis\nSeverity: HIGH\nBasis: MADE_UP_VALUE\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n');
   const badBasis = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
   await assert.rejects(translateFindings(badBasis, { A: 'X', B: 'Y' }, dir), /origin "A1" has no recognized "Basis:" line/);
 
-  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — no evidence body\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — no evidence body\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\n');
   const missingEvidence = JSON.stringify({ findings: [validFinding({ origins: ['X1'], peer_responses: [{ claim: 'X1', response: 'conceded' }] })] });
   await assert.rejects(translateFindings(missingEvidence, { A: 'X', B: 'Y' }, dir), /origin "A1" has no non-empty "Evidence:" body/);
 });
@@ -1153,7 +1171,7 @@ test('translateFindings: with --phase1-dir, a "---" thematic break between claim
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\nprose before\n\n```\nfenced body\n```\nprose after\n\n---\n\n## A2 — second\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nEvidence: e2\n'
+    '# Seat A findings\n\n## A1 — real claim\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\nprose before\n\n```\nfenced body\n```\nprose after\n\n---\n\n## A2 — second\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nSame shape elsewhere: none found\nEvidence: e2\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
   const audit = JSON.stringify({
@@ -1192,12 +1210,12 @@ test('translateFindings: an inline-code span prefixing a heading-shaped string d
     path.join(dir, 'A-findings.md'),
     // Stripping "`prefix`" would shift "## A99..." to position 0 -- a real Markdown renderer
     // never treats this as a heading, since the backtick span still occupies that position.
-    '# Seat A findings\n\n## A1 — real finding\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n`prefix`## A99 — this is not a heading\n'
+    '# Seat A findings\n\n## A1 — real finding\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n\n`prefix`## A99 — this is not a heading\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
 
   const fabricated = JSON.stringify({ findings: [validFinding({ origins: ['X99'], peer_responses: [{ claim: 'X99', response: 'conceded' }] })] });
-  await assert.rejects(translateFindings(fabricated, { A: 'X', B: 'Y' }, dir), /no "## A99" heading/);
+  await assert.rejects(translateFindings(fabricated, { A: 'X', B: 'Y' }, dir), /no Phase 1 claim heading "## A99"/);
 
   // Coverage direction too: A99 must not silently satisfy coverage for itself if it somehow
   // appeared as an origin elsewhere -- there is no real A99 claim to be covered or dropped.
@@ -1224,11 +1242,11 @@ test('translateFindings: with --phase1-dir, refuses when a real Phase 1 claim is
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n## A2 — second\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n'
+    '# Seat A findings\n\n## A1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n\n## A2 — second\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n'
   );
   await fs.writeFile(
     path.join(dir, 'B-findings.md'),
-    '# Seat B findings\n\n## B1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n'
+    '# Seat B findings\n\n## B1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n'
   );
 
   const missingA2 = JSON.stringify({
@@ -1252,7 +1270,7 @@ test('translateFindings: with --phase1-dir, refuses when a real Phase 1 claim is
 test('translateFindings: with --phase1-dir, a seat with zero Phase 1 claims does not force a spurious coverage failure', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-coverage-zero-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — only\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — only\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n');
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings this pass)\n');
 
   const audit = JSON.stringify({
@@ -1482,11 +1500,11 @@ test('translateFindings: a HIGH/CRITICAL NOT_CHECKED finding needs a non-empty a
   const notChecked = { result: 'NOT_CHECKED', basis: null, evidence: null };
   for (const severity of ['HIGH', 'CRITICAL']) {
     const audit = JSON.stringify({ findings: [validFinding({ severity, auditor_check: notChecked })] });
-    await assert.rejects(translateFindings(audit, map, null, null), new RegExp(`is ${severity} with auditor_check\\.result "NOT_CHECKED" and no auditor_check\\.reason`));
+    await assert.rejects(translateFindings(audit, map, null, null, [], 'light'), new RegExp(`is ${severity} with auditor_check\\.result "NOT_CHECKED" and no auditor_check\\.reason`));
   }
   for (const severity of ['MEDIUM', 'LOW']) {
     const audit = JSON.stringify({ findings: [validFinding({ severity, auditor_check: notChecked })] });
-    const out = await translateFindings(audit, map, null, null);
+    const out = await translateFindings(audit, map, null, null, [], 'light');
     assert.equal(out.findings[0].auditor_check.reason, undefined);
   }
   // A dropped-speculative finding is by definition unchecked and not published as a defect.
@@ -1494,12 +1512,12 @@ test('translateFindings: a HIGH/CRITICAL NOT_CHECKED finding needs a non-empty a
     origins: ['X3'], evidence_strength: 'SPECULATIVE', peer_responses: [{ claim: 'X3', response: 'unaddressed' }],
     auditor_check: notChecked, final_state: 'dropped-speculative', evidence: ['a hunch'],
   })] });
-  assert.equal((await translateFindings(dropped, map, null, null)).findings[0].final_state, 'dropped-speculative');
+  assert.equal((await translateFindings(dropped, map, null, null, [], 'light')).findings[0].final_state, 'dropped-speculative');
   const blank = JSON.stringify({ findings: [validFinding({ auditor_check: { ...notChecked, reason: '  ' } })] });
-  await assert.rejects(translateFindings(blank, map, null, null), /auditor_check\.reason that is not a non-empty string/);
+  await assert.rejects(translateFindings(blank, map, null, null, [], 'light'), /auditor_check\.reason that is not a non-empty string/);
   const withId = JSON.stringify({ findings: [validFinding({ auditor_check: { ...notChecked, reason: 'same as X3, not re-run' } })] });
-  await assert.rejects(translateFindings(withId, map, null, null), /prose field "findings\.0\.auditor_check\.reason" contains "X3"/);
-  const ok = await translateFindings(JSON.stringify({ findings: [validFinding()] }), map, null, null);
+  await assert.rejects(translateFindings(withId, map, null, null, [], 'light'), /prose field "findings\.0\.auditor_check\.reason" contains "X3"/);
+  const ok = await translateFindings(JSON.stringify({ findings: [validFinding()] }), map, null, null, [], 'light');
   assert.equal(ok.findings[0].auditor_check.reason, 'both seats reproduced it; spot checks went to disputed claims');
 });
 
@@ -1519,11 +1537,11 @@ test('translateFindings: "reason": null means no reason (auditors write it on ev
     /auditor_check\.reason that is not a non-empty string/, 'a wrong type is still refused');
 });
 
-test('translateFindings: audit depth -- light (default) keeps the HIGH-only reason rule, full needs a reason on any NOT_CHECKED finding, and the depth is written to findings.json', async () => {
+test('translateFindings: audit depth -- full (the default, every new run) needs a reason on any NOT_CHECKED finding, an older run\'s light depth keeps the HIGH-only reason rule, and the depth is written to findings.json', async () => {
   const map = { A: 'X', B: 'Y' };
   const notChecked = { result: 'NOT_CHECKED', basis: null, evidence: null };
   const medium = JSON.stringify({ findings: [validFinding({ severity: 'MEDIUM', auditor_check: notChecked })] });
-  assert.equal((await translateFindings(medium, map, null, null)).audit_depth, 'light');
+  await assert.rejects(translateFindings(medium, map, null, null), /no auditor_check\.reason under --audit-depth full/, 'full is the default');
   assert.equal((await translateFindings(medium, map, null, null, [], 'light')).findings.length, 1);
   await assert.rejects(translateFindings(medium, map, null, null, [], 'full'), /no auditor_check\.reason under --audit-depth full/);
   const withReason = JSON.stringify({ findings: [validFinding({ severity: 'LOW', auditor_check: { ...notChecked, reason: 'wording claim, nothing to execute' } })] });
@@ -1594,7 +1612,7 @@ test('translateFindings: settled-agree requires positive agreement provenance (i
     ],
   });
   await assert.rejects(
-    translateFindings(noProvenance, { A: 'X', B: 'Y' }, null, null),
+    translateFindings(noProvenance, { A: 'X', B: 'Y' }, null, null, [], 'light'),
     /no agreement provenance exists/
   );
 
@@ -1612,7 +1630,7 @@ test('translateFindings: settled-agree requires positive agreement provenance (i
       }),
     ],
   });
-  const r1 = await translateFindings(viaIndependentDiscovery, { A: 'X', B: 'Y' }, null, null);
+  const r1 = await translateFindings(viaIndependentDiscovery, { A: 'X', B: 'Y' }, null, null, [], 'light');
   assert.equal(r1.findings[0].final_state, 'settled-agree');
 
   // Route 2: a single conceded peer response is sufficient, single-origin, no auditor/verifier.
@@ -1625,7 +1643,7 @@ test('translateFindings: settled-agree requires positive agreement provenance (i
       }),
     ],
   });
-  const r2 = await translateFindings(viaConceded, { A: 'X', B: 'Y' }, null, null);
+  const r2 = await translateFindings(viaConceded, { A: 'X', B: 'Y' }, null, null, [], 'light');
   assert.equal(r2.findings[0].final_state, 'settled-agree');
 
   // Route 3: a CONFIRMED falsification verifier is sufficient, single-origin, auditor
@@ -1792,6 +1810,16 @@ test('translateFindings: with --verification-dir, checks both directions (cited 
   await assert.rejects(translateFindings(cited, { A: 'X', B: 'Y' }, null, dir), /no finding cites a verification/);
 });
 
+test('Mac round 5 F4: a malformed verifier file is an orchestrator error (--verification-dir), never one sent back to the auditor', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-bad-verifier-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const cited = JSON.stringify({ findings: [validFinding({ origins: ['X3'], peer_responses: [{ claim: 'X3', response: 'conceded' }], verifications: [{ claim: 'X3', verdict: 'CONFIRMED' }] })] });
+  for (const bad of ['Claim: X3\nVerdict: CONFIRMED\nBasis: EXECUTED\n', 'Claim: X3\nVerdict: CONFIRMED\nVerdict: REFUTED\nBasis: EXECUTED\nEvidence: e\n', '**Claim:** X3\nVerdict: CONFIRMED\nBasis: EXECUTED\nEvidence: e\n']) {
+    await fs.writeFile(path.join(dir, 'verification-X3.md'), bad);
+    await assert.rejects(translateFindings(cited, { A: 'X', B: 'Y' }, null, dir), /^Error: --verification-dir: .*verification-X3\.md: /, JSON.stringify(bad));
+  }
+});
+
 test('translateFindings: an inline-code span prefixing a "Claim:"/"Verdict:" line does not satisfy the verifier schema (RAW line, not code-stripped)', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-inline-prefix-verifier-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -1920,14 +1948,14 @@ test('translateFindings: a CRLF verifier file trims the structural leading/trail
 });
 
 test('relabelText: a genuine interior \\r\\n inside a fenced Evidence block on an otherwise-LF file is preserved byte-exact, not stripped -- parseFenceLines tracks each line\'s OWN terminator instead of guessing one file-level eol from the first line, since a mixed-EOL fence (e.g. pasted Windows tool output) is real content, not a signal to normalize', () => {
-  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nline-one\r\nline-two\n```\n';
+  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```\nline-one\r\nline-two\n```\n';
   const out = relabelText(text, 'A', 'P');
   assert.ok(out.includes('line-one\r\nline-two'), 'interior \\r\\n inside the fence must survive relabel unchanged');
   assert.match(out, /^# Peer findings\n/, 'the file-level LF structure outside the fence must stay LF, not get upgraded by the fence\'s own CRLF');
 });
 
 test('extractClaimBlocks: a genuine interior \\r\\n inside a fenced Evidence block on an otherwise-LF file is preserved byte-exact in the extracted evidence string', () => {
-  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nline-one\r\nline-two\n```\n';
+  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```\nline-one\r\nline-two\n```\n';
   const { blocks } = extractClaimBlocks(text);
   assert.equal(blocks.get('A1').evidence, 'line-one\r\nline-two');
 });
@@ -1947,7 +1975,7 @@ test('translateFindings: a genuine interior \\r\\n inside a verifier file\'s mul
 });
 
 test('relabelText: a bare \\n inside a fenced Evidence block on an otherwise-CRLF file stays a bare \\n, never silently upgraded to \\r\\n by the surrounding file\'s own line ending', () => {
-  const text = '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\nEvidence strength: REPRODUCED\r\nEvidence:\r\n```\r\nline-one\nline-two\r\n```\r\n';
+  const text = '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\nEvidence strength: REPRODUCED\r\nSame shape elsewhere: none found\r\nEvidence:\r\n```\r\nline-one\nline-two\r\n```\r\n';
   const out = relabelText(text, 'A', 'P');
   assert.ok(out.includes('line-one\nline-two'), 'bare interior \\n inside the fence must survive unchanged');
   assert.ok(!out.includes('line-one\r\nline-two'), 'the bare \\n must not be upgraded to \\r\\n just because the rest of the file is CRLF');
@@ -1955,7 +1983,7 @@ test('relabelText: a bare \\n inside a fenced Evidence block on an otherwise-CRL
 });
 
 test('relabelText: a fence closer with trailing whitespace (CommonMark-legal, e.g. an editor\'s trailing-whitespace-on-save) still closes the fence, not flagged as unterminated -- the close-fence regex\'s "\\\\s*$" must stay a real backslash-escaped whitespace class, never a literal "s*$" from an unescaped template-literal backslash', () => {
-  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nsome content\n```  \n';
+  const text = '# Seat A findings\n\n## A1 — bug\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n```\nsome content\n```  \n';
   const out = relabelText(text, 'A', 'P');
   assert.match(out, /^# Peer findings\n/, 'relabel must succeed, not throw "unterminated fenced code block"');
   assert.ok(out.includes('some content'), 'the fenced body must survive untouched');
@@ -2010,6 +2038,10 @@ test('translateFindings: with --verification-dir, refuses a verification file na
 test('translateFindings: refuses a finding id not of the form F<n>, and a duplicate finding id', async () => {
   const badId = JSON.stringify({ findings: [validFinding({ id: 'G1' })] });
   await assert.rejects(translateFindings(badId, { A: 'X', B: 'Y' }, null), /not of the form "F<n>"/);
+  // An auditor that left out the key is told which entry and what was expected, never "undefined".
+  const { id, ...withoutId } = validFinding();
+  const noId = JSON.stringify({ findings: [withoutId] });
+  await assert.rejects(translateFindings(noId, { A: 'X', B: 'Y' }, null), /^Error: findings\[0\] has no "id" \(expected "F1"\)|findings\[0\] has no "id" \(expected "F1"\)/);
 
   const dup = JSON.stringify({ findings: [validFinding({ id: 'F1' }), validFinding({ id: 'F1', origins: ['X9'], peer_responses: [{ claim: 'X9', response: 'conceded' }] })] });
   await assert.rejects(translateFindings(dup, { A: 'X', B: 'Y' }, null), /duplicate finding id/);
@@ -2269,7 +2301,7 @@ test('CLI translate: writes real-ID findings.json from an X/Y audit file and a f
   await fs.writeFile(auditPath, JSON.stringify({ findings: [validFinding({ origins: ['X4'], peer_responses: [{ claim: 'X4', response: 'conceded' }] })] }));
   await fs.writeFile(mappingPath, JSON.stringify({ A: 'X', B: 'Y' }));
 
-  const result = spawnSync(process.execPath, [SCRIPT, 'translate', '--in', auditPath, '--out', outPath, '--mapping', mappingPath]);
+  const result = await runCli(['translate', '--in', auditPath, '--out', outPath, '--mapping', mappingPath]);
   assert.equal(result.status, 0, result.stderr.toString());
   const written = JSON.parse(await fs.readFile(outPath, 'utf8'));
   assert.deepEqual(written.findings[0].origins, ['A4']);
@@ -2279,26 +2311,26 @@ test('CLI flip: writes a JSON file with exactly one of the two mappings', async 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blind-relabel-flip-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const out = path.join(dir, 'mapping.json');
-  const result = spawnSync(process.execPath, [SCRIPT, 'flip', '--out', out], { encoding: 'utf8' });
+  const result = await runCli(['flip', '--out', out]);
   assert.equal(result.status, 0, result.stderr);
   const mapping = JSON.parse(await fs.readFile(out, 'utf8'));
   assert.ok((mapping.A === 'X' && mapping.B === 'Y') || (mapping.A === 'Y' && mapping.B === 'X'));
 });
 
 test('claimBlockProblems: a fully complete claim block has no problems', () => {
-  const { blocks } = extractClaimBlocks('# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  const { blocks } = extractClaimBlocks('# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n');
   assert.deepEqual(claimBlockProblems(blocks.get('A1')), []);
 });
 
 test('claimBlockProblems: reports every missing/unrecognized field, not just the first (the real Phase 2 run\'s shape: no "Evidence:" label at all)', () => {
-  const { blocks } = extractClaimBlocks('# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n\nprose with no Evidence: label\n');
+  const { blocks } = extractClaimBlocks('# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\n\nprose with no Evidence: label\n');
   const problems = claimBlockProblems(blocks.get('A1'));
   assert.deepEqual(problems, ['no non-empty "Evidence:" body']);
 });
 
 test('extractClaimBlocks: reports a bare-number malformed heading ("## 1", the exact live-run shape) rather than silently treating it as zero claims', () => {
   const { blocks, malformedHeadings, noFindingsMarker } = extractClaimBlocks(
-    '# Seat A findings\n\n## 1 — bad heading\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n'
+    '# Seat A findings\n\n## 1 — bad heading\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n'
   );
   assert.equal(blocks.size, 0);
   assert.equal(malformedHeadings.length, 1);
@@ -2308,8 +2340,8 @@ test('extractClaimBlocks: reports a bare-number malformed heading ("## 1", the e
 
 test('extractClaimBlocks: reports a duplicate real claim ID heading instead of silently letting the second block overwrite the first', () => {
   const { blocks, duplicateIds } = extractClaimBlocks(
-    '# Seat A findings\n\n## A1 — first version\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: first\n\n' +
-      '## A1 — duplicate\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nEvidence: second\n'
+    '# Seat A findings\n\n## A1 — first version\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: first\n\n' +
+      '## A1 — duplicate\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nSame shape elsewhere: none found\nEvidence: second\n'
   );
   assert.equal(blocks.size, 1);
   assert.equal(blocks.get('A1').evidence, 'first'); // first occurrence wins, never silently overwritten
@@ -2334,7 +2366,7 @@ test('extractClaimBlocks: an ordinary non-claim-shaped prose heading ("## Checks
 test('extractClaimBlocks: a CRLF claim block preserves interior \\r\\n line breaks in its Evidence body verbatim, same as parseVerificationFile does for verifier files', () => {
   const crlf =
     '# Seat A findings\r\nSeverity: HIGH\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\n' +
-    'Evidence strength: REPRODUCED\r\nEvidence: first line\r\nsecond line\r\n\r\n## No findings\r\n';
+    'Evidence strength: REPRODUCED\r\nSame shape elsewhere: none found\r\nEvidence: first line\r\nsecond line\r\n\r\n## No findings\r\n';
   const { blocks } = extractClaimBlocks(crlf);
   assert.equal(blocks.get('A1').evidence, 'first line\r\nsecond line');
 });
@@ -2352,23 +2384,28 @@ test('parseArgs: validate requires --phase1-dir and rejects every other flag', (
 test('CLI validate: exits 0 on two fully complete seat files, and nonzero listing every problem when a real-shaped claim block (no "Evidence:" label) is missing one', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
-  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## B1 — y\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nEvidence: e2\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n');
+  await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## B1 — y\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nSame shape elsewhere: none found\nEvidence: e2\n');
 
-  const clean = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const clean = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(clean.status, 0, clean.stderr);
   assert.match(clean.stdout, /validate clean/);
-  const withChecklist = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir, '--checklist', 'CHK'], { encoding: 'utf8' });
+  const withChecklist = await runCli(['validate', '--phase1-dir', dir, '--checklist', 'CHK']);
   assert.equal(withChecklist.status, 0, withChecklist.stderr);
   assert.equal(withChecklist.stdout, clean.stdout, '--checklist is accepted and changes nothing in validate');
 
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — no evidence label\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n\njust prose, the real Phase 2 run\'s exact shape\n'
+    '# Seat A findings\n\n## A1 — no evidence label\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\n\njust prose, the real Phase 2 run\'s exact shape\n'
   );
-  const dirty = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const dirty = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(dirty.status, 0);
   assert.match(dirty.stderr, /A-findings\.md: claim "A1" has no non-empty "Evidence:" body/);
+  // Step 5 (D3): a claim without "Same shape elsewhere:" is refused.
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  const noSweep = await runCli(['validate', '--phase1-dir', dir]);
+  assert.equal(noSweep.status, 1);
+  assert.match(noSweep.stderr, /A-findings\.md: claim "A1" has no "Same shape elsewhere:" line \(name the other places with the same shape, or write "none found" and what you searched\)/);
 });
 
 test('CLI validate: a bare-number heading ("## 1", the exact live-run shape ChatGPT reproduced) is rejected, not silently treated as zero findings', async (t) => {
@@ -2376,10 +2413,10 @@ test('CLI validate: a bare-number heading ("## 1", the exact live-run shape Chat
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## 1 — bad heading\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: something\n'
+    '# Seat A findings\n\n## 1 — bad heading\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: something\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /looks like an attempted claim ID \("1"\) but does not match/);
 });
@@ -2389,11 +2426,11 @@ test('CLI validate: two "## A1" headings in the same file are rejected as a dupl
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e1\n\n' +
-      '## A1 — duplicate\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nEvidence: e2\n'
+    '# Seat A findings\n\n## A1 — first\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e1\n\n' +
+      '## A1 — duplicate\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: SPECULATIVE\nSame shape elsewhere: none found\nEvidence: e2\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /claim "A1" heading appears more than once/);
 });
@@ -2403,10 +2440,10 @@ test('CLI validate: a "## B1" heading inside A-findings.md is rejected as the wr
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## B1 — wrong seat letter\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n'
+    '# Seat A findings\n\n## B1 — wrong seat letter\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /claim "B1" uses seat "B"'s letter, not this file's own seat "A"/);
 });
@@ -2414,14 +2451,14 @@ test('CLI validate: a "## B1" heading inside A-findings.md is rejected as the wr
 test('CLI validate: an empty seat file with no "## No findings" marker is rejected, distinguishing "ignored the schema" from a genuine zero-findings pass', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-validate-empty-no-marker-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n');
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n(no findings)\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /B-findings\.md: has zero recognized claim headings and no "## No findings" marker/);
 
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const clean = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const clean = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(clean.status, 0, clean.stderr);
 });
 
@@ -2430,20 +2467,20 @@ test('CLI validate: a malformed rebuttal-section heading is rejected, instead of
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n\n' +
       '## Rebuttals from B of A claims\n\n### A1\nRebuttal text.\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /does not match the required "## Rebuttals \(from <letter>\) of <letter> claims" form/);
 
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n\n' +
       '## Rebuttals (from B) of A claims\n\n### A1\nRebuttal text.\n'
   );
-  const clean = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const clean = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(clean.status, 0, clean.stderr);
 });
 
@@ -2452,11 +2489,11 @@ test('CLI validate: a rebuttal heading naming a claim ID instead of a bare seat 
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n\n' +
       '## Rebuttals (from B1) of A claims\n\n### A1\nRebuttal text.\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /does not match the required "## Rebuttals \(from <letter>\) of <letter> claims" form/);
 });
@@ -2466,11 +2503,11 @@ test('CLI validate: "(from A) of B" inside A-findings.md itself is ACCEPTED -- v
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n\n' +
       '## Rebuttals (from A) of B claims\n\n### A1\nRebuttal text.\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(result.status, 0, result.stderr);
 });
 
@@ -2479,11 +2516,11 @@ test('CLI validate: a rebuttal heading naming a seat rebutting its own claims ("
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n\n' +
       '## Rebuttals (from A) of A claims\n\n### A1\nRebuttal text.\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /names a seat rebutting its own claims/);
 });
@@ -2493,11 +2530,11 @@ test('CLI validate: a rebuttal heading with trailing whitespace is rejected -- m
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence: e\n\n' +
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence: e\n\n' +
       '## Rebuttals (from B) of A claims \n\n### A1\nRebuttal text.\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /does not match the required "## Rebuttals \(from <letter>\) of <letter> claims" form/);
 });
@@ -2507,12 +2544,12 @@ test('CLI validate: a rebuttal-shaped heading QUOTED INSIDE an Evidence fence is
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(
     path.join(dir, 'A-findings.md'),
-    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n' +
+    '# Seat A findings\n\n## A1 — x\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\n' +
       'Evidence:\n```text\n## Rebuttals junk\n```\n\n' +
       '## Rebuttals (from B) of A claims\n\n### A1\nRebuttal text.\n'
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(result.status, 0, result.stderr);
 });
 
@@ -2523,11 +2560,7 @@ test('CLI relabel: a wrong --from that matches nothing fails loudly and writes n
   await fs.writeFile(inPath, '## B1 — peer claim\nB2 also.\n');
   const outPath = path.join(dir, 'wrong.md');
 
-  const result = spawnSync(
-    process.execPath,
-    [SCRIPT, 'relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P'],
-    { encoding: 'utf8' }
-  );
+  const result = await runCli(['relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P']);
   assert.notEqual(result.status, 0, 'a --from that matches nothing must fail, not report success');
   assert.match(result.stderr, /no "A" claim IDs, seat header, or rebuttal heading/);
   await assert.rejects(fs.access(outPath), 'no output file should be written on this failure');
@@ -2539,15 +2572,11 @@ test('CLI relabel: a CRLF-terminated file relabels the seat header and rebuttal 
   const inPath = path.join(dir, 'A-findings.md');
   const crlf =
     '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\n' +
-    'Evidence strength: REPRODUCED\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
+    'Evidence strength: REPRODUCED\r\nSame shape elsewhere: none found\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
   await fs.writeFile(inPath, crlf);
   const outPath = path.join(dir, 'peer-view.md');
 
-  const result = spawnSync(
-    process.execPath,
-    [SCRIPT, 'relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P'],
-    { encoding: 'utf8' }
-  );
+  const result = await runCli(['relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P']);
   assert.equal(result.status, 0, result.stderr);
   const out = await fs.readFile(outPath, 'utf8');
   assert.match(out, /^# Peer findings\r\n/, 'seat header must relabel even with a trailing \\r on the line');
@@ -2561,10 +2590,10 @@ test('CLI validate: a CRLF-terminated Phase 1 file is accepted exactly like its 
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const crlfBody =
     '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\n' +
-    'Evidence strength: REPRODUCED\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
+    'Evidence strength: REPRODUCED\r\nSame shape elsewhere: none found\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
   await fs.writeFile(path.join(dir, 'A-findings.md'), crlfBody);
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\r\n\r\n## No findings\r\n');
-  const result = spawnSync(process.execPath, [SCRIPT, 'validate', '--phase1-dir', dir], { encoding: 'utf8' });
+  const result = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
@@ -2573,21 +2602,13 @@ test('CLI scan: relabeling a CRLF file to P and scanning the result finds zero r
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const crlfBody =
     '# Seat A findings\r\n\r\n## A1 — bug\r\nSeverity: HIGH\r\nBasis: EXECUTED\r\n' +
-    'Evidence strength: REPRODUCED\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
+    'Evidence strength: REPRODUCED\r\nSame shape elsewhere: none found\r\nEvidence: e\r\n\r\n## Rebuttals (from A) of B claims\r\n\r\n### B1\r\ntext\r\n';
   const inPath = path.join(dir, 'A-findings.md');
   await fs.writeFile(inPath, crlfBody);
   const peerViewPath = path.join(dir, 'peer-view.md');
-  const relabelResult = spawnSync(
-    process.execPath,
-    [SCRIPT, 'relabel', '--in', inPath, '--out', peerViewPath, '--from', 'A', '--to', 'P'],
-    { encoding: 'utf8' }
-  );
+  const relabelResult = await runCli(['relabel', '--in', inPath, '--out', peerViewPath, '--from', 'A', '--to', 'P']);
   assert.equal(relabelResult.status, 0, relabelResult.stderr);
-  const scanResult = spawnSync(
-    process.execPath,
-    [SCRIPT, 'scan', '--in', peerViewPath, '--phase1-dir', dir, '--forbid-seats', 'A'],
-    { encoding: 'utf8' }
-  );
+  const scanResult = await runCli(['scan', '--in', peerViewPath, '--phase1-dir', dir, '--forbid-seats', 'A']);
   assert.equal(scanResult.status, 0, `expected zero real-seat-letter leaks, got: ${scanResult.stdout}${scanResult.stderr}`);
 });
 
@@ -2597,11 +2618,7 @@ test('dogfood: relabeling the shipped A-findings.md fixture produces P-labeled p
   const inPath = path.join(FIXTURE_DIR, 'A-findings.md');
   const outPath = path.join(dir, 'peer-view-for-B.md');
 
-  const result = spawnSync(
-    process.execPath,
-    [SCRIPT, 'relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P'],
-    { encoding: 'utf8' }
-  );
+  const result = await runCli(['relabel', '--in', inPath, '--out', outPath, '--from', 'A', '--to', 'P']);
   assert.equal(result.status, 0, result.stderr);
 
   const original = await fs.readFile(inPath, 'utf8');
@@ -2628,13 +2645,9 @@ test('dogfood: double-relabeling the real findings files to X/Y (Phase 3 flow) l
     const inPath = path.join(FIXTURE_DIR, srcName);
     const tmpPath = path.join(dir, `tmp-${srcName}`);
     const outPath = path.join(dir, `${ownTo}-findings.md`);
-    let r = spawnSync(process.execPath,
-      [SCRIPT, 'relabel', '--in', inPath, '--out', tmpPath, '--from', ownLetter, '--to', ownTo],
-      { encoding: 'utf8' });
+    let r = await runCli(['relabel', '--in', inPath, '--out', tmpPath, '--from', ownLetter, '--to', ownTo]);
     assert.equal(r.status, 0, r.stderr);
-    r = spawnSync(process.execPath,
-      [SCRIPT, 'relabel', '--in', tmpPath, '--out', outPath, '--from', peerLetter, '--to', peerTo],
-      { encoding: 'utf8' });
+    r = await runCli(['relabel', '--in', tmpPath, '--out', outPath, '--from', peerLetter, '--to', peerTo]);
     assert.equal(r.status, 0, r.stderr);
 
     const out = await fs.readFile(outPath, 'utf8');
@@ -2659,31 +2672,12 @@ test('dogfood: scanning the real relabeled peer-views finds zero self-identifica
   ]) {
     const inPath = path.join(FIXTURE_DIR, srcName);
     const outPath = path.join(dir, outName);
-    const relabelResult = spawnSync(
-      process.execPath,
-      [SCRIPT, 'relabel', '--in', inPath, '--out', outPath, '--from', from, '--to', to],
-      { encoding: 'utf8' }
-    );
+    const relabelResult = await runCli(['relabel', '--in', inPath, '--out', outPath, '--from', from, '--to', to]);
     assert.equal(relabelResult.status, 0, relabelResult.stderr);
 
     // Also exercise the exact wired command phase-2-cross-examination.md now requires: the
     // known-real-claim-ID leak check, not just the vendor/model-token scan above.
-    const scanResult = spawnSync(
-      process.execPath,
-      [
-        SCRIPT,
-        'scan',
-        '--in',
-        outPath,
-        '--target-dir',
-        targetDir,
-        '--phase1-dir',
-        FIXTURE_DIR,
-        '--forbid-seats',
-        from,
-      ],
-      { encoding: 'utf8' }
-    );
+    const scanResult = await runCli(['scan', '--in', outPath, '--target-dir', targetDir, '--phase1-dir', FIXTURE_DIR, '--forbid-seats', from]);
     assert.equal(
       scanResult.status,
       0,
@@ -2694,8 +2688,9 @@ test('dogfood: scanning the real relabeled peer-views finds zero self-identifica
   }
 });
 
-function runCli(args) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+async function runCli(args) {
+  const r = await runStep(args);
+  return { status: r.code, stdout: r.stdout, stderr: r.stderr };
 }
 
 async function tempDir(t, prefix) {
@@ -2704,8 +2699,10 @@ async function tempDir(t, prefix) {
   return dir;
 }
 
+// Every Phase 1 claim names its same-shape places; a tail with its own line replaces the default one.
 function claimBlock(id, severity = 'HIGH', tail = '') {
-  return `## ${id} — t\nSeverity: ${severity}\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n\`\`\`\nran it\n\`\`\`\n${tail}`;
+  const same = /Same shape elsewhere:/.test(tail) ? '' : 'Same shape elsewhere: none found\n';
+  return `## ${id} — t\nSeverity: ${severity}\nBasis: EXECUTED\nEvidence strength: REPRODUCED\n${same}Evidence:\n\`\`\`\nran it\n\`\`\`\n${tail}`;
 }
 
 test('scanText: F1 -- a git target checked out on a vendor-token branch ("codex/topic") does not exempt a third-person identity mention, since exempt names come from git ls-files, never .git/refs; a tracked codex-dispatch.mjs still exempts [slow]', async (t) => {
@@ -2737,6 +2734,26 @@ test('scanText: F1 -- a non-git target walk skips .git/ and node_modules/, so an
   await fs.writeFile(path.join(dir, 'app.js'), '');
   const { identityHits } = await scanText('The OpenAI reviewer flagged it.\nThe Claude reviewer agreed.', dir);
   assert.equal(identityHits.length, 2);
+});
+
+test('scanText: pair review F7 -- a target or source folder whose name holds a vendor word is cited without a stop; self-identification still stops', async (t) => {
+  const base = await tempDir(t, 'f7-folder-');
+  const target = path.join(base, 'claude-code-plugins');
+  const source = path.join(base, 'openai-quickstart');
+  await fs.mkdir(path.join(target, 'src'), { recursive: true });
+  await fs.writeFile(path.join(target, 'src', 'x.py'), '');
+  await fs.mkdir(source);
+  const cited = await scanText('claude-code-plugins/src/x.py:3 drops the error.\nSee openai-quickstart/README.md too.', target, [], null, [], [source]);
+  assert.deepEqual([cited.identityHits.length, cited.selfIdHits.length], [0, 0], JSON.stringify(cited));
+  const unnamed = await scanText('See openai-quickstart/README.md too.', target);
+  assert.equal(unnamed.identityHits.length, 1, 'a folder that is not a source folder exempts nothing');
+  const prose = await scanText('The Claude reviewer agreed about claude-code-plugins.\nclaude-code-plugins-extra/y.py is wrong.', target);
+  assert.equal(prose.identityHits.length, 2, 'the vendor word alone, or a longer name, is still scanned');
+  // Another case is the same folder only where the OS folds case (Windows, macOS); on Linux it is another name.
+  const upper = await scanText('CLAUDE-CODE-PLUGINS/src/x.py:3 drops the error.', target);
+  assert.equal(upper.identityHits.length, process.platform === 'linux' ? 1 : 0, JSON.stringify(upper));
+  const self = await scanText('As Claude, I checked claude-code-plugins/src/x.py.\nI am Claude and I found it.', target);
+  assert.equal(self.selfIdHits.length, 2, JSON.stringify(self));
 });
 
 test('scanText: F2 -- vendor tokens match on word boundaries, so "affable", "octopus", and "fables" are not identity hits, while "Codex", "Claude\'s", "codex-dispatch.mjs", and "gpt-5" mentions still are', async () => {
@@ -2782,7 +2799,7 @@ test('extractClaimBlocks: F3 -- evidence stops at the Evidence fence\'s closing 
 
 test('extractClaimBlocks: F3 -- unfenced evidence also stops at a "Suggested fix:" line instead of swallowing it', () => {
   const { blocks } = extractClaimBlocks(
-    '## A1 — t\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: PLAUSIBLE\nEvidence: x.js:4 returns null\nSuggested fix: guard it\n'
+    '## A1 — t\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: PLAUSIBLE\nSame shape elsewhere: none found\nEvidence: x.js:4 returns null\nSuggested fix: guard it\n'
   );
   assert.equal(blocks.get('A1').evidence, 'x.js:4 returns null');
   assert.equal(blocks.get('A1').suggestedFix, 'guard it');
@@ -2813,6 +2830,75 @@ test('translateFindings: F3/F14 -- with --phase1-dir, a post-fence "Suggested fi
   assert.deepEqual(result.findings[1].suggested_fix, []);
 });
 
+test('extractClaimBlocks: a "Trigger:" line before Evidence and a "Same shape elsewhere:" line (own line or mid-line, outside a fence) are captured without moving the evidence boundary', () => {
+  const fenced = [
+    '## A1 — t', 'Severity: HIGH', 'Basis: EXECUTED', 'Evidence strength: REPRODUCED', 'Trigger: a gateway that pages past 1000 rows; rare',
+    'Evidence:', '```', '$ node x.js', 'Same shape elsewhere: inside the fence is output', '```',
+    'Suggested fix: guard it', 'Same shape elsewhere: y.js:40, z.js:7', '',
+  ].join('\n');
+  const a1 = extractClaimBlocks(fenced).blocks.get('A1');
+  assert.equal(a1.trigger, 'a gateway that pages past 1000 rows; rare');
+  assert.equal(a1.sameShape, 'y.js:40, z.js:7', 'a fenced line is evidence, never the sweep line');
+  assert.equal(a1.evidence, '$ node x.js\nSame shape elsewhere: inside the fence is output');
+  assert.equal(a1.suggestedFix, 'guard it');
+  const midLine = extractClaimBlocks('## A2 — t\nSeverity: LOW\nBasis: INFERENCE\nEvidence strength: PLAUSIBLE\nEvidence: x.js:4 returns null\nImpact: data loss. Same shape elsewhere: w.js:9\n').blocks.get('A2');
+  assert.equal(midLine.sameShape, 'w.js:9');
+  assert.equal(midLine.evidence, 'x.js:4 returns null\nImpact: data loss. Same shape elsewhere: w.js:9', 'unfenced evidence keeps its old end');
+  assert.equal(midLine.trigger, null);
+  const old = extractClaimBlocks(claimBlock('A3')).blocks.get('A3');
+  assert.equal(old.trigger, null);
+  assert.equal(old.sameShape, 'none found', 'the claimBlock helper writes the line every claim now needs');
+});
+
+test('translateFindings: trigger and same_shape come from the origins\' Phase 1 lines ("<origin>: <text>"), are left out when no origin has one, and an auditor-written copy is not kept', async (t) => {
+  const dir = await tempDir(t, 'trigger-translate-');
+  const withLines = claimBlock('A1', 'HIGH', 'Same shape elsewhere: none found (searched parse*)\n').replace('Evidence:\n', 'Trigger: every run with an empty list\nEvidence:\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), `${withLines}\n${claimBlock('A2')}`);
+  await fs.writeFile(path.join(dir, 'B-findings.md'), `${claimBlock('B1', 'HIGH', 'Same shape elsewhere: b.js:3\n')}`);
+  const audit = JSON.stringify({
+    findings: [
+      validFinding({ id: 'F1', origins: ['X1', 'Y1'], peer_responses: [{ claim: 'X1', response: 'conceded' }, { claim: 'Y1', response: 'conceded' }] }),
+      validFinding({ id: 'F2', origins: ['X2'], peer_responses: [{ claim: 'X2', response: 'conceded' }], trigger: ['made up by the auditor'], same_shape: ['also made up'] }),
+    ],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  assert.deepEqual(result.findings[0].trigger, ['A1: every run with an empty list']);
+  assert.deepEqual(result.findings[0].same_shape, ['A1: none found (searched parse*)', 'B1: b.js:3']);
+  assert.equal('trigger' in result.findings[1], false);
+  assert.deepEqual(result.findings[1].same_shape, ['A2: none found'], 'the seat line, never the auditor copy');
+});
+
+test('field run: an optional "Pre-existing:" line is read as yes, no or unknown, copied per origin, and an auditor copy or another word is not kept', async (t) => {
+  const block = (id, word) => claimBlock(id).replace('Evidence:\n', `Pre-existing: ${word}\nEvidence:\n`);
+  assert.equal(extractClaimBlocks(block('A1', 'Yes (the loop predates the change)')).blocks.get('A1').preExisting, 'yes');
+  assert.equal(extractClaimBlocks(block('A1', 'maybe')).blocks.get('A1').preExisting, null, 'only yes, no or unknown');
+  assert.equal(extractClaimBlocks(claimBlock('A1')).blocks.get('A1').preExisting, null, 'an older claim without the line');
+  const dir = await tempDir(t, 'pre-existing-translate-');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), `${block('A1', 'yes')}\n${claimBlock('A2')}`);
+  await fs.writeFile(path.join(dir, 'B-findings.md'), block('B1', 'no'));
+  const audit = JSON.stringify({
+    findings: [
+      validFinding({ id: 'F1', origins: ['X1', 'Y1'], peer_responses: [{ claim: 'X1', response: 'conceded' }, { claim: 'Y1', response: 'conceded' }] }),
+      validFinding({ id: 'F2', origins: ['X2'], peer_responses: [{ claim: 'X2', response: 'conceded' }], pre_existing: ['made up by the auditor'] }),
+    ],
+  });
+  const result = await translateFindings(audit, { A: 'X', B: 'Y' }, dir);
+  assert.deepEqual(result.findings[0].pre_existing, ['A1: yes', 'B1: no']);
+  assert.equal('pre_existing' in result.findings[1], false, 'the seat line, never the auditor copy');
+});
+
+test('CLI validate: warns (exit 0) for a HIGH or CRITICAL claim with no "Trigger:" line, not for one with it or for a MEDIUM', async (t) => {
+  const dir = await tempDir(t, 'validate-trigger-');
+  const withTrigger = claimBlock('A2', 'CRITICAL').replace('Evidence:\n', 'Trigger: any restart\nEvidence:\n');
+  await fs.writeFile(path.join(dir, 'A-findings.md'), `# Seat A findings\n\n${claimBlock('A1', 'HIGH')}\n${withTrigger}\n${claimBlock('A3', 'MEDIUM')}\n`);
+  await fs.writeFile(path.join(dir, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B1', 'CRITICAL')}\n`);
+  const r = await runCli(['validate', '--phase1-dir', dir]);
+  assert.equal(r.status, 0, r.stderr);
+  const warned = r.stderr.split('\n').filter((l) => l.includes('no "Trigger:" line')).map((l) => /seat (\w) (\w+) is (\w+)/.exec(l).slice(1));
+  assert.deepEqual(warned, [['A', 'A1', 'HIGH'], ['B', 'B1', 'CRITICAL']]);
+  assert.match(r.stdout, /validate clean/);
+});
+
 test('relabelText: F5 -- only real claim IDs (## / ### headings and Claim: lines) are rewritten; product names A100/B200 and an A10 with no claim heading stay untouched', () => {
   const text = '# Seat A findings\n\n## A1 — t\nRan on A100 and B200 GPUs; A10 is a cell ref; see A1.\n### A2\nClaim: A3\n';
   const out = relabelText(text, 'A', 'X');
@@ -2828,13 +2914,13 @@ test('CLI relabel: F5 -- a Phase 3 second pass with --phase1-dir rewrites a pros
   await fs.writeFile(path.join(dir, 'A-findings.md'), `# Seat A findings\n\n${claimBlock('A1', 'HIGH', 'Same root cause as B5, seen on B200 hardware.\n')}`);
   await fs.writeFile(path.join(dir, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B5')}`);
   const pass1 = path.join(dir, 'tmp-A.md');
-  let r = runCli(['relabel', '--in', path.join(dir, 'A-findings.md'), '--out', pass1, '--from', 'A', '--to', 'X']);
+  let r = await runCli(['relabel', '--in', path.join(dir, 'A-findings.md'), '--out', pass1, '--from', 'A', '--to', 'X']);
   assert.equal(r.status, 0, r.stderr);
   const out = path.join(dir, 'out', 'X-findings.md');
-  r = runCli(['relabel', '--in', pass1, '--out', out, '--from', 'B', '--to', 'Y']);
+  r = await runCli(['relabel', '--in', pass1, '--out', out, '--from', 'B', '--to', 'Y']);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /no "B" claim IDs/);
-  r = runCli(['relabel', '--in', pass1, '--out', out, '--from', 'B', '--to', 'Y', '--phase1-dir', dir]);
+  r = await runCli(['relabel', '--in', pass1, '--out', out, '--from', 'B', '--to', 'Y', '--phase1-dir', dir]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(await fs.readFile(out, 'utf8'), /Same root cause as Y5, seen on B200 hardware\./);
 });
@@ -2857,9 +2943,9 @@ test('dogfood: F5 -- a full double relabel of a real run\'s Phase 1 files (rebut
     await fs.writeFile(inPath, `${texts[own]}\nBenchmarked on A100 and B200; also A99 (not a claim).\n`);
     const tmp = path.join(dir, `tmp-${own}.md`);
     const outPath = path.join(dir, `${ownTo}-findings.md`);
-    let r = runCli(['relabel', '--in', inPath, '--out', tmp, '--from', own, '--to', ownTo]);
+    let r = await runCli(['relabel', '--in', inPath, '--out', tmp, '--from', own, '--to', ownTo]);
     assert.equal(r.status, 0, r.stderr);
-    r = runCli(['relabel', '--in', tmp, '--out', outPath, '--from', peer, '--to', peerTo, '--phase1-dir', real]);
+    r = await runCli(['relabel', '--in', tmp, '--out', outPath, '--from', peer, '--to', peerTo, '--phase1-dir', real]);
     assert.equal(r.status, 0, r.stderr);
     const out = await fs.readFile(outPath, 'utf8');
     const survivors = [...realIds].filter((id) => new RegExp(`\\b${id}\\b`).test(out));
@@ -2914,12 +3000,12 @@ test('CLI scan: F6 -- --phase2-dir hard-stops on a surviving Phase 2 label ("ide
   await fs.writeFile(path.join(p2, 'peer-view-for-B.md'), '# Peer findings\n\n## P3 — y\n');
   const leak = path.join(dir, 'X-findings.md');
   await fs.writeFile(leak, '# Seat X findings\n\n## X1 — t\nEvidence:\n```\nas identified in P12, x.js:4 guards it\n```\n');
-  let r = runCli(['scan', '--in', leak, '--phase2-dir', p2]);
+  let r = await runCli(['scan', '--in', leak, '--phase2-dir', p2]);
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /PEER-LABEL LEAK line 6 \(Phase 2 "P12"/);
   const clean = path.join(dir, 'Y-findings.md');
   await fs.writeFile(clean, '# Seat Y findings\n\n## Y1 — t\nEvidence:\n```\nP99 is a part number\n```\n');
-  r = runCli(['scan', '--in', clean, '--phase2-dir', p2]);
+  r = await runCli(['scan', '--in', clean, '--phase2-dir', p2]);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(scanForPeerLabelLeaks('P12 and P3 and P4', new Set(['P12', 'P3'])).map((h) => h.id), ['P12', 'P3']);
   assert.deepEqual([...peerViewClaimIds('## P1 — a\n```\n## P9\n```\n')], ['P1']);
@@ -2933,7 +3019,7 @@ test('CLI validate: F7 -- a "## P71" or duplicate "## A1" entry heading inside "
       path.join(dir, 'A-findings.md'),
       `# Seat A findings\n\n${claimBlock('A1')}\n## Rebuttals (from B) of A claims\n\n${entryHeading}\nClaim: A1\nAction: CONCEDE\n`
     );
-    const r = runCli(['validate', '--phase1-dir', dir]);
+    const r = await runCli(['validate', '--phase1-dir', dir]);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, new RegExp(`heading "${entryHeading}" sits inside "## Rebuttals \\(from B\\) of A claims"`));
     assert.match(r.stderr, /return this section to seat B \(the rebutting seat that wrote it\), not to seat A/);
@@ -2944,7 +3030,7 @@ test('CLI validate: F7 -- a "## P71" or duplicate "## A1" entry heading inside "
     path.join(dir, 'A-findings.md'),
     `# Seat A findings\n\n${claimBlock('A1')}\n## Rebuttals (from B) of A claims\n\n### A1\nClaim: A1\nAction: CONCEDE\n`
   );
-  const ok = runCli(['validate', '--phase1-dir', dir]);
+  const ok = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(ok.status, 0, ok.stderr);
 });
 
@@ -2965,7 +3051,7 @@ test('CLI append-rebuttals: F8 -- normalizes "## P<n>" entry headings to "###", 
   const { dir, aText, peerView, onto } = await f8Setup(t);
   const raw = path.join(dir, 'raw.md');
   await fs.writeFile(raw, F8_GOOD_RAW);
-  const r = runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
+  const r = await runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
   assert.equal(r.status, 0, r.stderr);
   const out = await fs.readFile(onto, 'utf8');
   assert.ok(out.startsWith(aText), 'the original findings are kept byte-identical');
@@ -2973,8 +3059,8 @@ test('CLI append-rebuttals: F8 -- normalizes "## P<n>" entry headings to "###", 
     out.slice(aText.length),
     '\n## Rebuttals (from B) of A claims\n\n### A1 — t\nClaim: A1\nAction: CONCEDE\nEvidence:\n```\nok\n```\n\n### A2\nClaim: A2\nAction: DISPUTE\nCounter-fact: see A1 above\n'
   );
-  assert.equal(runCli(['validate', '--phase1-dir', dir]).status, 0);
-  const again = runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
+  assert.equal((await runCli(['validate', '--phase1-dir', dir])).status, 0);
+  const again = await runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
   assert.notEqual(again.status, 0);
   assert.match(again.stderr, /already contains "## Rebuttals \(from B\) of A claims"/);
 });
@@ -2991,13 +3077,13 @@ test('CLI append-rebuttals: F8 -- refuses, leaving --onto byte-identical, on a c
   const raw = path.join(dir, 'raw.md');
   for (const [text, expected] of cases) {
     await fs.writeFile(raw, text);
-    const r = runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
+    const r = await runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
     assert.equal(r.status, 1, `expected refusal for:\n${text}`);
     assert.match(r.stderr, expected);
     assert.equal(await fs.readFile(onto, 'utf8'), aText, '--onto must be unchanged on refusal');
   }
   await fs.writeFile(raw, F8_GOOD_RAW);
-  const wrong = runCli(['append-rebuttals', '--in', raw, '--onto', path.join(dir, 'B-findings.md'), '--rebutter', 'B', '--peer-view', peerView]);
+  const wrong = await runCli(['append-rebuttals', '--in', raw, '--onto', path.join(dir, 'B-findings.md'), '--rebutter', 'B', '--peer-view', peerView]);
   assert.equal(wrong.status, 1);
   assert.match(wrong.stderr, /--onto must be the peer's Phase 1 file "A-findings\.md"/);
   assert.deepEqual((await fs.readdir(dir)).sort(), ['A-findings.md', 'B-findings.md', 'peer-view-for-B.md', 'raw.md'], 'no temp file is left behind');
@@ -3013,19 +3099,19 @@ test('CLI append-rebuttals: F8 -- on a real run\'s raw rebuttal files, seat A\'s
   const appendA = () => runCli(['append-rebuttals', '--in', path.join(real, 'A-rebuttals-raw.md'), '--onto', path.join(dir, 'B-findings.md'),
     '--rebutter', 'A', '--peer-view', path.join(real, 'peer-view-for-A.md')]);
   // That run's B1 Evidence fence quotes the real claim ID A1, which validate refuses until B redacts it.
-  let r = appendA();
+  let r = await appendA();
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /B-findings\.md:11: claim ID "A1" inside a fence .*return to seat B/);
+  assert.match(r.stderr, /B-findings\.md:12: claim ID "A1" inside a fence .*return to seat B/);
   const bFile = path.join(dir, 'B-findings.md');
   const bRedacted = (await fs.readFile(bFile, 'utf8')).replace('"A1 follows P12" after translating X1 to A1', '"<id> follows P12" after translating X1 to <id>');
   await fs.writeFile(bFile, bRedacted);
-  r = appendA();
+  r = await appendA();
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /appended 17 rebuttal\(s\) from A/);
   const bOut = await fs.readFile(path.join(dir, 'B-findings.md'), 'utf8');
   assert.match(bOut, /^## Rebuttals \(from A\) of B claims$/m);
   assert.match(bOut, /^### B17\b/m);
-  r = runCli(['append-rebuttals', '--in', path.join(real, 'B-rebuttals-raw.md'), '--onto', path.join(dir, 'A-findings.md'),
+  r = await runCli(['append-rebuttals', '--in', path.join(real, 'B-rebuttals-raw.md'), '--onto', path.join(dir, 'A-findings.md'),
     '--rebutter', 'B', '--peer-view', path.join(real, 'peer-view-for-B.md')]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /--in:58: "P12" inside a fence names a peer-view claim/);
@@ -3052,7 +3138,7 @@ async function f31Setup(t) {
 test('CLI audit-prep: F31/F30 -- writes exactly <label>-findings.md for both seats from the flip mapping (zero-rebuttal second pass included) with no real A/B claim ID left, and prints a one-line falsificationBreakdown', async (t) => {
   const { root, p1, mapDir, target, mapping } = await f31Setup(t);
   const outDir = path.join(root, 'audit-input');
-  const r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target]);
+  const r = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target]);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual((await fs.readdir(outDir)).sort(), ['X-findings.md', 'Y-findings.md']);
   const y = await fs.readFile(path.join(outDir, 'Y-findings.md'), 'utf8');
@@ -3068,15 +3154,57 @@ test('CLI audit-prep: F31/F30 -- writes exactly <label>-findings.md for both sea
   assert.deepEqual(await fs.readdir(mapDir), ['mapping.json'], 'no temp file next to the mapping');
 });
 
+test('Linux round: audit-prep writes a run-folder path a seat pasted as <run-dir>, in any letter case or separator', async (t) => {
+  const { root, p1, target, mapping } = await f31Setup(t);
+  // Another case is the same folder only where the OS folds case; on Linux the exact spelling is pasted.
+  const spelled = process.platform === 'linux' ? root : root.toLowerCase();
+  const pasted = `refused (${spelled}${path.sep}phase1${path.sep}x) and ${root.split(path.sep).join('/')}/run.json`;
+  await fs.writeFile(path.join(p1, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B1', 'HIGH', `${pasted}\n`)}`);
+  const outDir = path.join(path.dirname(root), `${path.basename(root)}-audit-input`);
+  t.after(() => fs.rm(outDir, { recursive: true, force: true }));
+  const r = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /X-findings\.md: 2 run-folder path\(s\) written as <run-dir>/);
+  const x = await fs.readFile(path.join(outDir, 'X-findings.md'), 'utf8');
+  assert.match(x, /refused \(<run-dir>[\\/]phase1[\\/]x\) and <run-dir>\/run\.json/);
+  assert.match(await fs.readFile(path.join(p1, 'B-findings.md'), 'utf8'), /refused \(/, 'the seat file keeps its text');
+  // Closing round 3: a spelling the rewrite cannot read (~) blocks, and nothing reaches the auditor.
+  const rel = path.relative(os.homedir(), root);
+  if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    await fs.writeFile(path.join(p1, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B1', 'HIGH', `see ~/${rel.split(path.sep).join('/')}/run.json\n`)}`);
+    const outDir2 = `${outDir}-2`;
+    t.after(() => fs.rm(outDir2, { recursive: true, force: true }));
+    const blocked = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir2, '--target-dir', target]);
+    assert.equal(blocked.status, 1, blocked.stderr);
+    assert.match(blocked.stderr, /X-findings\.md: RUN-FOLDER PATH still named/);
+    await assert.rejects(fs.access(path.join(outDir2, 'X-findings.md')));
+  }
+});
+
+test('closing round 3: audit-prep retries a rename Windows briefly refuses, and a rename that keeps failing leaves no staging folder', async (t) => {
+  const { runAuditPrep, parseArgs } = await import('../blind-relabel.mjs');
+  const { root, p1, target, mapping } = await f31Setup(t);
+  const outDir = path.join(root, 'audit-input');
+  let calls = 0;
+  const flaky = async (from, to) => { calls += 1; if (calls < 3) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); return fs.rename(from, to); };
+  await runAuditPrep(parseArgs(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target]), { renameFn: flaky });
+  assert.equal(calls, 3);
+  assert.deepEqual((await fs.readdir(outDir)).sort(), ['X-findings.md', 'Y-findings.md']);
+  const outDir2 = path.join(root, 'audit-input-2');
+  const always = async () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); };
+  await assert.rejects(runAuditPrep(parseArgs(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir2, '--target-dir', target]), { renameFn: always }), /EPERM/);
+  assert.deepEqual((await fs.readdir(root)).filter((n) => n.includes('.staging-')), [], 'no staging folder left');
+});
+
 test('CLI audit-prep --breakdown-out: writes the same breakdown line to a file outside --out-dir, and refuses a path inside it', async (t) => {
   const { root, p1, target, mapping } = await f31Setup(t);
   const outDir = path.join(root, 'audit-input');
-  const inside = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target,
+  const inside = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target,
     '--breakdown-out', path.join(outDir, 'sub', 'breakdown.json')]);
   assert.equal(inside.status, 1);
   assert.match(inside.stderr, /--breakdown-out must not be inside --out-dir/);
   const file = path.join(root, 'phase3', 'falsification-breakdown.json');
-  const r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--breakdown-out', file]);
+  const r = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--breakdown-out', file]);
   assert.equal(r.status, 0, r.stderr);
   const printed = r.stdout.split('\n').find((l) => l.includes('falsificationBreakdown'));
   assert.equal(await fs.readFile(file, 'utf8'), `${printed}\n`);
@@ -3084,17 +3212,32 @@ test('CLI audit-prep --breakdown-out: writes the same breakdown line to a file o
   assert.throws(() => parseArgs(['scan', '--in', 'a', '--breakdown-out', 'b']), /--breakdown-out is only accepted by audit-prep/);
 });
 
+test('CLI audit-prep: a step that fails while writing leaves --out-dir empty, so the same step runs again; an existing empty --out-dir is used', async (t) => {
+  const { root, p1, target, mapping } = await f31Setup(t);
+  const outDir = path.join(root, 'audit-input');
+  await fs.mkdir(outDir);
+  // The breakdown's folder is a file, so writing the breakdown fails.
+  await fs.writeFile(path.join(root, 'blocker'), '');
+  const failed = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--breakdown-out', path.join(root, 'blocker', 'breakdown.json')]);
+  assert.notEqual(failed.status, 0);
+  assert.deepEqual(await fs.readdir(outDir), [], 'nothing half-staged');
+  const again = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--breakdown-out', path.join(root, 'phase3', 'breakdown.json')]);
+  assert.equal(again.status, 0, again.stderr);
+  assert.deepEqual((await fs.readdir(outDir)).sort(), ['X-findings.md', 'Y-findings.md']);
+  assert.deepEqual((await fs.readdir(root)).filter((n) => n.includes('.staging-')), [], 'no staging folder left after a finished step');
+});
+
 test('CLI audit-prep: F31 -- refuses a non-empty --out-dir or one equal to --phase1-dir or the mapping file\'s folder, and writes nothing to --out-dir when a scan hits (a surviving Phase 2 label via --phase2-dir) [slow]', async (t) => {
   const { root, p1, mapDir, target, mapping } = await f31Setup(t);
   for (const bad of [p1, mapDir]) {
-    const r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', bad, '--target-dir', target]);
+    const r = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', bad, '--target-dir', target]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /--out-dir must differ from --phase1-dir and from the mapping file's folder/);
   }
   const busy = path.join(root, 'busy');
   await fs.mkdir(busy);
   await fs.writeFile(path.join(busy, 'stray.txt'), '');
-  let r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', busy, '--target-dir', target]);
+  let r = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', busy, '--target-dir', target]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /is not empty \(stray\.txt\)/);
 
@@ -3106,7 +3249,7 @@ test('CLI audit-prep: F31 -- refuses a non-empty --out-dir or one equal to --pha
   const aPath = path.join(p1, 'A-findings.md');
   await fs.writeFile(aPath, (await fs.readFile(aPath, 'utf8')).replace('x.js:9 guards it', 'x.js:9 guards it, as P2 said'));
   const outDir = path.join(root, 'audit-input');
-  r = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--phase2-dir', p2]);
+  r = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--phase2-dir', p2]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /Y-findings\.md: PEER-LABEL LEAK .*"P2"/);
   assert.match(r.stderr, /nothing written to --out-dir/);
@@ -3133,7 +3276,7 @@ test('CLI scan: F21 -- --target-urls reports every target-embedded URL (prose or
     findings,
     'See HTTPS://EXAMPLE.COM/docs/page#intro for context.\n```\ncurl https://example.com/docs/page/\n```\nAlso https://example.com/docs/Other and https://example.com/docs/page2.\n'
   );
-  const r = runCli(['scan', '--in', findings, '--target-urls', urls]);
+  const r = await runCli(['scan', '--in', findings, '--target-urls', urls]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /TRUST-BOUNDARY line 1: HTTPS:\/\/EXAMPLE\.COM\/docs\/page#intro/);
   assert.match(r.stderr, /TRUST-BOUNDARY line 3: https:\/\/example\.com\/docs\/page\//);
@@ -3144,7 +3287,7 @@ test('CLI scan: F21 -- --target-urls reports every target-embedded URL (prose or
   assert.equal(scanForTargetUrls('no urls here', new Set()).length, 0);
 });
 
-test('parseArgs: new flags are accepted only by their own subcommands (--phase2-dir: scan/audit-prep, --target-urls: scan, --onto/--rebutter/--peer-view: append-rebuttals, --out-dir: audit-prep), and relabel now accepts --phase1-dir', () => {
+test('parseArgs: new flags are accepted only by their own subcommands (--phase2-dir: scan/audit-prep, --target-urls: scan, --onto/--rebutter/--peer-view: append-rebuttals, --out-dir: audit-prep), and relabel now accepts --phase1-dir', async () => {
   assert.throws(() => parseArgs(['validate', '--phase1-dir', 'p', '--phase2-dir', 'q']), /--phase2-dir is only accepted by scan and audit-prep/);
   assert.throws(() => parseArgs(['relabel', '--in', 'a', '--out', 'b', '--from', 'A', '--to', 'P', '--target-urls', 'u']), /--target-urls is only accepted by scan/);
   assert.throws(() => parseArgs(['scan', '--in', 'a', '--onto', 'b']), /--onto is only accepted by append-rebuttals/);
@@ -3180,59 +3323,59 @@ async function targetExemptSetup(t, fence) {
   return { p1, p2, input };
 }
 
-function scanIds(s, withTarget = true) {
+async function scanIds(s, withTarget = true) {
   const args = ['scan', '--in', s.input, '--phase1-dir', s.p1, '--forbid-seats', 'A,B', '--phase2-dir', s.p2];
-  return runCli(withTarget ? [...args, '--target-dir', PHASE_TARGET] : args);
+  return await runCli(withTarget ? [...args, '--target-dir', PHASE_TARGET] : args);
 }
 
 test('CLI scan target-derived: hardware-ID chunk "20:00:00:25:B5:00:00:0A" found in the target does not hard-stop on B5 [slow]', async (t) => {
-  const r = scanIds(await targetExemptSetup(t, 'port id 20:00:00:25:B5:00:00:0A online'));
+  const r = await scanIds(await targetExemptSetup(t, 'port id 20:00:00:25:B5:00:00:0A online'));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "B5"/);
   assert.match(r.stdout, /scan clean/);
 });
 
 test('CLI scan target-derived: `df -B1` chunk found in the target does not hard-stop on B1 [slow]', async (t) => {
-  const r = scanIds(await targetExemptSetup(t, '$ df -B1 /data'));
+  const r = await scanIds(await targetExemptSetup(t, '$ df -B1 /data'));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "B1"/);
 });
 
 test('CLI scan target-derived: quoted docstring line "P1 scope ... is P2" that occurs verbatim in the target does not hard-stop on P1/P2 [slow]', async (t) => {
-  const r = scanIds(await targetExemptSetup(t, '> P1 scope covers account creation only; billing export is P2.'));
+  const r = await scanIds(await targetExemptSetup(t, '> P1 scope covers account creation only; billing export is P2.'));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "P1"/);
   assert.match(r.stderr, /target-derived "P2"/);
 });
 
 test('CLI scan target-derived: "P0-P4 complete" (P4 embedded in a target chunk) does not hard-stop [slow]', async (t) => {
-  const r = scanIds(await targetExemptSetup(t, 'status: P0-P4 complete'));
+  const r = await scanIds(await targetExemptSetup(t, 'status: P0-P4 complete'));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "P4"/);
 });
 
 test('CLI scan target-derived: bare "see A2" in a fence still hard-stops even though the target has a standalone "A2" [slow]', async (t) => {
-  const r = scanIds(await targetExemptSetup(t, 'see A2 for the root cause'));
+  const r = await scanIds(await targetExemptSetup(t, 'see A2 for the root cause'));
   assert.equal(r.status, 1);
   assert.match(r.stderr, /CLAIM-ID LEAK line \d+ \(real "A2" survives relabel\)/);
 });
 
 test('CLI scan target-derived: "A2/A3" cross-reference absent from the target still hard-stops [slow]', async (t) => {
-  const r = scanIds(await targetExemptSetup(t, 'same defect as A2/A3'));
+  const r = await scanIds(await targetExemptSetup(t, 'same defect as A2/A3'));
   assert.equal(r.status, 1);
   assert.match(r.stderr, /real "A2" survives/);
   assert.match(r.stderr, /real "A3" survives/);
 });
 
 test('CLI scan target-derived: an exempt hardware ID plus a bare B5 on the same line still hard-stops [slow]', async (t) => {
-  const r = scanIds(await targetExemptSetup(t, 'id 20:00:00:25:B5:00:00:0A, see B5'));
+  const r = await scanIds(await targetExemptSetup(t, 'id 20:00:00:25:B5:00:00:0A, see B5'));
   assert.equal(r.status, 1);
   assert.match(r.stderr, /real "B5" survives/);
 });
 
 test('CLI scan target-derived: without --target-dir the hardware-ID and phase-name hits still hard-stop', async (t) => {
   for (const fence of ['port id 20:00:00:25:B5:00:00:0A online', 'status: P0-P4 complete']) {
-    const r = scanIds(await targetExemptSetup(t, fence), false);
+    const r = await scanIds(await targetExemptSetup(t, fence), false);
     assert.equal(r.status, 1, `expected a hard stop for: ${fence}`);
   }
 });
@@ -3243,17 +3386,17 @@ test('CLI append-rebuttals target-derived: a fenced "P0-P4" chunk from --target-
   await fs.writeFile(peerView, '# Peer findings\n\n## P1 — t\n\n## P2 — t\n\n## P4 — t\n');
   await fs.writeFile(raw, '### P1\nClaim: P1\nAction: CONCEDE\nEvidence:\n```\nstatus: P0-P4 complete\n```\n### P2\nClaim: P2\nAction: CONCEDE\n### P4\nClaim: P4\nAction: CONCEDE\n');
   const base = ['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView];
-  const refused = runCli(base);
+  const refused = await runCli(base);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /"P4" inside a fence names a peer-view claim/);
-  const ok = runCli([...base, '--target-dir', PHASE_TARGET]);
+  const ok = await runCli([...base, '--target-dir', PHASE_TARGET]);
   assert.equal(ok.status, 0, ok.stderr);
   assert.match(ok.stderr, /report \(target-derived "P4" inside a fence/);
 });
 
 async function validateCrossRefSetup(t, fence) {
   const dir = await tempDir(t, 'validate-crossref-');
-  const a1 = `## A1 — t\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n\`\`\`\n${fence}\n\`\`\`\n`;
+  const a1 = `## A1 — t\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nSame shape elsewhere: none found\nEvidence:\n\`\`\`\n${fence}\n\`\`\`\n`;
   await fs.writeFile(path.join(dir, 'A-findings.md'), `# Seat A findings\n\n${a1}\n${claimBlock('A2')}`);
   await fs.writeFile(path.join(dir, 'B-findings.md'), '# Seat B findings\n\n## No findings\n');
   return dir;
@@ -3261,18 +3404,18 @@ async function validateCrossRefSetup(t, fence) {
 
 test('CLI validate cross-ref: an Evidence fence "see A2" in A-findings fails validate before the freeze, returned to seat A', async (t) => {
   const dir = await validateCrossRefSetup(t, 'see A2 for the same root cause');
-  const r = runCli(['validate', '--phase1-dir', dir]);
+  const r = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /A-findings\.md:\d+: claim ID "A2" inside a fence .*return to seat A/);
-  const withTarget = runCli(['validate', '--phase1-dir', dir, '--target-dir', PHASE_TARGET]);
+  const withTarget = await runCli(['validate', '--phase1-dir', dir, '--target-dir', PHASE_TARGET]);
   assert.equal(withTarget.status, 1, 'a bare "A2" stays a problem even when the target has a standalone "A2"');
 });
 
 test('CLI validate cross-ref: a hardware ID embedding "A2" whose chunk exists in --target-dir passes validate', async (t) => {
   const dir = await validateCrossRefSetup(t, 'port id 20:00:00:25:A2:00:00:0B online');
-  const r = runCli(['validate', '--phase1-dir', dir, '--target-dir', PHASE_TARGET]);
+  const r = await runCli(['validate', '--phase1-dir', dir, '--target-dir', PHASE_TARGET]);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(runCli(['validate', '--phase1-dir', dir]).status, 1, 'without --target-dir the same hardware ID is still flagged');
+  assert.equal((await runCli(['validate', '--phase1-dir', dir])).status, 1, 'without --target-dir the same hardware ID is still flagged');
 });
 
 test('CLI validate cross-ref: a fenced claim ID inside "## Rebuttals (from B) of A claims" is returned to rebutting seat B', async (t) => {
@@ -3282,7 +3425,7 @@ test('CLI validate cross-ref: a fenced claim ID inside "## Rebuttals (from B) of
     `# Seat A findings\n\n${claimBlock('A1')}\n## Rebuttals (from B) of A claims\n\n### A1\nClaim: A1\nAction: DISPUTE\nEvidence:\n\`\`\`\ncontradicted by B1\n\`\`\`\n`
   );
   await fs.writeFile(path.join(dir, 'B-findings.md'), `# Seat B findings\n\n${claimBlock('B1')}`);
-  const r = runCli(['validate', '--phase1-dir', dir]);
+  const r = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /claim ID "B1" inside a fence .*return to seat B/);
   assert.match(r.stderr, /return to: seat B/);
@@ -3293,7 +3436,7 @@ test('BOM: a UTF-8 BOM (PowerShell Set-Content -Encoding utf8) on a Phase 1 file
   const dir = await tempDir(t, 'bom-');
   await fs.writeFile(path.join(dir, 'A-findings.md'), `\uFEFF# Seat A findings\n\n${claimBlock('A1')}`, 'utf8');
   await fs.writeFile(path.join(dir, 'B-findings.md'), '\uFEFF# Seat B findings\r\n\r\n## No findings\r\n', 'utf8');
-  const v = runCli(['validate', '--phase1-dir', dir]);
+  const v = await runCli(['validate', '--phase1-dir', dir]);
   assert.equal(v.status, 0, v.stderr);
   const auditPath = path.join(dir, 'findings.audit.json');
   const mapPath = path.join(dir, 'mapping.json');
@@ -3302,7 +3445,7 @@ test('BOM: a UTF-8 BOM (PowerShell Set-Content -Encoding utf8) on a Phase 1 file
   })] }), 'utf8');
   await fs.writeFile(mapPath, '\uFEFF{"A":"X","B":"Y"}\n', 'utf8');
   const out = path.join(dir, 'findings.json');
-  const tr = runCli(['translate', '--in', auditPath, '--mapping', mapPath, '--out', out, '--phase1-dir', dir]);
+  const tr = await runCli(['translate', '--in', auditPath, '--mapping', mapPath, '--out', out, '--phase1-dir', dir]);
   assert.equal(tr.status, 0, tr.stderr);
   assert.deepEqual(JSON.parse(await fs.readFile(out, 'utf8')).findings[0].origins, ['A1']);
   assert.equal(parseFenceLines('\uFEFF# Seat A findings\n').lines[0].text, '# Seat A findings');
@@ -3329,18 +3472,18 @@ async function sourceDirSetup(t) {
 test('CLI audit-prep/scan --source-dir: a quoted line from a second repo exempts its "P2" peer-label hit; without --source-dir it still hard-stops [slow]', async (t) => {
   const s = await sourceDirSetup(t);
   const base = ['audit-prep', '--phase1-dir', s.p1, '--mapping', s.mapping, '--target-dir', s.target, '--phase2-dir', s.p2];
-  let r = runCli([...base, '--out-dir', path.join(s.root, 'audit-1')]);
+  let r = await runCli([...base, '--out-dir', path.join(s.root, 'audit-1')]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /PEER-LABEL LEAK .*"P2"/);
-  r = runCli([...base, '--out-dir', path.join(s.root, 'audit-2'), '--source-dir', s.src]);
+  r = await runCli([...base, '--out-dir', path.join(s.root, 'audit-2'), '--source-dir', s.src]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "P2"/);
   const y = path.join(s.root, 'audit-2', 'Y-findings.md');
   const scan = (...extra) => runCli(['scan', '--in', y, '--phase1-dir', s.p1, '--forbid-seats', 'A,B', '--phase2-dir', s.p2, ...extra]);
-  assert.equal(scan('--target-dir', s.target).status, 1);
-  assert.equal(scan('--target-dir', s.target, '--source-dir', path.join(s.root, 'missing'), '--source-dir', s.src).status, 1);
-  assert.match(scan('--source-dir', path.join(s.root, 'missing')).stderr, /--source-dir: .*missing is not readable/);
-  const ok = scan('--source-dir', s.target, '--source-dir', s.src);
+  assert.equal((await scan('--target-dir', s.target)).status, 1);
+  assert.equal((await scan('--target-dir', s.target, '--source-dir', path.join(s.root, 'missing'), '--source-dir', s.src)).status, 1);
+  assert.match((await scan('--source-dir', path.join(s.root, 'missing'))).stderr, /--source-dir: .*missing is not readable/);
+  const ok = await scan('--source-dir', s.target, '--source-dir', s.src);
   assert.equal(ok.status, 0, ok.stderr);
 });
 
@@ -3351,10 +3494,10 @@ test('--source-dir never widens the vendor-token exemption: a CLAUDE.md in a sou
   await fs.writeFile(path.join(src, 'CLAUDE.md'), 'notes\n');
   const input = path.join(root, 'f.md');
   await fs.writeFile(input, 'The Claude reviewer found this.\n');
-  const r = runCli(['scan', '--in', input, '--source-dir', src]);
+  const r = await runCli(['scan', '--in', input, '--source-dir', src]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /IDENTITY line 1/);
-  assert.equal(runCli(['scan', '--in', input, '--target-dir', src]).status, 0, 'the same folder as --target-dir does exempt it (existing behaviour)');
+  assert.equal((await runCli(['scan', '--in', input, '--target-dir', src])).status, 0, 'the same folder as --target-dir does exempt it (existing behaviour)');
 });
 
 test('parseArgs: --source-dir repeats and is accepted only by scan/validate/append-rebuttals/audit-prep; --packet only by audit-prep', () => {
@@ -3370,18 +3513,41 @@ test('CLI audit-prep --packet: on success stages task-packet.md (byte-exact) and
   await fs.writeFile(packet, packetBytes);
   const base = ['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--target-dir', target];
   const missingOut = path.join(root, 'audit-missing');
-  let r = runCli([...base, '--out-dir', missingOut, '--packet', path.join(root, 'nope.md')]);
+  let r = await runCli([...base, '--out-dir', missingOut, '--packet', path.join(root, 'nope.md')]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /--packet: could not read/);
   await assert.rejects(fs.access(missingOut), 'no --out-dir is created when --packet is unreadable');
   const outDir = path.join(root, 'audit-input');
-  r = runCli([...base, '--out-dir', outDir, '--packet', packet]);
+  r = await runCli([...base, '--out-dir', outDir, '--packet', packet]);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual((await fs.readdir(outDir)).sort(), ['X-findings.md', 'Y-findings.md', 'review-protocol.md', 'task-packet.md']);
   assert.deepEqual(await fs.readFile(path.join(outDir, 'task-packet.md')), packetBytes);
   const bundled = fileURLToPath(new URL('../../references/review-protocol.md', import.meta.url));
-  assert.deepEqual(await fs.readFile(path.join(outDir, 'review-protocol.md')), await fs.readFile(bundled));
-  r = runCli([...base, '--out-dir', outDir, '--packet', packet]);
+  // Field runs (website, northwind-1a): the auditor's copy holds only its own sections, which name no vendor or model.
+  const staged = await fs.readFile(path.join(outDir, 'review-protocol.md'), 'utf8');
+  assert.equal(staged, auditorProtocol(await fs.readFile(bundled, 'utf8')));
+  for (const heading of ['## Canonical findings', '## findings.json', '## Fresh-context auditor']) assert.ok(staged.includes(`\n${heading}\n`), heading);
+  assert.doesNotMatch(staged, /codex|claude|anthropic|openai|\bgpt|opus|sonnet|haiku|fable/i);
+  assert.match(await fs.readFile(bundled, 'utf8'), /Codex/, 'the full protocol does name them');
+  // Every section the staged text points to ("see X", "per X") is in the staged copy too (review of that fix).
+  // Any heading of the full protocol counts, so a pointer to a section the auditor does not get (Manifest and final output) fails.
+  const full = await fs.readFile(bundled, 'utf8');
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const names = [...new Set([...full.matchAll(/^#{2,4} (.+?)\s*$/gm)].map((m) => m[1].replace(/:.*$/, '')))].filter((n) => n.length > 3);
+  // Bold paragraph labels ("**Not built by this feature:**") are pointed to like sections.
+  const labels = [...new Set([...full.matchAll(/^\*\*([^*]+?)[.:]?\*\*/gm)].map((m) => m[1].replace(/[.:]$/, '')))].filter((n) => n.length > 3);
+  const flat = staged.replace(/\s+/g, ' ');
+  const pointsTo = (n) => new RegExp(`\\b(?:see|per) (?:the )?${esc(n)}\\b`).test(flat);
+  const pointed = names.filter(pointsTo);
+  assert.ok(pointed.length > 0);
+  for (const name of pointed) assert.match(staged, new RegExp(`^#{2,4} ${esc(name)}`, 'm'), name);
+  for (const label of labels.filter(pointsTo)) assert.match(staged, new RegExp(`^\\*\\*${esc(label)}`, 'm'), label);
+  // "(see the skill's own Invocation section)": a named section the staged copy does not hold, wherever it lives.
+  const stagedHeads = [...staged.matchAll(/^#{1,4} (.+?)\s*$/gm)].map((m) => m[1]);
+  for (const m of flat.matchAll(/\bsee (?:the |its |this )?(?:skill's own |protocol's )?((?:[A-Z][\w-]*)(?: [\w-]+){0,4}) section\b/g)) {
+    assert.ok(stagedHeads.some((h) => h.startsWith(m[1])), `points to a section the auditor does not get: ${m[0]}`);
+  }
+  r = await runCli([...base, '--out-dir', outDir, '--packet', packet]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /pass a new empty folder/);
 });
@@ -3417,12 +3583,12 @@ test('CLI audit-prep: refuses when a seat had peer claims but its rebuttal secti
   await fs.writeFile(path.join(p2, 'peer-view-for-A.md'), '# Peer findings\n\n## P1 — t\n');
   await fs.writeFile(path.join(p2, 'peer-view-for-B.md'), '# Peer findings\n\n## No findings\n');
   const prep = (outName) => runCli(['audit-prep', '--phase1-dir', s.p1, '--mapping', s.mapping, '--target-dir', s.target, '--phase2-dir', p2, '--out-dir', path.join(s.root, outName)]);
-  let r = prep('out-missing');
+  let r = await prep('out-missing');
   assert.equal(r.status, 1);
   assert.match(r.stderr, /seat A had peer claims to rebut .*no "## Rebuttals \(from A\) of B claims" section/);
   await assert.rejects(fs.access(path.join(s.root, 'out-missing')), 'nothing is staged');
   await fs.writeFile(path.join(p2, 'exchange-result.json'), JSON.stringify({ appended: [], incomplete: ['A'], no_peer_claims: ['B'] }));
-  r = prep('out-incomplete');
+  r = await prep('out-incomplete');
   assert.equal(r.status, 0, `a seat finish recorded as incomplete may have no rebuttals: ${r.stderr}`);
 });
 
@@ -3450,12 +3616,12 @@ test('relabelText P -> peer letter and translate leave a prefixed checklist labe
 test('CLI validate --seat A: gates one seat while B-findings.md does not exist yet, still reports that seat\'s own problems, and says the full validate must follow', async (t) => {
   const dir = await tempDir(t, 'validate-one-seat-');
   await fs.writeFile(path.join(dir, 'A-findings.md'), `# Seat A findings\n\n${claimBlock('A1')}`);
-  assert.match(runCli(['validate', '--phase1-dir', dir]).stderr, /B-findings\.md/, 'the two-seat form still needs both files');
-  let r = runCli(['validate', '--phase1-dir', dir, '--seat', 'A']);
+  assert.match((await runCli(['validate', '--phase1-dir', dir])).stderr, /B-findings\.md/, 'the two-seat form still needs both files');
+  let r = await runCli(['validate', '--phase1-dir', dir, '--seat', 'A']);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /seat A only.*run validate without --seat once both files exist/);
   await fs.writeFile(path.join(dir, 'A-findings.md'), '# Seat A findings\n\n## A1 — t\nSeverity: HIGH\nEvidence:\n```\nsee A1\n```\n');
-  r = runCli(['validate', '--phase1-dir', dir, '--seat', 'A']);
+  r = await runCli(['validate', '--phase1-dir', dir, '--seat', 'A']);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /claim "A1" has/);
   assert.match(r.stderr, /claim ID "A1" inside a fence/);
@@ -3473,10 +3639,10 @@ test('target-derived exemption survives the checklist mask: a verbatim target li
   await fs.writeFile(path.join(target, 'runbook.md'), `${quoted}\n`);
   const raw = path.join(dir, 'raw.md');
   await fs.writeFile(raw, `### P1\nClaim: P1\nAction: CONCEDE\nEvidence:\n\`\`\`\n${quoted}\n\`\`\`\n### P2\nClaim: P2\nAction: CONCEDE\n`);
-  const without = runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
+  const without = await runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
   assert.equal(without.status, 1);
   assert.match(without.stderr, /"P2" inside a fence names a peer-view claim/);
-  const r = runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView, '--target-dir', target]);
+  const r = await runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView, '--target-dir', target]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /target-derived "P2"/);
 });
@@ -3553,7 +3719,7 @@ test('CLI scan: a model name quoted from the target inside a longer chunk ("GPT-
   const f = path.join(dir, 'f.md');
   const scan = async (line) => {
     await fs.writeFile(f, `# Seat X findings\n\n${line}\n`);
-    return runCli(['scan', '--in', f, '--target-dir', target]);
+    return await runCli(['scan', '--in', f, '--target-dir', target]);
   };
   let r = await scan('Suggested fix: keep "GPT-5.4/5.5 calls above 272K input" exactly as the page says.');
   assert.equal(r.status, 0, r.stderr);
@@ -3592,7 +3758,7 @@ test('spliceText: the last block of a file (no heading after it) is replaced up 
   await fs.writeFile(file, SPLICE_FILE);
   const reply = path.join(dir, 'reply.md');
   await fs.writeFile(reply, '\uFEFFsee <id> in the other file\n');
-  const r = runCli(['splice', '--file', file, '--match-line', 'see A2 in the other file', '--with', reply]);
+  const r = await runCli(['splice', '--file', file, '--match-line', 'see A2 in the other file', '--with', reply]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(await fs.readFile(file, 'utf8'), SPLICE_FILE.replace('see A2 in the other file', 'see <id> in the other file'));
 });
@@ -3622,11 +3788,11 @@ test('CLI splice: --with-result takes a dispatcher result.json finalMessage, wri
   await fs.writeFile(file, SPLICE_FILE);
   const result = path.join(dir, 'result.json');
   await fs.writeFile(result, JSON.stringify({ finalMessage: 'Extra words before\n## B1 — first\n' }));
-  let r = runCli(['splice', '--file', file, '--match-heading', '## B1', '--with-result', result]);
+  let r = await runCli(['splice', '--file', file, '--match-heading', '## B1', '--with-result', result]);
   assert.equal(r.status, 1);
   assert.equal(await fs.readFile(file, 'utf8'), SPLICE_FILE, 'unchanged on refusal');
   await fs.writeFile(result, JSON.stringify({ finalMessage: B1_REDACTED }));
-  r = runCli(['splice', '--file', file, '--match-heading', '## B1', '--with-result', result]);
+  r = await runCli(['splice', '--file', file, '--match-heading', '## B1', '--with-result', result]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /replaced line\(s\) 3-10 .* with 8 line\(s\)/);
   assert.equal(await fs.readFile(file, 'utf8'), SPLICE_FILE.replace('see A2 in the other file', 'see <id> in the other file'));
@@ -3645,10 +3811,10 @@ test('CLI splice: several --match-line/--with pairs fix several lines in one ato
   const w2 = path.join(dir, 'w2.txt');
   await fs.writeFile(w1, 'see the harness from the retry claim\n');
   await fs.writeFile(w2, 'run that harness again\n');
-  const bad = runCli(['splice', '--file', file, '--match-line', 'see A11 harness', '--with', w1, '--match-line', 'no such line', '--with', w2]);
+  const bad = await runCli(['splice', '--file', file, '--match-line', 'see A11 harness', '--with', w1, '--match-line', 'no such line', '--with', w2]);
   assert.equal(bad.status, 1);
   assert.equal(await fs.readFile(file, 'utf8'), original, 'the good first pair is not written when a later pair fails');
-  const r = runCli(['splice', '--file', file, '--match-line', 'see A11 harness', '--with', w1, '--match-line', 'run A11 again', '--with', w2]);
+  const r = await runCli(['splice', '--file', file, '--match-line', 'see A11 harness', '--with', w1, '--match-line', 'run A11 again', '--with', w2]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /replaced 2 line\(s\)/);
   assert.equal(await fs.readFile(file, 'utf8'), original.replace('see A11 harness', 'see the harness from the retry claim').replace('run A11 again', 'run that harness again'));
@@ -3669,30 +3835,30 @@ test('CLI splice --match-line-file: a line with double quotes is replaced throug
   await fs.writeFile(w2, 'plain line\n');
   const lineFile = path.join(dir, 'line.txt');
   await fs.writeFile(lineFile, `${quoted}\r\n`);
-  const one = runCli(['splice', '--file', file, '--match-line-file', lineFile, '--with', w1]);
+  const one = await runCli(['splice', '--file', file, '--match-line-file', lineFile, '--with', w1]);
   assert.equal(one.status, 0, one.stderr);
   assert.equal(await fs.readFile(file, 'utf8'), original.replace(quoted, 'run "the harness" with --flag "x"'));
 
   await fs.writeFile(file, original);
   const twoLines = path.join(dir, 'two.txt');
   await fs.writeFile(twoLines, `${quoted}\nplain A11 line\n`);
-  const refused = runCli(['splice', '--file', file, '--match-line-file', twoLines, '--with', w1]);
+  const refused = await runCli(['splice', '--file', file, '--match-line-file', twoLines, '--with', w1]);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /--match-line-file .*more than one line/);
   assert.equal(await fs.readFile(file, 'utf8'), original, 'a refused file leaves the target unchanged');
 
   const second = path.join(dir, 'second.txt');
   await fs.writeFile(second, 'plain A11 line');
-  const mixed = runCli(['splice', '--file', file, '--match-line-file', lineFile, '--with', w1, '--match-line', 'plain A11 line', '--with', w2]);
+  const mixed = await runCli(['splice', '--file', file, '--match-line-file', lineFile, '--with', w1, '--match-line', 'plain A11 line', '--with', w2]);
   assert.equal(mixed.status, 0, mixed.stderr);
   assert.match(mixed.stdout, /replaced 2 line\(s\)/);
   assert.equal(await fs.readFile(file, 'utf8'), original.replace(quoted, 'run "the harness" with --flag "x"').replace('plain A11 line', 'plain line'));
 
   await fs.writeFile(file, original);
-  const reversed = runCli(['splice', '--file', file, '--match-line', quoted, '--with', w1, '--match-line-file', second, '--with', w2]);
+  const reversed = await runCli(['splice', '--file', file, '--match-line', quoted, '--with', w1, '--match-line-file', second, '--with', w2]);
   assert.equal(reversed.status, 0, reversed.stderr);
   assert.equal(await fs.readFile(file, 'utf8'), original.replace(quoted, 'run "the harness" with --flag "x"').replace('plain A11 line', 'plain line'));
-  assert.match(runCli(['splice', '--file', file, '--match-line-file', path.join(dir, 'missing.txt'), '--with', w1]).stderr, /--match-line-file: could not read/);
+  assert.match((await runCli(['splice', '--file', file, '--match-line-file', path.join(dir, 'missing.txt'), '--with', w1])).stderr, /--match-line-file: could not read/);
 });
 
 test('CLI validate: warns (exit 0) on a citation past the end of the cited file, narrows a bare name to the file the --packet names, and stays quiet for an in-range line, an ambiguous name or a file found nowhere', async (t) => {
@@ -3704,16 +3870,16 @@ test('CLI validate: warns (exit 0) on a citation past the end of the cited file,
   await fs.writeFile(path.join(src, 'Y_DEVICE', 'Parser.py'), 'b\n'.repeat(400));
   const p1 = path.join(dir, 'phase1');
   await fs.mkdir(p1);
-  const block = (id, cite) => `## ${id} — claim\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\n\`\`\`text\n${cite}  reads the value\n\`\`\`\n\n`;
+  const block = (id, cite) => `## ${id} — claim\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nSame shape elsewhere: none found\nEvidence:\n\`\`\`text\n${cite}  reads the value\n\`\`\`\n\n`;
   await fs.writeFile(path.join(p1, 'A-findings.md'), `# Seat A findings\n\n${block('A1', 'Parser.py:120')}${block('A2', 'X_DEVICE/Parser.py:500-510')}${block('A3', 'X_DEVICE/Parser.py:40')}${block('A4', 'Missing.py:9999')}${block('A5', 'X_DEVICE/Parser.py:45-60')}`);
   await fs.writeFile(path.join(p1, 'B-findings.md'), `# Seat B findings\n\n${block('B1', 'Parser.py:10')}`);
   const packet = path.join(dir, 'task-packet.md');
   await fs.writeFile(packet, 'Review X_DEVICE/Parser.py and its callers.\n');
-  const plain = runCli(['validate', '--phase1-dir', p1, '--source-dir', src]);
+  const plain = await runCli(['validate', '--phase1-dir', p1, '--source-dir', src]);
   assert.equal(plain.status, 0, plain.stderr);
   const plainWarnings = plain.stderr.split('\n').filter((l) => l.includes('WARNING'));
   assert.deepEqual(plainWarnings.map((l) => /seat (\w) (\w+) cites (\S+?),/.exec(l).slice(1)), [['A', 'A2', 'X_DEVICE/Parser.py:500-510'], ['A', 'A5', 'X_DEVICE/Parser.py:45-60']], 'without the packet a bare Parser.py is ambiguous (Y_DEVICE has 400 lines)');
-  const withPacket = runCli(['validate', '--phase1-dir', p1, '--source-dir', src, '--packet', packet]);
+  const withPacket = await runCli(['validate', '--phase1-dir', p1, '--source-dir', src, '--packet', packet]);
   assert.equal(withPacket.status, 0, withPacket.stderr);
   const packetWarnings = withPacket.stderr.split('\n').filter((l) => l.includes('WARNING'));
   assert.deepEqual(packetWarnings.map((l) => /seat (\w) (\w+) cites (\S+?),/.exec(l).slice(1)), [['A', 'A1', 'Parser.py:120'], ['A', 'A2', 'X_DEVICE/Parser.py:500-510'], ['A', 'A5', 'X_DEVICE/Parser.py:45-60']]);
@@ -3721,19 +3887,15 @@ test('CLI validate: warns (exit 0) on a citation past the end of the cited file,
   assert.match(withPacket.stdout, /validate clean/, 'a wrong line number is a warning, not a refusal');
 });
 
-test('CLI: an argument error prints only that subcommand\'s usage and ends with the error line, so the full help never scrolls it away', () => {
-  const r = runCli(['audit-prep', '--audit-depth', 'full']);
+test('step: an argument error is code 2 with the one error line; there is no help text', async () => {
+  const r = await runCli(['audit-prep', '--audit-depth', 'full']);
   assert.equal(r.status, 2);
-  const lines = r.stderr.trimEnd().split('\n');
-  assert.equal(lines.at(-1), 'blind-relabel: --audit-depth is only accepted by translate');
-  assert.ok(lines.length < 10, `short output expected, got ${lines.length} lines`);
-  assert.match(r.stderr, /node blind-relabel\.mjs audit-prep --phase1-dir/);
-  assert.doesNotMatch(r.stderr, /node blind-relabel\.mjs relabel/, 'other subcommands are left out');
-  assert.match(r.stderr, /Run with --help for every option\./);
-  const unknown = runCli(['bogus-sub']);
+  assert.equal(r.stderr, 'blind-relabel: --audit-depth is only accepted by translate\n');
+  assert.equal(r.stdout, '');
+  const unknown = await runCli(['bogus-sub']);
   assert.equal(unknown.status, 2);
-  assert.match(unknown.stderr.trimEnd().split('\n').at(-1), /unknown subcommand "bogus-sub"/);
-  assert.match(unknown.stderr, /node blind-relabel\.mjs relabel[\s\S]*node blind-relabel\.mjs clear-cache/, 'an unknown subcommand lists every command line');
+  assert.equal(unknown.stderr, 'blind-relabel: unknown subcommand "bogus-sub"\n');
+  assert.equal((await runCli(['--help'])).status, 2, '--help is an unknown subcommand');
 });
 
 // These identity-term tests, like the older scan tests, assume an OS temp path with no vendor word in it.
@@ -3823,14 +3985,14 @@ test('host, transport, provider and model fields of run.json never enter the aud
   const packet = path.join(root, 'task-packet.md');
   await fs.writeFile(packet, '# Task\nReview x.js\n');
   const outDir = path.join(root, 'audit-input');
-  const prep = runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--packet', packet]);
+  const prep = await runCli(['audit-prep', '--phase1-dir', p1, '--mapping', mapping, '--out-dir', outDir, '--target-dir', target, '--packet', packet]);
   assert.equal(prep.status, 0, prep.stderr);
   const brief = path.join(outDir, 'auditor-brief.txt');
-  const built = spawnSync(process.execPath, [fileURLToPath(new URL('../build-brief.mjs', import.meta.url)), '--mode', 'auditor', '--packet', packet,
-    '--audit-dir', outDir, '--target-dir', target, '--run-dir', runDir, '--out', brief], { encoding: 'utf8' });
-  assert.equal(built.status, 0, built.stderr);
+  const { runStep: buildBrief } = await import('../build-brief.mjs');
+  const built = await buildBrief(['--mode', 'auditor', '--packet', packet, '--audit-dir', outDir, '--target-dir', target, '--run-dir', runDir, '--out', brief]);
+  assert.equal(built.code, 0, built.stderr);
   const peerView = path.join(root, 'peer-view-for-B.md');
-  assert.equal(runCli(['relabel', '--in', path.join(p1, 'A-findings.md'), '--out', peerView, '--from', 'A', '--to', 'P']).status, 0);
+  assert.equal((await runCli(['relabel', '--in', path.join(p1, 'A-findings.md'), '--out', peerView, '--from', 'A', '--to', 'P'])).status, 0);
   const files = [...(await fs.readdir(outDir)).map((f) => path.join(outDir, f)), peerView];
   assert.ok(files.length >= 5, files.join(', '));
   for (const file of files) {
@@ -3883,7 +4045,7 @@ test('CLI translate: peer_responses[].counter_fact must be one short line and on
     const auditPath = path.join(dir, name + '-audit.json');
     const outPath = path.join(dir, name + '-findings.json');
     await fs.writeFile(auditPath, JSON.stringify({ findings: [validFinding({ origins: ['X4'], severity: 'LOW', final_state: 'unresolved-low-stakes', auditor_check: { result: 'CONFIRMED', basis: 'EXECUTED', evidence: 'rerun' }, peer_responses: [response] })] }));
-    const result = spawnSync(process.execPath, [SCRIPT, 'translate', '--in', auditPath, '--out', outPath, '--mapping', mappingPath], { encoding: 'utf8' });
+    const result = await runCli(['translate', '--in', auditPath, '--out', outPath, '--mapping', mappingPath]);
     return { result, outPath };
   };
   const ok = await translate('ok', { claim: 'X4', response: 'disputed-with-counter-fact', counter_fact: 'the loop already includes the bound' });
@@ -3937,7 +4099,7 @@ test('scan: an identity hit names the matched token, so a redaction round fixes 
   const root = await tempDir(t, 'token-named-');
   const input = path.join(root, 'f.md');
   await fs.writeFile(input, 'The Claude reviewer found this.\n');
-  const r = runCli(['scan', '--in', input]);
+  const r = await runCli(['scan', '--in', input]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /IDENTITY line 1 \[matched: [^\]]*claude[^\]]*\]/i);
 });
@@ -3949,12 +4111,12 @@ test('scan: the run\'s seat-lettered file and folder names count as seat mention
   for (const name of names) {
     for (const line of [`My brief and my output were ${name} in the run folder.`, `The text of ${name} is complete.`]) {
       await fs.writeFile(input, `${line}\n`);
-      const r = runCli(['scan', '--in', input]);
+      const r = await runCli(['scan', '--in', input]);
       assert.equal(r.status, 1, `${line} -> ${r.stdout}${r.stderr}`);
     }
   }
   await fs.writeFile(input, 'My notes cite X-findings.md, brief-Y.txt, phase1/AB/ and a B-tree.md file. The migration in phase2/B drops the index; the redact-A branch and docs/phase1/A are stale.\n');
-  const clean = runCli(['scan', '--in', input]);
+  const clean = await runCli(['scan', '--in', input]);
   assert.equal(clean.status, 0, clean.stderr);
 });
 
@@ -3962,7 +4124,84 @@ test('scan: a line with both a vendor word and a seat mention names both in the 
   const root = await tempDir(t, 'both-named-');
   const input = path.join(root, 'f.md');
   await fs.writeFile(input, 'The Claude reviewer and seat B disagree here.\n');
-  const r = runCli(['scan', '--in', input]);
+  const r = await runCli(['scan', '--in', input]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /IDENTITY line 1 \[matched: [^\]]*claude[^\]]*a seat mention\]/i);
+});
+
+test('Linux round linux-r2 F8, F9 and O3: the one-rewrite claim check reads both seats, stops on an unreadable folder, and prints nothing', async (t) => {
+  const A = `# Seat A findings\n\n${claimBlock('A1', 'LOW', 'Fixture row:\n```\nB1 is the cell\n```\n')}\n## Checks performed\nBlocked: none\n`;
+  const B = `# Seat B findings\n\n${claimBlock('B1', 'LOW')}\n## Checks performed\nBlocked: none\n`;
+  const both = await seatClaimProblems({ A, B });
+  assert.match(both.A.join(' | '), /claim ID "B1" inside a fence/, 'the peer claim ID in seat A\'s code');
+  assert.deepEqual(both.B, []);
+  const unclosed = await seatClaimProblems({ A: `# Seat A findings\n\n${claimBlock('A1')}\n\`\`\`\nopen\n`, B });
+  assert.match(unclosed.A.join(), /unterminated fenced code block/);
+  assert.deepEqual(unclosed.B, [], 'the other seat is still checked');
+  // Windows round win-r3 B5: a peer file that cannot be parsed still lends its claim IDs to the other seat's code check.
+  const bWithPeerId = `# Seat B findings\n\n${claimBlock('B1', 'LOW', 'Row:\n```\nA1 is the cell\n```\n')}\n## Checks performed\nBlocked: none\n`;
+  const brokenPeer = await seatClaimProblems({ A: `# Seat A findings\n\n${claimBlock('A1')}\n\`\`\`\nopen\n`, B: bWithPeerId });
+  assert.match(brokenPeer.B.join(' | '), /claim ID "A1" inside a fence/, 'win-r3 B5: found in the first rewrite');
+  // Windows round win-r4 A3: also a peer heading that sits after the stray fence opener.
+  const bWithLaterId = `# Seat B findings\n\n${claimBlock('B1', 'LOW', 'Row:\n```\nA2 is the cell\n```\n')}\n## Checks performed\nBlocked: none\n`;
+  const strayOpener = await seatClaimProblems({ A: `# Seat A findings\n\n${claimBlock('A1')}\n\`\`\`\nopen\n\n${claimBlock('A2')}\n`, B: bWithLaterId });
+  assert.match(strayOpener.B.join(' | '), /claim ID "A2" inside a fence/, 'win-r4 A3: a heading after the stray opener');
+  const target = await fs.mkdtemp(path.join(os.tmpdir(), 'claim-check-'));
+  t.after(() => fs.rm(target, { recursive: true, force: true }));
+  await assert.rejects(seatClaimProblems({ A, B }, { targetDir: target, sourceDirs: [path.join(target, 'gone')] }), (err) => !Array.isArray(err), 'a missing source folder stops the step');
+  // A dangling link is a file the target read logs as skipped: that line must stay out of review-run's output.
+  const noisy = await fs.mkdtemp(path.join(os.tmpdir(), 'claim-check-noisy-'));
+  t.after(() => fs.rm(noisy, { recursive: true, force: true }));
+  let linked = true;
+  await fs.symlink(path.join(noisy, 'gone.md'), path.join(noisy, 'dangling.md')).catch(() => { linked = false; });
+  if (!linked) t.diagnostic('no symlink here: only the plain target is checked');
+  const written = [];
+  const real = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => { written.push(String(chunk)); return true; };
+  try {
+    await seatClaimProblems({ A, B }, { targetDir: linked ? noisy : target });
+  } finally {
+    process.stderr.write = real;
+  }
+  assert.deepEqual(written.filter((l) => l.includes('blind-relabel:')), [], 'nothing printed past review-run\'s output');
+});
+test('translateFindings: a REFUTED auditor_check or verifier file with Basis INFERENCE is refused; SOURCE_CITATION and STATIC_TRACE still refute', async (t) => {
+  const refutedBy = (basis) => JSON.stringify({ findings: [validFinding({
+    peer_responses: [{ claim: 'X3', response: 'conceded' }, { claim: 'Y7', response: 'unaddressed' }],
+    auditor_check: { result: 'REFUTED', basis, evidence: 'checked it' }, final_state: 'settled-refuted',
+  })] });
+  await assert.rejects(translateFindings(refutedBy('INFERENCE'), { A: 'X', B: 'Y' }, null, null), /auditor_check\.result "REFUTED" with basis "INFERENCE"/);
+  for (const basis of ['SOURCE_CITATION', 'STATIC_TRACE', 'EXECUTED']) {
+    assert.equal((await translateFindings(refutedBy(basis), { A: 'X', B: 'Y' }, null, null)).findings[0].final_state, 'settled-refuted', basis);
+  }
+  // INCONCLUSIVE and CONFIRMED with INFERENCE stay valid: only a refutation needs shown evidence.
+  const inconclusive = JSON.stringify({ findings: [validFinding({ auditor_check: { result: 'INCONCLUSIVE', basis: 'INFERENCE', evidence: 'could not tell' } })] });
+  assert.equal((await translateFindings(inconclusive, { A: 'X', B: 'Y' }, null, null)).findings[0].auditor_check.result, 'INCONCLUSIVE');
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'translate-inference-verifier-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const cited = JSON.stringify({ findings: [validFinding({ origins: ['X3'], peer_responses: [{ claim: 'X3', response: 'unaddressed' }], verifications: [{ claim: 'X3', verdict: 'REFUTED' }], final_state: 'settled-refuted' })] });
+  await fs.writeFile(path.join(dir, 'verification-X3.md'), 'Claim: X3\nVerdict: REFUTED\nBasis: INFERENCE\nEvidence: it seems fine\n');
+  await assert.rejects(translateFindings(cited, { A: 'X', B: 'Y' }, null, dir), /^Error: --verification-dir: .*Verdict REFUTED with Basis INFERENCE/);
+  await fs.writeFile(path.join(dir, 'verification-X3.md'), 'Claim: X3\nVerdict: REFUTED\nBasis: STATIC_TRACE\nEvidence: a.js:3 returns early\n');
+  assert.equal((await translateFindings(cited, { A: 'X', B: 'Y' }, null, dir)).findings[0].final_state, 'settled-refuted');
+  await fs.writeFile(path.join(dir, 'verification-X3.md'), 'Claim: X3\nVerdict: INCONCLUSIVE\nBasis: INFERENCE\nEvidence: could not tell\n');
+  const inconclusiveCited = JSON.stringify({ findings: [validFinding({ origins: ['X3'], peer_responses: [{ claim: 'X3', response: 'unaddressed' }], verifications: [{ claim: 'X3', verdict: 'INCONCLUSIVE' }], final_state: 'unresolved-high-stakes' })] });
+  assert.equal((await translateFindings(inconclusiveCited, { A: 'X', B: 'Y' }, null, dir)).findings[0].final_state, 'unresolved-high-stakes');
+});
+
+test('translateFindings: dropped-speculative refuses a CRITICAL claim; a HIGH or lower speculative claim may still be dropped; an auditor cannot write severity_audited itself', async () => {
+  const dropped = (severity) => JSON.stringify({ findings: [validFinding({
+    origins: ['X3'], severity, evidence_strength: 'SPECULATIVE', peer_responses: [{ claim: 'X3', response: 'unaddressed' }],
+    auditor_check: { result: 'NOT_CHECKED', basis: null, evidence: null }, final_state: 'dropped-speculative', evidence: ['X3 raised an unverified concern'],
+  })] });
+  await assert.rejects(translateFindings(dropped('CRITICAL'), { A: 'X', B: 'Y' }, null), /"dropped-speculative" but is CRITICAL/);
+  for (const severity of ['HIGH', 'MEDIUM', 'LOW']) {
+    assert.equal((await translateFindings(dropped(severity), { A: 'X', B: 'Y' }, null)).findings[0].final_state, 'dropped-speculative', severity);
+  }
+  // A raw severity_audited (any case) would bypass the guard and every severity check: only auditor_check.severity sets it.
+  for (const raw of ['critical', 'CRITICAL', 'LOW']) {
+    const withRaw = JSON.stringify({ findings: [{ ...JSON.parse(dropped('HIGH')).findings[0], severity_audited: raw }] });
+    await assert.rejects(translateFindings(withRaw, { A: 'X', B: 'Y' }, null), /has a top-level severity_audited; translate sets it from auditor_check\.severity/, raw);
+  }
 });

@@ -1,0 +1,163 @@
+{"findings": [
+{
+"id": "F1",
+"origins": ["X6", "Y2"],
+"severity": "HIGH",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X6", "response": "conceded"},
+{"claim": "Y2", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "build-recheck-packet.mjs:461 sets marker '{{previous-run-path}}', :471 passes previousRun 'the previous review ({{previous-run-path}})', :474 replaces the marker with the full absolute run path after rewritePaths; at the base commit line 284 wrote only path.basename(run). tests/build-recheck-packet.test.mjs:210 comment 'Only the intro names the previous run, on purpose' shows the old whole-text assertion was narrowed. The previous run folder holds manifest.json with per-seat provider/model, so the path is a pointer from seats and auditor to identity data."
+},
+"final_state": "settled-agree",
+"evidence": ["Packet line: 'This is a re-review of the previous review (C:\\Users\\dev\\cross-review-runs\\overnight-r1\\evidence\\field-runs\\app-client-pr6064-2026-10-16-r3\\run)'; build-brief phase1 copies it into the brief, exit 0; blind-relabel scan does not flag it.", "Same packet line on the contoso field run; build-recheck-packet.mjs:461,471,474 marker filled with full run path; the base commit wrote the basename only; test assertion narrowed to skip the intro line."],
+"summary": "Every re-review packet now carries the absolute path of the previous run folder, whose manifest maps seat letters to vendor and model, and it reaches seats and the auditor unflagged.",
+"recommended_fix": "Restore the intro to 'the review in <basename>' (drop the marker fill at build-recheck-packet.mjs:461-474), restore the whole-text never-contains-old-path test assertion, and give the full path to chainRound or the orchestrator through stdout or a side file, never the packet text.",
+"priority": 1
+},
+{
+"id": "F2",
+"origins": ["X2"],
+"severity": "HIGH",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X2", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "the base commit build-recheck-packet.mjs:145 wrote hypotheses as 'Previous finding ... Confirm it is fixed, or refute it with evidence.' (CONFIRMED meant the fix works). Current build-report.mjs:1207-1210 prints confirmed rows as the red '- CONFIRMED' line and an all-refuted set as the green '+ REFUTED' line, with no read of packet wording; the base commit build-report.mjs:993 printed REFUTED as the '-' line. So a run built under the old wording renders inverted: not-fixed shows green, fixed shows red."
+},
+"final_state": "settled-agree",
+"evidence": ["Scratch copy of the app-client field run with the packet hypothesis rewritten to the 1.1.0 'Confirm it is fixed' wording: the base commit build-report printed '- REFUTED' (red), working tree prints '+ REFUTED' (green); with seat lines ending CONFIRMED, the base commit printed neutral '3 confirmed', working tree prints '- CONFIRMED' (red)."],
+"summary": "Re-rendering a run whose packet used the 1.1.0 positive 'Confirm it is fixed' wording now inverts hypothesis polarity, showing an unfixed defect as a green all-clear.",
+"recommended_fix": "In buildCriteria detect the 1.1.0 'Confirm it is fixed, or refute it' wording and render those hypothesis rows neutral with one caveat that polarity follows the old wording; cover it with a test on an old-style packet.",
+"priority": 1
+},
+{
+"id": "F3",
+"origins": ["X3"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X3", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "build-report.mjs:671-674 compute standing, per-severity counts and counts.withdrawn from f.state only; :782 blockers = findings.filter(f => f.blocker) ignores notes; :1154 SEVERITY change list filters only WITHDRAWN_STATES on f.state; groupFindings :1114 additionally uses authorWithdrawn (outcome word 'wrong' from notes). Header/bars and the Withdrawn table row therefore disagree when the author marks a finding wrong."
+},
+"final_state": "settled-agree",
+"evidence": ["Scratch copy of contoso-replay field run with report-notes marking two findings 'wrong': table shows Withdrawn 2, header still says 7 blockers and 7/3/4 by severity with no withdrawn count; SEVERITY line still lists a withdrawn finding."],
+"summary": "Findings the author withdraws with a 'wrong' note move to the Withdrawn row but are still counted under their severity, in the blocker count and in the SEVERITY lines.",
+"recommended_fix": "Attach statuses before computing standing and use one predicate (state withdrawn OR authorWithdrawn) for counts at build-report.mjs:671-674, blockers at :782 and the SEVERITY list at :1154.",
+"priority": 2
+},
+{
+"id": "F4",
+"origins": ["X5"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X5", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "build-manifest.mjs:417 everyDelta requires every result to have usable usage_delta; :418 returns `last` when not everyDelta, no result has usageSemantics and one thread. Only claude-dispatch.mjs:307 and opencode-dispatch.mjs:728 write usageSemantics, codex-dispatch writes none, so a Codex seat whose last call was rate-limited returns that call's {source:'unavailable'} and sumUsages (:392-403, the lower-bound path) is never reached."
+},
+"final_state": "settled-agree",
+"evidence": ["Scratch copy of northwind field run: three Codex result.json on one thread, last rate-limited with usage {source:'unavailable'}; build-manifest gave reviewers usage {source:'unavailable'}, report shows the seat cost unknown; without the failed call it sums to input 3799667."],
+"summary": "The new lower-bound usage sum never applies to a Codex seat whose last call reported no usage, so the whole seat cost shows as unknown in exactly the rate-limited case the change targeted.",
+"recommended_fix": "In mergedUsage (build-manifest.mjs:417-418) evaluate everyDelta and the return-last branch over results with usable usage only and route a mix to sumUsages so calls_without_usage is recorded; apply the same to the legacy per-thread branch at :419-424.",
+"priority": 2
+},
+{
+"id": "F5",
+"origins": ["X1"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X1", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "build-report.mjs:625-630: for a path containing '/', hits require equality or a '/' boundary suffix in either direction; 'review/head/reporter.py' vs 'contoso_v4_device/reporter.py' satisfies neither, hits is empty, entry is null and the tag is 'outside the change', even for an added line. The basename rule at :627 applies only to bare names."
+},
+"final_state": "settled-agree",
+"evidence": ["contoso field run report prints 'Where: outside the change (REVIEW/head/Reporter.py:1263)' while since.diff changes CONTOSO_V4_DEVICE/Reporter.py; direct whereInChange calls: snapshot-prefixed path gives 'outside the change' even for added line 60, repo-relative or bare name gives 'changed file' or 'added lines'."],
+"summary": "The Where tag reports 'outside the change' for evidence cited through a snapshot or review-copy prefix, even on lines the change added.",
+"recommended_fix": "In whereInChange fall back to a unique-basename match when a slash path has no boundary match, and return 'unknown' rather than 'outside the change' when the match is ambiguous or fails only by prefix.",
+"priority": 2
+},
+{
+"id": "F6",
+"origins": ["Y1"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "Y1", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "build-report.mjs:1120 moves a finding to Pre-existing when the note says pre-existing and any change diff exists; it never reads f.where computed at :653, so a finding whose evidence is on added lines leaves Fix now with no caveat. The peer's narrowing holds: --help (build-report.mjs:32) says the Where hint never moves a finding, and the tag itself can be wrong for prefixed paths, so a caveat fits better than a move."
+},
+"final_state": "settled-agree",
+"evidence": ["Scratch copy of contoso field run with one note changed to 'pre-existing:': Fix now 0, Pre-existing 5, while the unmodified report tags that finding 'Where: added lines (Reporter.py:60)'."],
+"summary": "An author's 'pre-existing' note silently moves a finding out of Fix now even when the report's own Where tag says its evidence is on added lines.",
+"recommended_fix": "Keep the grouping as the author decided but add a caveat in groupFindings/buildReport naming each pre-existing finding whose Where tag is 'added lines' (next to the existing preMarked caveat); do not override the author's group.",
+"priority": 2
+},
+{
+"id": "F7",
+"origins": ["X4"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X4", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "build-recheck-packet.mjs:246-250: previous = findings minus settled; when empty the text is 'FILL: the previous review had no findings', even when findings exist and were all settled. :257 writes 'Previous finding <id> (decided, ...)' with the bare per-round id and no round, so carried-over decided lines from an earlier round can repeat the same id for different defects."
+},
+"final_state": "settled-agree",
+"evidence": ["Recheck packet built from the app-client field run (one finding, settled not-worth-it in the notes): Hypotheses section reads 'the previous review had no findings', and Known deviations lists two different decided lines with the same finding id from two rounds."],
+"summary": "A re-review packet says the previous review had no findings when all were settled in the notes, and decided lines from different rounds reuse the same bare finding id.",
+"recommended_fix": "At build-recheck-packet.mjs:250 say every previous finding was settled (see Known deviations) when findings exist; in the decided line at :257 include the round with the id.",
+"priority": 2
+},
+{
+"id": "F8",
+"origins": ["X7"],
+"severity": "LOW",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X7", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "blind-relabel.mjs:35-36 AUDITOR_PROTOCOL_SECTIONS omits '### Web verification: orchestrator notes' (review-protocol.md:351, holding 'Not built by this feature' at :357) and '## Manifest and final output' (:982); the auditor instructions point at the first (:864) and the Fresh-context auditor section at the second (:827-828), so the staged copy lacks both referenced passages."
+},
+"final_state": "settled-agree",
+"evidence": ["auditorProtocol() output on both skills' review-protocol.md lacks the 'Phase 3 auditor web' passage and the '## Manifest and final output' heading that the auditor sections point to."],
+"summary": "The trimmed protocol staged for the auditor drops two passages that its own auditor instructions tell it to consult.",
+"recommended_fix": "State the two facts inline in the auditor instructions, or add the orchestrator-notes subsection (after checking it names no vendor) to AUDITOR_PROTOCOL_SECTIONS.",
+"priority": 3
+}
+]}

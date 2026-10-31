@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="t d">
+  <title id="t">SkillArray</title>
+  <desc id="d">Two AI reviewers check your work alone, cross-examine each other blind, and a fresh auditor settles every finding.</desc>
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="0%" r="90%">
+      <stop offset="0" stop-color="#123642"/>
+      <stop offset="1" stop-color="#0B1622"/>
+    </radialGradient>
+    <style>
+      .word { font: 800 92px ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; letter-spacing: -2px; fill: #E6EDF3; }
+      .word tspan { fill: #3CC3CC; }
+      .tag { font: 400 28px ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #A9B6C4; }
+      .mono { font: 600 18px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 2px; }
+      @keyframes pulse { 0%, 100% { opacity: .35 } 50% { opacity: 1 } }
+      .d1 { animation: pulse 2.4s ease-in-out infinite; }
+      .d2 { animation: pulse 2.4s ease-in-out .4s infinite; }
+      .d3 { animation: pulse 2.4s ease-in-out .8s infinite; }
+      @media (prefers-reduced-motion: reduce) { .d1, .d2, .d3 { animation: none; opacity: 1; } }
+    </style>
+  </defs>
+  <rect width="1280" height="320" rx="18" fill="url(#glow)"/>
+  <circle class="d1" cx="560" cy="66" r="9" fill="#F0A347"/>
+  <circle class="d2" cx="590" cy="66" r="9" fill="#6EA6FF"/>
+  <circle class="d3" cx="620" cy="66" r="9" fill="#3CC3CC"/>
+  <text class="word" x="640" y="170" text-anchor="middle">Skill<tspan>Array</tspan></text>
+  <text class="tag" x="640" y="226" text-anchor="middle">Two AI reviewers check each other blind, and a fresh auditor decides.</text>
+  <text class="mono" x="640" y="276" text-anchor="middle" fill="#3CC3CC">CROSS-REVIEW  ·  PAIR-REVIEW  ·  CLAUDE CODE  ·  CODEX</text>
+</svg>

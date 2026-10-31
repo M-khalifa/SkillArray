@@ -1,0 +1,223 @@
+{"findings": [
+{
+  "id": "F1",
+  "origins": ["X1", "Y1"],
+  "severity": "HIGH",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    {"claim": "X1", "response": "conceded"},
+    {"claim": "Y1", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Imported the shipped scrubDir from the target's pair-review path-utils.mjs (in memory, no files written) with run folder C:\\Q\\reviews\\run and 17 spellings: absolute with backslashes, lower-case forward-slash, /c/, /mnt/c/ and a file:/// URL ending in %2F were each rewritten (count 1); the home-relative ~/reviews/run, %USERPROFILE%\\reviews\\run, the drive-less \\Q\\reviews\\run, the dotted C:/Q/reviews/./run, the percent-encoded C:%5CQ%5Creviews%5Crun and a path wrapped onto a second line before run were all left as written (count 0). path-utils.mjs:85-101 builds its alternatives only from pathSpellingsOf (typed plus real path) split on separators, with no variable, home, drive-less, dot-segment, decoding or line-break forms. The 8.3 short-name form was not checked here."
+  },
+  "final_state": "settled-agree",
+  "summary": "The new <run-dir> rewrite catches only absolute, /c/, /mnt/c/ and file:/// spellings of the run folder; home-relative, variable, drive-less, dot-segment, percent-encoded and line-wrapped spellings a seat pastes reach the peer view and the auditor unchanged.",
+  "recommended_fix": "In path-utils.mjs scrubDir add the alternatives the run-folder guard (build-brief.mjs runDirNamedIn) already expands (~, %USERPROFILE%/$HOME/${env:...} prefixes, the drive-less form on Windows, the 8.3 form, percent-decoded text) and let the separator match dot segments and a line break; or, more simply, have exchange prepare and audit-prep refuse any text the guard's runDirNamedIn still matches after the rewrite. One change in scrubDir (or the shared refusal) closes both callers, exchange.mjs:227 and blind-relabel.mjs:3109.",
+  "priority": 1
+},
+{
+  "id": "F2",
+  "origins": ["X2", "Y2"],
+  "severity": "HIGH",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    {"claim": "X2", "response": "conceded"},
+    {"claim": "Y2", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Ran the shipped seatBlockedLine (review-run.mjs:770-789) under a No findings plus Checks performed section: plain, quoted and '1)' block lines are read; '### Blocked: x', a bullet-dot line, '(1) Blocked: x', '- [ ] Blocked: x' and a table row return null; 'Blocked: none' followed by '- [ ] Blocked: EACCES' or '### Blocked: EACCES' returns the empty string; a '### Checks performed' section is not read at all. review-run.mjs:841-847 refuses a No findings seat only when the value is null or non-empty, so the empty string from an earlier healthy line plus a missed task-box or heading block passes the gate as clean, with no blind warning. Of the over-broad claim's second half, 'Blocked: none (ok)' is read as a block (it refuses the seat, so it fails safe), and the packet's Known deviations decide that only the exact 'Blocked: none' is healthy, so that half is accepted behaviour, not a defect."
+  },
+  "final_state": "settled-agree",
+  "summary": "The Blocked: reader misses blocks written as a heading, task box, bullet dot, parenthesised number or table row, and under a non-level-two section heading; after an earlier 'Blocked: none' such a block leaves a blocked No findings seat passing as clean.",
+  "recommended_fix": "review-run.mjs:774 read the section heading at any level with an optional number; review-run.mjs:785 widen the leading-marker class to include #, task boxes, parentheses, table pipes and bullet dots. The 'none (...)' half needs no change: it is the decided strict rule and fails safe.",
+  "priority": 1
+},
+{
+  "id": "F3",
+  "origins": ["X3", "Y7"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    {"claim": "X3", "response": "conceded"},
+    {"claim": "Y7", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Ran the shipped peerLabelLines (preflight.mjs:1815-1819) with a declared checklist on ten list lines: the peer letter with a digit and a hyphenated undeclared prefix before it warn; the two audit letters and the two seat letters followed by a digit, bare or after a hyphen, do not; the hypothesis tag, the acceptance-criterion tag and the declared-checklist tag do not (legal, right). The regex tests only the peer letter. The downstream audit-prep refusal and the silent rename in prose were not re-run here; at MEDIUM they rest on the seats' executed audit-prep runs."
+  },
+  "final_state": "settled-agree",
+  "summary": "The host preflight's packet and REVIEW.md label warning checks only the peer letter; a tag made of a seat or audit letter and a digit gets no early warning, then stops audit-prep in inline code or is silently renamed into an audit label in prose.",
+  "recommended_fix": "preflight.mjs:1818 test the seat, audit and peer letters followed by digits (keeping the declared-checklist mask for each letter), and say in the warning that such tags are rewritten or refused downstream.",
+  "priority": 2
+},
+{
+  "id": "F4",
+  "origins": ["X4"],
+  "severity": "HIGH",
+  "basis": "STATIC_TRACE",
+  "evidence_strength": "SUPPORTED",
+  "peer_responses": [
+    {"claim": "X4", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "claude-dispatch.mjs:280-289 and codex-dispatch.mjs:721-727 resolve the run when the CLI already exited after its answer, with no kill and no sweep; killGroupOnExit (spawn-utils.mjs:59-60) returns at once on win32; stopLeftovers, the parent-pid and creation-time sweep that preflight uses on this host, is called only at preflight.mjs:761, never by a dispatcher. So on Windows a background process the seat CLI started that still holds its output stays running after the dispatcher returns 'completed'. No live orphan was started in this audit; the seat's executed dispatcher test showing the orphan alive is consistent with this trace."
+  },
+  "final_state": "settled-agree",
+  "summary": "On Windows a seat CLI that exits after its answer while a process it started holds its output open leaves that process running: the dispatchers only warn, though preflight already stops the same shape on this host.",
+  "recommended_fix": "On win32, in the exited branch and the after-stop branch of claude-dispatch.mjs and codex-dispatch.mjs, call preflight's stopLeftovers(child.pid, startMs) (parent pid plus creation time, so a reused pid is never hit) before resolving, record what it stopped, and add a test that asserts the fixture's orphan is gone instead of killing it in a finally block.",
+  "priority": 1
+},
+{
+  "id": "F5",
+  "origins": ["X5"],
+  "severity": "LOW",
+  "basis": "SOURCE_CITATION",
+  "evidence_strength": "DETERMINISTIC",
+  "peer_responses": [
+    {"claim": "X5", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "SOURCE_CITATION",
+    "evidence": "build-brief.mjs:200 (delta brief) allows only 'this brief and your own output'; references/review-protocol.md:214-215 allows the files the brief names, 'your brief, the task packet, your own output and scratch folder'. The resumed Phase 2 seat holds both rules, so the later one forbids the packet and scratch folder it may need to re-run a check for a counter-fact."
+  },
+  "final_state": "settled-agree",
+  "summary": "The Phase 2 delta brief's stay-out line forbids the task packet and the seat's own scratch folder, which the Phase 1 rule the same resumed seat holds allows.",
+  "recommended_fix": "build-brief.mjs:200: allow 'this brief, your Phase 1 brief, the task packet, your own output and your scratch folder'.",
+  "priority": 3
+},
+{
+  "id": "F6",
+  "origins": ["X6"],
+  "severity": "LOW",
+  "basis": "STATIC_TRACE",
+  "evidence_strength": "DETERMINISTIC",
+  "peer_responses": [
+    {"claim": "X6", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "path-utils.mjs:100 builds the scrubDir regex with the 'gi' flags on every platform, while build-brief.mjs foldsCase is true only for win32 and darwin; executed here, 'c:/q/reviews/run/x' is rewritten for run folder C:\\Q\\reviews\\run (right on Windows). On Linux a sibling folder differing only in letter case is therefore rewritten to <run-dir> in the peer and auditor views. Linux only, a rare folder layout, and it fails safe for blinding: the damage is a wrong path in a view, never a file, so LOW stands over the peer's suggested MEDIUM."
+  },
+  "final_state": "settled-agree",
+  "summary": "scrubDir always matches case-insensitively, so on Linux a sibling folder that differs from the run folder only in letter case is rewritten to <run-dir>, against the case rule this round set for the guard.",
+  "recommended_fix": "path-utils.mjs:100 use 'gi' only when foldsCase(process.platform) (move foldsCase into path-utils.mjs and import it in build-brief.mjs), and make the test row at path-utils.test.mjs:436 platform-dependent.",
+  "priority": 3
+},
+{
+  "id": "F7",
+  "origins": ["X7", "Y8"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    {"claim": "X7", "response": "conceded"},
+    {"claim": "Y8", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Ran the shipped pathStartRe for linux, darwin and win32 on one to four leading slashes: on linux and darwin one and two slashes start a path, three and four do not; on win32 only one does (two-slash network paths stay excluded, right). build-brief.mjs:250 and preflight.mjs:1434 both use the one-or-two-slash form. A literal three-slash spelling still contains the plain run-folder path and is caught as written; the miss is only the resolved pass (a link or dot-segment spelling), on Linux/macOS, not executed end to end.",
+    "severity": "LOW",
+    "severity_reason": "Linux and macOS only, needs a link or dot-segment spelling of the run folder written with three or more leading slashes, and a literal spelling is still caught, so this is a narrow guard gap shown only by unit-level execution."
+  },
+  "final_state": "settled-agree",
+  "summary": "On Linux and macOS a path written with three or more leading slashes is not a path start in the run-folder guard or the packet scan, the sibling of the two-slash fix.",
+  "recommended_fix": "build-brief.mjs:250 and preflight.mjs:1434: on the POSIX branch replace the one-or-two-slash alternative with one or more slashes followed by a non-slash, and update the test that expects three slashes not to be recognised.",
+  "priority": 3
+},
+{
+  "id": "F8",
+  "origins": ["Y3"],
+  "severity": "HIGH",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    {"claim": "Y3", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "native-agent.mjs codexState returns 'done' for a last task_complete whatever its message; agentLastReply resets the reply to null on task_started and keeps null on a task_complete with no string message; review-run.mjs:233-242 checkFinalReply refuses only 'aborted' or a 'blocked:' reply and only warns on a non-'written' reply, doing nothing on null. So a later turn that ends with no reply passes on the existing file with no warning. The file must still pass the claim-heading check and later validation, and a reply other than 'written' only ever warns, so the gap is a missing warning, not a blocked seat reported clean.",
+    "severity": "LOW",
+    "severity_reason": "A turn that ends with no reply loses only the warning a non-'written' reply would get; the file is still checked for claim headings and validated, so no blocked or blind seat is reported clean."
+  },
+  "final_state": "settled-agree",
+  "summary": "A native Codex agent whose latest turn completes without a reply is read as finished with no warning, so an earlier turn's file is accepted silently.",
+  "recommended_fix": "review-run.mjs checkFinalReply: when the state is 'done' and the reply is null, add the same warning a non-'written' reply gets (or refuse, if the maintainer wants it stricter).",
+  "priority": 3
+},
+{
+  "id": "F9",
+  "origins": ["Y4"],
+  "severity": "HIGH",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    {"claim": "Y4", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "build-manifest.mjs:254 adds a seat to missing_seat_files only when stat of phase1/<seat>-findings.md fails, so an empty or truncated file counts as present; build-report.mjs:727 derives COMPLETE from manifest.status and :735 counts reviewer passes from the descriptor. On the supported route audit-prep validates both seat files before findings.json exists (the peer's executed validate run refuses an empty file), so COMPLETE with an empty seat file needs the file damaged after the audit and the manifest rebuilt.",
+    "severity": "MEDIUM",
+    "severity_reason": "A wrong COMPLETE status needs a seat file emptied or cut short after a validated audit followed by a manifest rebuild, so it is a wrong status on an uncommon path, not a blind seat reported clean on a normal run."
+  },
+  "final_state": "settled-agree",
+  "summary": "The new missing-seat-file gate checks only that each Phase 1 file exists, so a manifest rebuilt after a seat file was emptied or truncated still reads completed and the report COMPLETE with two passes.",
+  "recommended_fix": "build-manifest.mjs:254: treat a seat file that is empty or has neither a claim heading nor a No findings marker (the same test validate uses) as missing.",
+  "priority": 2
+},
+{
+  "id": "F10",
+  "origins": ["Y5"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    {"claim": "Y5", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "EXECUTED",
+    "evidence": "Ran the shipped scrubDir with run folder C:\\Q\\reviews\\run: siblings 'run backup', 'run+old' and 'run' followed by a non-ASCII letter are rewritten (count 1), while 'run-evidence', 'run.bak' and 'run2' are left alone (count 0). The end boundary at path-utils.mjs:100 excludes only ASCII word characters, hyphen and a dot followed by a word character. The space case matches the decided rule that a bare path is read up to the space and fails safe for blinding; the plus, at-sign, parenthesis and non-ASCII cases are real but rare, and the damage is a wrong path in a view, never a file or claim block. build-recheck-packet.mjs rewritePaths was not re-run.",
+    "severity": "LOW",
+    "severity_reason": "Only rare sibling folder names (ending in plus, at-sign, parenthesis or a non-ASCII letter) are miswritten in a peer or auditor view, which fails safe for blinding; the space case follows the decided bare-path rule."
+  },
+  "final_state": "settled-agree",
+  "summary": "scrubDir rewrites sibling folders whose name continues the run folder's with a space, plus, at-sign, parenthesis or non-ASCII letter to <run-dir>.",
+  "recommended_fix": "path-utils.mjs:100: extend the negative lookahead to any letter or digit (Unicode classes with the u flag) and to plus, at-sign and an opening parenthesis; leave the space case as the decided rule.",
+  "priority": 3
+},
+{
+  "id": "F11",
+  "origins": ["Y6"],
+  "severity": "MEDIUM",
+  "basis": "EXECUTED",
+  "evidence_strength": "REPRODUCED",
+  "peer_responses": [
+    {"claim": "Y6", "response": "conceded"}
+  ],
+  "auditor_check": {
+    "result": "CONFIRMED",
+    "basis": "STATIC_TRACE",
+    "evidence": "claude-dispatch.mjs:251-262 and codex-dispatch.mjs:674-688: the finite --timeout callback sets timedOut and calls killTree with no child.exitCode or signalCode check, while only the after-answer callback (claude-dispatch.mjs:280, codex-dispatch.mjs:721) has that check and returns early once killing is set. On win32 killTree runs taskkill /pid <pid> /T /F (spawn-utils.mjs:191) on a pid that may by then belong to another process, and the successful answer is reported as timed out. review-run passes no timeout by default, so the trigger is a finite timeout expiring within the answer grace after an exited CLI whose output stayed open."
+  },
+  "final_state": "settled-agree",
+  "summary": "With a finite timeout, the dispatchers' timeout (and signal-forwarding) callbacks still kill the pid of a CLI that already exited after its answer, risking a reused pid on Windows and reporting the successful answer as timed out.",
+  "recommended_fix": "In claude-dispatch.mjs:251 and codex-dispatch.mjs:674 (and the signal-forwarding callbacks at claude-dispatch.mjs:206 and codex-dispatch.mjs:69) skip killTree when child.exitCode or child.signalCode is set, and when an answer already arrived resolve as the exited-after-answer case instead of a timeout.",
+  "priority": 2
+}
+]}

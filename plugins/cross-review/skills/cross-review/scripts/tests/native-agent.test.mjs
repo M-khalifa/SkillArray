@@ -45,6 +45,13 @@ test('a Codex rollout is done at task_complete and running after task_started', 
   assert.equal(await agentState(await write(t, 'r2.jsonl', [meta, ev('task_started'), ev('task_complete')])), 'done');
   assert.equal(await agentState(await write(t, 'r3.jsonl', [meta, ev('task_started'), ev('task_complete'), ev('task_started')])), 'running', 'a follow-up task');
   assert.equal(await agentState(await write(t, 'r4.jsonl', [meta])), 'running');
+  // Closing round 2: a cut-off turn is "aborted", never "done"; an earlier turn's reply is not the aborted turn's.
+  const done = line({ type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'written' } });
+  const aborted = await write(t, 'r5.jsonl', [meta, ev('task_started'), done, ev('task_started'), ev('turn_aborted')]);
+  assert.equal(await agentState(aborted), 'aborted');
+  assert.equal(await agentLastReply(aborted), null);
+  assert.equal(await agentState(await write(t, 'r6.jsonl', [meta, ev('task_started'), ev('turn_aborted')])), 'aborted');
+  assert.equal(await agentLastReply(await write(t, 'r7.jsonl', [meta, ev('task_started'), done])), 'written');
 });
 
 test('an unreadable or empty transcript is reported as such, never as done', async (t) => {
@@ -87,6 +94,14 @@ test('agentLastReply: the last Claude text or Codex task_complete message as one
   assert.equal((await agentLastReply(long)).length, 200);
   assert.equal(await agentLastReply(await write(t, 'n.jsonl', [user()])), null);
   assert.equal(await agentLastReply(path.join(os.tmpdir(), 'no-such-transcript.jsonl')), null);
+  // Closing round 4 F7: a resumed Claude turn that ends with no text does not inherit the earlier turn's reply; a tool
+  // result or a meta reminder is not a new prompt.
+  const toolResult = line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } });
+  const meta = line({ type: 'user', isMeta: true, message: { role: 'user', content: 'reminder' } });
+  const earlier = [user(), assistant('end_turn', [{ type: 'text', text: 'written' }])];
+  assert.equal(await agentLastReply(await write(t, 'r1.jsonl', [...earlier, user(), assistant('end_turn', [{ type: 'tool_use', name: 'Bash', input: {} }])])), null);
+  assert.equal(await agentLastReply(await write(t, 'r2.jsonl', [...earlier, user(), assistant('end_turn', [{ type: 'text', text: '  ' }])])), null);
+  assert.equal(await agentLastReply(await write(t, 'r3.jsonl', [...earlier, toolResult, meta, assistant('end_turn', [{ type: 'tool_use', name: 'Bash', input: {} }])])), 'written');
 });
 
 test('agentStats counts Claude tool_use items and Codex function calls, and reads the first timestamp', async (t) => {
@@ -135,6 +150,6 @@ test('findSessionTranscripts: a session UUID is found under any project folder; 
   assert.deepEqual(await findSessionTranscripts(id, { CLAUDE_CONFIG_DIR: cfg }), [file]);
   assert.deepEqual(await findSessionTranscripts('SESSION_1', { CLAUDE_CONFIG_DIR: cfg }), [], 'not a UUID');
   assert.deepEqual(await findSessionTranscripts('../projects', { CLAUDE_CONFIG_DIR: cfg }), []);
-  assert.deepEqual(await findSessionTranscripts('ses_abc123', { CLAUDE_CONFIG_DIR: cfg }), [], 'an OpenCode session id');
+  assert.deepEqual(await findSessionTranscripts('ses_abc123', { CLAUDE_CONFIG_DIR: cfg }), [], 'a session id with no Claude transcript');
   assert.deepEqual(await findSessionTranscripts('11111111-2222-3333-4444-555555555555', { CLAUDE_CONFIG_DIR: cfg }), []);
 });

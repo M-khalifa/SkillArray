@@ -231,6 +231,7 @@ Consumers following the documented schema may reject or discard the timeout expl
 - Repository remained unedited by this review; test artifacts were created only under disposable OS-temp locations.
 
 Not checked: live paid reviewer calls, actual authentication/model entitlement, Unix process behavior by execution, hostile/complex worktree fixtures such as untracked symlinks or nested repositories, and a real end-to-end three-phase blind review.
+Blocked: none
 
 ## Rebuttals (from A) of B claims
 

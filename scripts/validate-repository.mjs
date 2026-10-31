@@ -2,6 +2,7 @@
 
 import { access, readdir, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -116,24 +117,6 @@ async function main() {
   assert(crossVersion === reviews.version, "cross-review version differs from plugin version");
 
   {
-    // model-capabilities.md previously described OpenCode as detection-only
-    // protection, predating --isolate's real-prevention worktree redirect.
-    const capabilities = (
-      await readFile(
-        await requireFile("plugins/cross-review/skills/cross-review/references/model-capabilities.md"),
-      )
-    ).toString("utf8");
-    assert(
-      !/is detection\s*\nafter the fact, never prevention\.\s*Require/.test(capabilities),
-      "model-capabilities.md: stale pre---isolate OpenCode sandbox claim has returned",
-    );
-    assert(
-      /--isolate/.test(capabilities),
-      "model-capabilities.md: must describe --isolate's real-prevention worktree redirect",
-    );
-  }
-
-  {
     // phase-3-scorecard.md previously referenced a "confidence-floor rule" review-protocol.md
     // never defined (a survivor of an old Verdict/Basis/Confidence schema) and used
     // free-prose "Peer response" example values instead of review-protocol.md's closed enum.
@@ -234,7 +217,7 @@ async function main() {
       const content = (await readFile(await requireFile(file))).toString("utf8");
       const lines = content.split("\n");
       lines.forEach((line, i) => {
-        if (!/blind-relabel\.mjs["'` ]*\s+scan\b/.test(line)) return;
+        if (!/review-run(?:\.mjs)?["'` ]*\s+scan\b/.test(line)) return;
         // A command-line "--in <file>" invocation is scoped to findings/peer-view files
         // specifically -- NOT every scan call. The falsification verifier's own tiny,
         // single-X/Y-claim output has no real A/B claim IDs in it at all to leak, so
@@ -388,6 +371,12 @@ async function main() {
     const pair = await readFile(path.join(pairFixtures.base, file));
     assert(cross.equals(pair), `scripts/tests/fixtures/${file}: pair-review and cross-review copies differ`);
   }
+
+  // No test fixture may match an ignore rule: a commit or a clean clone would leave it out and its tests would fail.
+  const fixturePaths = [crossFixtures, pairFixtures].flatMap(({ base, found }) => found.map((f) => path.relative(root, path.join(base, f)).split(path.sep).join("/")));
+  const ignored = spawnSync("git", ["-C", root, "check-ignore", "--stdin"], { input: fixturePaths.join("\n"), encoding: "utf8" });
+  if (ignored.status === 0) throw new Error(`test fixtures matched by .gitignore (add an exception): ${ignored.stdout.trim().split("\n").slice(0, 5).join(", ")}`);
+  if (ignored.status !== 1) console.log(`SkillArray: note: git check-ignore could not run (${String(ignored.stderr || ignored.error?.message || ignored.status).trim()}); fixture ignore rules not checked`);
 
   // Each installed skill folder ships the release notes, so a user can see what changed.
   const rootChangelog = await readFile(await requireFile("CHANGELOG.md"));

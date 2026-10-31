@@ -1,0 +1,166 @@
+{"findings": [
+{
+"id": "F1",
+"origins": ["X1"],
+"severity": "HIGH",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [{"claim": "X1", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Called the shipped seatBlockedLine: '## No findings' followed by '    Blocked: none' (four spaces) returns the empty string (read as none), and the same with a tab returns the empty string. The reader at review-run.mjs:769 matches l.text.trim(), so the indentation of an indented code block is removed before the match.",
+"severity": "LOW",
+"severity_reason": "The accepted text still says 'none', so the seat itself declared no block; a forbidden shape is accepted, but no declared block is lost and no blocked seat becomes clean through this alone."
+},
+"final_state": "settled-agree",
+"evidence": ["see origin"],
+"summary": "The strict Blocked: reader accepts a 'Blocked: none' line that sits inside an indented Markdown code block, because it trims the line before matching.",
+"recommended_fix": "In seatBlockedLine match the untrimmed line (allow only trailing whitespace and the optional '- ' prefix), and add Phase 1 test cases for a space-indented and a tab-indented line.",
+"priority": 3
+},
+{
+"id": "F2",
+"origins": ["Y1"],
+"severity": "HIGH",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [{"claim": "Y1", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Called the shipped seatBlockedLine on '## No findings / Blocked: target: EACCES / Blocked: none': it returns the empty string. The loop at review-run.mjs:768-771 overwrites value on every match, so the last line wins; in assertSeatsRan an empty declared value throws no StepError, adds no warning and writes no seat-warnings record, so a No findings seat that declared a block passes as clean."
+},
+"final_state": "settled-agree",
+"evidence": ["see origin"],
+"summary": "When a seat writes a block line and then a later 'Blocked: none', the reader keeps only the last line, so a blocked No findings seat passes phase1 --wait as clean with exit 0 and no caveat.",
+"recommended_fix": "In seatBlockedLine never let a later 'none' overwrite a declared block (keep the first non-none value, or treat two different values as a block), and add the conflicting-lines case to the review-run tests.",
+"priority": 1
+},
+{
+"id": "F3",
+"origins": ["X2", "Y3"],
+"severity": "HIGH",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [{"claim": "X2", "response": "conceded"}, {"claim": "Y3", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "codex-dispatch.mjs: item.completed agent_message only stores finalMessage and turn.completed only stores usage (lines 697-705); the promise resolves only in child.on('close') (lines 744-752). claude-dispatch.mjs: the result event only assigns stream.result (line 265-266) and the promise resolves only on close (lines 271-278). review-run.mjs timeoutFlags passes '--timeout' with desc.flags.timeoutS ?? 0, and 0 means no limit, so on the sequencer route a CLI that hangs after its final answer is never stopped and its process stays alive; with a timeout set, the run is recorded as timed-out and dispatched again. One claim covers both runners (over-broad but the same close-only completion defect); opencode-dispatch.mjs was not traced."
+},
+"final_state": "settled-agree",
+"evidence": ["see origins"],
+"summary": "The CLI dispatchers treat a seat as done only when its process closes, so a CLI that has written its final answer and then hangs keeps running forever on the sequencer route (no default timeout) or is recorded as timed-out and run again.",
+"recommended_fix": "In the codex and claude runners, after the terminal success event with a non-empty answer, start a short grace timer that stops and awaits the process tree and resolves as a completed run with the stored answer; check the opencode runner for the same close-only pattern.",
+"priority": 1
+},
+{
+"id": "F4",
+"origins": ["X3"],
+"severity": "LOW",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [{"claim": "X3", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Shipped packetReach on real files in a scratch folder: a backticked existing path with a folder named 'release -final' is neither found nor reported missing; a backticked existing path with a folder named 'pct%20lit' is reported missing as 'pct lit'; control: a backticked path with a plain space is found. decodeFileUrls on a plain Windows path also turns %20 into a space, so it decodes outside file URLs."
+},
+"final_state": "settled-agree",
+"evidence": ["see origin"],
+"summary": "The packet path scan loses backticked existing paths that hold an option-like folder name or a literal percent escape.",
+"recommended_fix": "In packetPaths stat the whole backticked item first, before the option-word test, and in decodeFileUrls decode percent escapes only inside file URLs.",
+"priority": 3
+},
+{
+"id": "F5",
+"origins": ["Y4"],
+"severity": "LOW",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [{"claim": "Y4", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Shipped packetReach on an existing scratch file: bare, parenthesised and quoted-with-:12:3 forms are found; bold (**path**), a Markdown link [name](path), --log=path, a table cell |path| and a file:/// URL with an encoded colon are neither found nor reported missing; a comma-joined pair gives one false missing path holding both names. decodeFileUrls of an encoded-colon file URL returns '/c:/Users/a b/x.log', because the drive rewrite runs before %3A is decoded. Whether the old scan handled the comma and italic forms was not checked."
+},
+"final_state": "settled-agree",
+"evidence": ["see origin"],
+"summary": "The new bare-word packet path scan drops existing paths written in bold, Markdown-link, --opt=path, table-cell and encoded-colon file URL shapes, and reports a comma-joined pair as one false missing path.",
+"recommended_fix": "In the word splitter also strip leading and trailing '*', '_' and '|', split at '](', '=' and ',', and in decodeFileUrls decode %XX before the drive-letter rewrite.",
+"priority": 3
+},
+{
+"id": "F6",
+"origins": ["X4"],
+"severity": "LOW",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [{"claim": "X4", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Shipped packetPorts on 'tcp://localhost:7/ http://localhost:8/ localhost:9 127.0.0.1:6 [::1]:5' returns []; the two-digit control returns all four pairs. Both regexes at preflight.mjs:1504 and 1506 require a port of 2 to 5 digits."
+},
+"final_state": "settled-agree",
+"evidence": ["see origin"],
+"summary": "The endpoint scan never extracts a port from 1 to 9, so such endpoints are skipped by the advisory reach probe.",
+"recommended_fix": "Change the port group to one to five digits in both PACKET_URL_PORT_RE and PACKET_BARE_PORT_RE, and add a single-digit case to the test.",
+"priority": 3
+},
+{
+"id": "F7",
+"origins": ["X5"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [{"claim": "X5", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "cross-review SKILL.md lines 20-23 say seat B runs through Codex CLI or the OpenCode bridge and that no other layout has a defined dispatch path, enforced by review-config.mjs; review-config.mjs buildSeats sets transport to native whenever the seat runtime equals the host's native runtime (codex on the codex host), so a codex seat B on the codex host is native by default."
+},
+"final_state": "settled-agree",
+"evidence": ["see origin"],
+"summary": "The cross-review entry page says seat B always runs as a CLI or bridge seat, but the config script makes seat B native on the codex host.",
+"recommended_fix": "Qualify the entry paragraph by host: on the codex host a codex seat B is a native agent unless --transport cli is given, as the host reference describes.",
+"priority": 2
+},
+{
+"id": "F8",
+"origins": ["Y2"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [{"claim": "Y2", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Scratch phase1 folder with one No findings seat file declaring 'Blocked: every file in the target: EACCES' and one No findings file with no Blocked line: the shipped blind-relabel.mjs validate printed 'validate clean' and exited 0. A grep for 'Blocked' in blind-relabel.mjs and in references/phase-1-independent-passes.md finds nothing; SKILL.md step 3 names only validate as the completion gate."
+},
+"final_state": "settled-agree",
+"evidence": ["see origin"],
+"summary": "On the documented manual route the completion gate is validate alone, which never reads the Blocked: line, so a blocked or silent No findings seat passes and no report caveat is recorded.",
+"recommended_fix": "Make validate apply the same No findings plus Blocked: rule as the sequencer, or add one sentence to both Completion gate passages telling the orchestrator to read each seat's Blocked: line and treat a blocked or missing line on a No findings seat as incomplete.",
+"priority": 2
+},
+{
+"id": "F9",
+"origins": ["Y5"],
+"severity": "HIGH",
+"basis": "SOURCE_CITATION",
+"evidence_strength": "SUPPORTED",
+"peer_responses": [{"claim": "Y5", "response": "conceded"}],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "SOURCE_CITATION",
+"evidence": "SKILL.md line 53 says the seats never read the user's memory or skills. This auditor was itself spawned as a native agent for this run and its starting context contains the user's global instruction file with its imported rule files, the user's auto-memory index for this repository (entries that describe earlier review loops of these skills as fixed, a decision taken unattended, and a reviewer vendor's sandbox state), and the full list of installed skills including both review skills. So a native agent on this host does receive user memory, earlier verdicts and a vendor name, and the doc sentence is wrong; the fresh-context auditor is affected the same way."
+},
+"final_state": "settled-agree",
+"evidence": ["see origin"],
+"summary": "The new Project knowledge paragraph says seats never read the user's memory or skills, but native seats and the native auditor start with the user's global instructions, memory index (with earlier verdicts and a vendor name) and skill list.",
+"recommended_fix": "Correct the sentence in SKILL.md and the task-packet template of both skills to say native seats inherit host-loaded user instructions and memory; add one All seats rule telling seats and the auditor to treat such context as unverified and never as evidence; recommend CLI seats where full blinding matters.",
+"priority": 1
+}
+]}

@@ -4,7 +4,7 @@ Status: design agreed in outline by the user (full scope; the user left the isol
 questions to the maintainer after an advisor review; the maintainer runs the live Codex trial).
 Nothing is built yet. Version stays 1.1.0. Inputs: the 1.1.0 end-to-end cross-review (run
 `review-7-xr`, findings F15, F16, F19, F20, F21), the Codex-native review run
-`pair-review-native-495364c0`, and field feedback from the gravemind session.
+`pair-review-native-495364c0`, and field feedback from the northwind session.
 
 ## 1. Principle
 
@@ -174,7 +174,7 @@ A single-call auditor or verifier needs no probe. The plain-detach fallback stay
 ## 8. Usability and token backlog (all built and installed 2026-10-07 except the items marked open)
 
 Built: the per-host Quickstart in SKILL.md and a read-this-only-on-failure note on every phase file (the reading cut); `review-config seats`; `references/task-packet-template.md` with the Windows note; ready prompt files for native agents; `build-manifest --run-dir` (collects the packet, untouched Phase 1 copies, peer views, findings, verification files and every completed result.json) and `--init`; `review-run --local`; the concession rate in the scorecard header; a tag table keyed by bracketed packet tags (`[AC-1]`); `counter_fact` in the Note; `--audit-depth`; `--native-agent`; the manifest token split and `usage_ref`. Open: a measurement of the reading saved (size of the files an orchestrator opens for a normal run, before and after); a per-ticket table beyond the tag convention.
- (from the gravemind feedback and the review)
+ (from the northwind feedback and the review)
 
 | Item | Where it lands |
 |---|---|
@@ -184,9 +184,9 @@ Built: the per-host Quickstart in SKILL.md and a read-this-only-on-failure note 
 | Task packet and plain-directory target snapshot are hand work | A packet skeleton file in `references/` first; a `build-target` helper only if the skeleton proves too little |
 | UTC times in sequencer output | `--local` output option, step 5 |
 | Scorecard Note does not show the disputing counter-fact | Needs a schema field; deferred |
-| `build-manifest` needs a hand-made body and a long flag list, and still warned about an unlisted result.json (vsi-client-26) | `build-manifest --run-dir` collects the task packet, both phase1 files, both rebuttals, `findings.json` and every `result.json` by itself, and `--init` writes the minimal body. Step 5 |
-| The scorecard has no per-ticket or per-acceptance-criterion table; concession rate is not shown (vsi-client-26: 17 of 17 conceded on both sides) | A header figure for conceded versus disputed claims; a second table keyed by the packet's acceptance-criterion ids needs a schema field and a packet convention, deferred. Step 5 for the header |
-| Reading cost: SKILL.md sends the orchestrator through the phase files (545 lines for phase 1) plus the host file, configuration and profiles before about 6 commands (vsi-client-26, run 2026-10-07) | A 15-line quickstart per host at the top of SKILL.md that names only the commands and says which file to open when something fails; the recovery text stays in the phase files. Step 5 |
+| `build-manifest` needs a hand-made body and a long flag list, and still warned about an unlisted result.json (app-client-26) | `build-manifest --run-dir` collects the task packet, both phase1 files, both rebuttals, `findings.json` and every `result.json` by itself, and `--init` writes the minimal body. Step 5 |
+| The scorecard has no per-ticket or per-acceptance-criterion table; concession rate is not shown (app-client-26: 17 of 17 conceded on both sides) | A header figure for conceded versus disputed claims; a second table keyed by the packet's acceptance-criterion ids needs a schema field and a packet convention, deferred. Step 5 for the header |
+| Reading cost: SKILL.md sends the orchestrator through the phase files (545 lines for phase 1) plus the host file, configuration and profiles before about 6 commands (app-client-26, run 2026-10-07) | A 15-line quickstart per host at the top of SKILL.md that names only the commands and says which file to open when something fails; the recovery text stays in the phase files. Step 5 |
 | `seats.json` is hand-built from `review-config show` | `review-config seats --host <host> [--transport ...]` writes it from the saved choices, so model ids and transport fields are not retyped. Step 5 |
 | The task packet is assembled by hand (scope, ticket text, pre-flight summary, hypotheses; about 16 KB) | A packet skeleton in `references/` with named slots (scope files, out of scope, acceptance source, declared deviations, start-here list); a Windows note (a `C:\Users` path in a Python string, `az` needing a shell) in the packet step. Step 5 |
 | The native seat prompt is written by the orchestrator each time, including the blinding rule | `review-run phase1 --start` and `phase2 --start` print a ready-to-paste prompt for each native seat (brief path, output path, the blinding rule, the reply word). Step 5 |

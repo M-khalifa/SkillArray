@@ -1,0 +1,349 @@
+{
+  "findings": [
+    {
+      "id": "F1",
+      "origins": ["X1"],
+      "severity": "HIGH",
+      "basis": "STATIC_TRACE",
+      "evidence_strength": "DETERMINISTIC",
+      "peer_responses": [
+        { "claim": "X1", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "STATIC_TRACE",
+        "evidence": "preflight.mjs:1749 probes ignore coverage only for runDir and runDir-audit-input; references/hosts/codex.md:55-58 tells the user to put the run folder in an ignored folder inside the repository; exchange.mjs:229 and blind-relabel.mjs:3114 scrub only the run folder path; run-descriptor.mjs:179 and :258-261 build seat folders and protected peer folders as <run>/<phase>/seat-<letter>; build-brief.mjs:164-165 derives the scratch folder from the output path. A sibling seat folder therefore falls outside the ignore probe, the scrub and the protected-path list, so its path (and a seat letter if the naming is kept) can reach the peer view and the snapshot. The leak of the letter assumes the plan keeps the seat-letter naming, which it does not state either way."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Step 3 sibling working folders fall outside preflight's ignore probe, the run-folder scrub and the protected-path list."],
+      "summary": "Moving seat working folders beside the run folder takes them out of the in-repo ignore check, the run-folder scrub and the peer-folder guard, so the snapshot hash drifts, the other seat's files can enter a worktree snapshot and a pasted seat path reaches the peer and the auditor.",
+      "recommended_fix": "Step 3: give each seat a randomly named working folder with no seat letter in the OS temp area, named in the brief; copy the findings file into the run folder on reply; extend the scrub, the protected-path list, preflight's in-repo probe, the packet reach exemptions and the fingerprint exclusions to every seat working folder; gate with a blinding test that pastes a working-folder path into a seat file and asserts neither the path nor the letter reaches the peer view or the audit folder, run once with the run folder inside an ignored folder of the repository and once outside it, on a native-agent host as well as a CLI host.",
+      "priority": 1
+    },
+    {
+      "id": "F2",
+      "origins": ["Y2"],
+      "severity": "HIGH",
+      "basis": "STATIC_TRACE",
+      "evidence_strength": "SUPPORTED",
+      "peer_responses": [
+        { "claim": "Y2", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "STATIC_TRACE",
+        "evidence": "review-run.mjs:264-266 interpolates the brief path and the output path into every native prompt; review-run.mjs:742 puts a native seat's brief at <run>/phase1/brief-<role>.txt and :752 writes the prompt with canonicalPath under the run folder; review-run.mjs:270 writes prompt files under the run folder; build-brief.mjs:164-165 derives the scratch folder from the output path. Moving only the working folders leaves the run folder named in the prompt and the output destination, so the plan's 'seats never learn the run folder's location' and its demotion of a missed path-check hit to LOW do not follow."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Native prompts, native briefs and output paths still name the run folder after Step 3."],
+      "summary": "Step 3 moves only the working folders, while native prompts, briefs, output destinations and resume instructions still name the run folder, so the promised run-path secrecy does not hold and lowering missed path leaks to LOW is unsafe.",
+      "recommended_fix": "Step 3: stage every seat-visible brief, prompt, output file, scratch folder and resume instruction outside the private run tree and copy completed outputs inward; keep the run-path rejection at its current severity; gate first and resumed CLI and native runs with a sentinel run path that must not appear in prompts, briefs, diagnostics or exchanged files; check read access separately from the touched-files inventory.",
+      "priority": 1
+    },
+    {
+      "id": "F3",
+      "origins": ["X3", "Y6"],
+      "severity": "MEDIUM",
+      "basis": "EXECUTED",
+      "evidence_strength": "REPRODUCED",
+      "peer_responses": [
+        { "claim": "X3", "response": "conceded" },
+        { "claim": "Y6", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "EXECUTED",
+        "evidence": "Tabulated the five closing rounds' phase3/findings.json origins: found 9, 8, 11, 11, 8; seat totals 5/5, 5/4, 7/8, 7/7, 6/4; overlap 1, 1, 4, 3, 2. Lincoln-Petersen missed = 16, 12, 3, 5.3, 4. Pooled 30*28/11 = 76.4 estimated, 47 found = 62%, which contradicts the plan's 'about half, at most'. With overlaps of 1 to 4 a single merge decision changes the estimate by up to a factor of two."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Per-round overlaps of 1 to 4 make the capture-recapture estimate unstable; pooled data give 62% found, not at most half."],
+      "summary": "The 'estimated missed: about N' line and the 'about half, at most' figure do not follow from the data and swing by a factor of two on one merge decision at real overlap sizes, so they would mislead a stop decision.",
+      "recommended_fix": "Section 5: drop the estimated-missed line and its 'falls run by run' target; the report prints observed counts only (found by one seat only, by the other only, by both) and never infers unseen defects or uses overlap as a threshold; any later sweep claims are excluded from overlap; gate with zero-overlap, zero-finding and merged-origin fixtures. Section 1: replace 'about half, at most' with the observed counts.",
+      "priority": 2
+    },
+    {
+      "id": "F4",
+      "origins": ["X2"],
+      "severity": "MEDIUM",
+      "basis": "EXECUTED",
+      "evidence_strength": "SUPPORTED",
+      "peer_responses": [
+        { "claim": "X2", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "EXECUTED",
+        "evidence": "Tabulated the five closing rounds (run.json auditDepth full in all five): agreed MEDIUM/LOW findings 29, of which the full audit changed severity on 3 (two MEDIUM to LOW in round three, one MEDIUM raised to HIGH in round four); agreed HIGH/CRITICAL 16, 6 changed. The claim's denominator of 30 is off by one; the conclusion stands. review-protocol.md light audit records agreed claims NOT_CHECKED, so a refutation count over agreed claims cannot show how many were checked."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Full audits changed the severity of 9 of 45 agreed claims, one MEDIUM raised to HIGH."],
+      "summary": "Decision B's 'no measured loss' rests on a refutation count only; the full audits on record changed the severity of 9 of 45 agreed claims, including an agreed MEDIUM raised to HIGH that Decision B would have left unaudited.",
+      "recommended_fix": "Decision B: state the evidence as 'in the five closing rounds, all full audits, the auditor changed the severity of 9 of 45 agreed claims (3 of 29 agreed MEDIUM/LOW, one raised to HIGH); the 466 figure counts refutations only and does not say how many agreed claims were checked'; keep at least a severity check of agreed MEDIUM claims in the default, or keep the risk line explicit that a wrongly rated agreed MEDIUM ships unaudited.",
+      "priority": 2
+    },
+    {
+      "id": "F5",
+      "origins": ["Y7"],
+      "severity": "MEDIUM",
+      "basis": "SOURCE_CITATION",
+      "evidence_strength": "SUPPORTED",
+      "peer_responses": [
+        { "claim": "Y7", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "SOURCE_CITATION",
+        "evidence": "review-protocol.md 'Audit depth: light. The default.' skips every finding all of whose origins were conceded or that both reviewers found; plan Decision B adds checks of agreed HIGH/CRITICAL and sweep claims on top of that and claims 'less audit cost and time'. That saving holds only against a full audit. The peer's nuance is fair: in all five closing rounds the depth was full, so the saving is real for runs where the sequencer forces a depth choice."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["The current default (light) already skips agreed claims; Decision B adds work relative to it."],
+      "summary": "Decision B claims lower audit cost, but compared with today's light default it adds checks; the saving exists only against a full audit, which the plan does not name as the baseline.",
+      "recommended_fix": "Decision B: name the baseline: 'cheaper than a full audit, more thorough than today's light default'; keep full audit; gate the audit selection matrix (disputed, agreed by severity, sweep provenance) with fixtures; measure accuracy and cost against both light and full on a frozen target.",
+      "priority": 3
+    },
+    {
+      "id": "F6",
+      "origins": ["X6", "Y3"],
+      "severity": "HIGH",
+      "basis": "STATIC_TRACE",
+      "evidence_strength": "DETERMINISTIC",
+      "peer_responses": [
+        { "claim": "X6", "response": "conceded" },
+        { "claim": "Y3", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "STATIC_TRACE",
+        "evidence": "blind-relabel.mjs:1929-1941 refuses any translated origin without a Phase 1 claim heading; blind-relabel.mjs:2277-2278 sets independently_discovered from the seat letters of the origins alone; plan section 3 keeps translate 'logic unchanged' while Decision A adds post-exposure claims. A sweep claim is either refused or, if placed in the Phase 1 set, counted as independent discovery and inflates the overlap. review-protocol.md:268-274 already requires a same-shape sweep in Phase 1, and the plan cites no data for the gain."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Unchanged translate refuses Phase 2 origins or, if they are added to Phase 1, counts post-exposure claims as independent."],
+      "summary": "Decision A's Phase 2 sweep claims cannot pass the unchanged translate step without being counted as independent discoveries, it brings no data, and Phase 1 already requires the same class sweep.",
+      "recommended_fix": "Decision A: not adopted in step 5; keep the exchange rebuttal-only and enforce the existing Phase 1 class sweep (the 'Same shape elsewhere' line) in the brief and validate; allow one measured trial of a Phase 2 sweep only after step 7, with sweep claims in their own section carrying explicit phase provenance, never counted as independent discovery or overlap, and always audited.",
+      "priority": 1
+    },
+    {
+      "id": "F7",
+      "origins": ["X7", "Y4"],
+      "severity": "HIGH",
+      "basis": "EXECUTED",
+      "evidence_strength": "REPRODUCED",
+      "peer_responses": [
+        { "claim": "X7", "response": "conceded" },
+        { "claim": "Y4", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "EXECUTED",
+        "evidence": "grep for env-mode, envMode, envPassthrough and env-passthrough in review-run.mjs, run-descriptor.mjs and review-config.mjs returns nothing (exit 1); SKILL.md:65 documents that a seat needing --env-passthrough (a Bedrock seat) is dispatched by hand, the route the plan removes. The plan names no replacement path."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["review-run has no environment passthrough path; the only documented route is hand dispatch, which the plan removes."],
+      "summary": "Removing hand dispatch and per-script options deletes the only documented way to pass environment controls (--env-mode, --env-passthrough, --use-api-key) to a seat, stranding Bedrock and proxy setups.",
+      "recommended_fix": "Before step 4: add an optional per-actor env setting to run.json (mode filtered or inherit, a list of variable names, the API-key opt-in), written by review-config and validated by run-descriptor, carried by the seat runner into the process module and the detached job record as names only, never values; gate with a fake CLI that checks named variables arrive and unnamed ones do not, foreground, resumed and detached; remove the dispatcher command lines only after it passes.",
+      "priority": 1
+    },
+    {
+      "id": "F8",
+      "origins": ["X4"],
+      "severity": "MEDIUM",
+      "basis": "STATIC_TRACE",
+      "evidence_strength": "DETERMINISTIC",
+      "peer_responses": [
+        { "claim": "X4", "response": "disputed-with-counter-fact", "counter_fact": "The plan expressly allows explained output differences and does not require replay through the sequencer; several pipeline stages already expose callable functions." }
+      ],
+      "auditor_check": {
+        "result": "INCONCLUSIVE",
+        "basis": "EXECUTED",
+        "evidence": "The counter-fact holds in part: the plan's step 0 allows 'listed, explained differences', and build-brief.mjs:431, build-manifest.mjs:1053, build-report.mjs and blind-relabel.mjs export callable functions, so replay need not use the command lines or the sequencer's drift check. The part that survives: build-manifest.mjs:989 stamps a random run_id and usage comes from the live transcript, so a normalizer must be listed, and rerunning the packet's strict-format counter gives 4 of 10 closing seat files fitting, so after step 2 most stored runs stop at validate unless corrected fixtures are added. If true as narrowed it is MEDIUM: a gate specification gap, not a broken safety net."
+      },
+      "final_state": "unresolved-low-stakes",
+      "evidence": ["Replay needs a listed normalizer and corrected seat-file fixtures; the counter refuses 6 of 10 stored files."],
+      "summary": "Step 0's replay net needs a stated normalizer for run_id, usage, paths and times and one call seam that survives step 4, and step 2's strict parser would stop replay of 6 of 10 stored runs at validate; the claim that replay cannot work at all is overstated.",
+      "recommended_fix": "Step 0: replay calls the pipeline through one function seam over today's exported functions, with a listed normalizer for run_id, orchestrator usage, worktree paths, start/end times and durations, never for status, warnings, provenance or findings; Step 2: for each stored seat file the strict parser refuses, add the original (refusal reason asserted) and a corrected copy (replay continues on it). Settling check: run the replay on one stored run through the exported functions and diff the masked manifest.",
+      "priority": 2
+    },
+    {
+      "id": "F9",
+      "origins": ["Y5"],
+      "severity": "MEDIUM",
+      "basis": "STATIC_TRACE",
+      "evidence_strength": "SUPPORTED",
+      "peer_responses": [
+        { "claim": "Y5", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "STATIC_TRACE",
+        "evidence": "tests/claude-dispatch.test.mjs:72 launches the dispatcher by spawnSync of its command line; tests/review-run.test.mjs:285 and :336 test first-failure stopping and a header-only native file through the sequencer; the plan's step 0 keeps only 'behaviour tests that call functions' and rebuilds mutants at step 6, after steps 1-4 have removed the code the mutants point at. A replay of stored results never exercises process or native-turn behaviour."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Process and native-turn fixes are tested through command lines that step 4 removes; mutants are rebuilt only at step 6."],
+      "summary": "Replay of stored results cannot stand in for the command-line behaviour tests that protect the process and native-turn fixes, and rebuilding mutant checks at step 6 comes after the code they protect has already changed.",
+      "recommended_fix": "Replace step 0 and fold step 6 into each step: inventory every kept defect class and its behavioural assertion whatever the test's entry point; port each assertion and its mutant to the new module before deleting that module's old entry point; gate every step with those assertions, error and exit propagation, drift checks and the updated mutants.",
+      "priority": 1
+    },
+    {
+      "id": "F10",
+      "origins": ["X5"],
+      "severity": "MEDIUM",
+      "basis": "EXECUTED",
+      "evidence_strength": "REPRODUCED",
+      "peer_responses": [
+        { "claim": "X5", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "EXECUTED",
+        "evidence": "Ran the packet's strict-format-count.mjs (read-only): older runs files 173, fit 0, no-Blocked-only 157, other 16; closing rounds files 10, fit 4, other 6. seatfiles2.txt has 173 lines, so the corpus is 183, not 177. The plan's step 2 gate only records how many would be asked again and has no pass condition, and the plan says nothing about a second refusal or the rewrite call's usage. The 'last exact line wins' variant would reopen the round-one Blocked reader defect."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Strict counter: older 0 of 173 fit (157 lack any Blocked line), closing 4 of 10 fit."],
+      "summary": "Step 2's corpus sweep has no pass threshold, cannot measure the Blocked rule on the older files that predate it, and leaves open what happens after a second refusal and where the rewrite call's cost is recorded.",
+      "recommended_fix": "Step 2: define the grammar as exactly one line starting 'Blocked:' outside fences in the Checks performed or No findings section and no other unfenced Blocked text, never last-line-wins; gate: every refusal on the 10 closing files and the variant-heading older files gives a reason the brief states; a seat refused after its one rewrite makes the run INCOMPLETE with a named status; the rewrite call's usage is added to that seat's usage in the manifest.",
+      "priority": 2
+    },
+    {
+      "id": "F11",
+      "origins": ["X8"],
+      "severity": "MEDIUM",
+      "basis": "STATIC_TRACE",
+      "evidence_strength": "DETERMINISTIC",
+      "peer_responses": [
+        { "claim": "X8", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "STATIC_TRACE",
+        "evidence": "detach-utils.mjs:174 and :190-192 start the worker as a command line (plain spawn or WMI Win32_Process Create), so it must stay a program entry; review-run.mjs:150-159 maps child exit statuses through an allow list into StepError; review-run.mjs:58 documents the REVIEW_RUN_SCRIPTS_DIR test seam; process.exit counts per script: codex-dispatch 17, preflight 11, claude-dispatch 6, blind-relabel 6, build-manifest 4, build-brief 4, exchange 2. The peer's narrowing (only imported pipeline paths must not exit) is reasonable."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["The detached worker is started by command line; library paths call process.exit; tests rely on a script-substitution seam."],
+      "summary": "Step 4's 'steps become function calls' omits three needed changes: the detached worker stays a separate program, imported pipeline code must stop calling process.exit, and the script-substitution test seam needs a replacement.",
+      "recommended_fix": "Step 4: keep two program entries, review-run and the internal worker entry; every pipeline step function returns a result and throws only StepError, with no process.exit on any imported pipeline path (checked by a test); replace REVIEW_RUN_SCRIPTS_DIR with injected step functions; gate: review-run tests with injected fake steps, the detached dispatch test through WMI and plain mode on Windows, and the kill-path tests repeated.",
+      "priority": 2
+    },
+    {
+      "id": "F12",
+      "origins": ["X9"],
+      "severity": "MEDIUM",
+      "basis": "STATIC_TRACE",
+      "evidence_strength": "SUPPORTED",
+      "peer_responses": [
+        { "claim": "X9", "response": "disputed-with-counter-fact", "counter_fact": "The proposed deletion removes documented reachability capabilities, and plain substring replacement demonstrably loses an existing path-boundary fix." }
+      ],
+      "auditor_check": {
+        "result": "REFUTED",
+        "basis": "EXECUTED",
+        "evidence": "SKILL.md:67 documents 'preflight --host ... --probe-reach --yes-paid' to check the paths and ports the packet names, and preflight.mjs:1596 codexReachProbe implements it on top of packetReach, so removing the scan and probe drops a documented feature. Imported build-recheck-packet.mjs rewritePaths in memory with the mapping /home/u/proj to /new/proj: '/mnt/backup/home/u/proj/file.md' stays unchanged while '/home/u/proj/x' is rewritten, so the boundary rule does work that a plain string replacement would lose. The over-broad claim's other half is true but not a missed simplification: preflight.mjs:602-676 already holds a job-object wrapper with a nojob fallback that the plan's process module can reuse."
+      },
+      "final_state": "settled-refuted",
+      "evidence": ["Proposed removal of the packet scan and reach probe and a plain-string recheck rewrite."],
+      "summary": "The proposed removal of preflight's packet scan and reach probe and the plain-string recheck rewrite would drop a documented feature and a working path-boundary fix; only the observation that preflight already has a job-object wrapper to reuse holds.",
+      "recommended_fix": "Keep the packet reach probe and the recheck rewrite's boundary rules. Residual: step 1 should name preflight's existing job wrapper as the implementation the process module takes over, so the job object is moved, not written again.",
+      "priority": 3
+    },
+    {
+      "id": "F13",
+      "origins": ["X10"],
+      "severity": "MEDIUM",
+      "basis": "SOURCE_CITATION",
+      "evidence_strength": "DETERMINISTIC",
+      "peer_responses": [
+        { "claim": "X10", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "STATIC_TRACE",
+        "evidence": "wc -l: cross-review scripts 17047 lines, pair-review 16023 (the plan's 'one skill' figure); scripts/validate-repository.mjs:280 and :344 enforce byte-for-byte parity of shared scripts; the plan's section 6 gates name replay, dispatch, blinding and docs checks but neither the repository validator nor both skills' suites until the release check in step 8."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["The plan's step gates do not run the repository parity validator or both skills' suites."],
+      "summary": "The plan measures and gates one skill only; no step gate runs the repository parity validator or both skills' suites, so an intermediate step could leave the two skills' shared scripts, SKILL.md files and references out of step.",
+      "recommended_fix": "Section 6: every step's gate ends with node scripts/validate-repository.mjs and both skills' test suites; each step names the files it touches per skill (shared scripts once, SKILL.md and references in both); step 7 measures both skills; replay fixtures run under both skill folders.",
+      "priority": 2
+    },
+    {
+      "id": "F14",
+      "origins": ["X11"],
+      "severity": "MEDIUM",
+      "basis": "STATIC_TRACE",
+      "evidence_strength": "SUPPORTED",
+      "peer_responses": [
+        { "claim": "X11", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "STATIC_TRACE",
+        "evidence": "preflight.mjs:602-605 and :630-636 create a job with kill-on-close plus breakaway-ok, held by the wrapper process itself, and :670-676 report leftover pids or 'nojob' and still run the command; detach-utils.mjs:167-184 starts the worker through WMI with a plain fallback. The plan's one-line 'Windows job object' says nothing about which process holds the handle, which pid the job record stores, the no-job fallback or native seats. The job sits below the worker, so the WMI escape is not broken; with breakaway allowed, containment of every descendant is not guaranteed."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["The plan names a Windows job object without holder, recorded pid, fallback or native-seat scope."],
+      "summary": "The plan's Windows job object does not say which process holds the handle, which pid is recorded, what happens when the job cannot be created, or that native seats stay outside it; the WMI-started worker itself is not broken by it.",
+      "recommended_fix": "Step 1: start a Windows CLI seat through preflight's job wrapper, held inside the seat's own worker tree with kill-on-close; the job record stores the wrapper pid and start token; timeout and stop terminate the job; a 'nojob' result keeps today's stopIncomplete warning; native seats are stated as unchanged; gate: a fake CLI that starts a grandchild holding stdout open, run foreground, detached through WMI and detached plain, asserting the grandchild is gone, plus the nojob path still warning.",
+      "priority": 2
+    },
+    {
+      "id": "F15",
+      "origins": ["X12"],
+      "severity": "LOW",
+      "basis": "EXECUTED",
+      "evidence_strength": "SUPPORTED",
+      "peer_responses": [
+        { "claim": "X12", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "EXECUTED",
+        "evidence": "Counted 208 distinct option tokens in cross-review's scripts (the plan says about 318, no counting rule given) and 173 lines in seatfiles2.txt, so 183 seat files with the 10 closing files (the plan says 177). The 60% versus 'about 70%' text-guessing share is a hand classification and was not recounted here."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Option count, corpus size and text-guessing share in section 1 have no reproducible counting rule."],
+      "summary": "Section 1's option count, seat-file corpus size and text-guessing share do not follow from any stated counting rule, and two of them do not match recounts.",
+      "recommended_fix": "Section 1: state each counting rule with its result (distinct option names, help option lines, the list of findings counted as text reading, 183 seat files) and have step 7 rerun the same commands.",
+      "priority": 3
+    },
+    {
+      "id": "F16",
+      "origins": ["Y1"],
+      "severity": "HIGH",
+      "basis": "SOURCE_CITATION",
+      "evidence_strength": "SUPPORTED",
+      "peer_responses": [
+        { "claim": "Y1", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "SOURCE_CITATION",
+        "evidence": "Plan section 5: 'a finding blocks the release only when its trigger happens in a normal run of the documented commands. A hand-built input is LOW, whatever its effect.' build-report.mjs:36-38 makes every HIGH/CRITICAL finding a blocker by final severity, so filing a fixture-reproduced false COMPLETE as LOW removes it from the blockers. The peer's MEDIUM correction is not adopted: the rubric rates a rule that lets a report read clean when it is not as HIGH, and that is this rule's effect on the round-three and round-four false-COMPLETE class."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["The stop rule rates any hand-built reproduction LOW regardless of impact, removing it from the report's blockers."],
+      "summary": "The stop rule 'a hand-built input is LOW, whatever its effect' judges how a defect was reproduced rather than whether a normal run can reach the state, so false-COMPLETE and blinding regressions found with a fixture would stop blocking the release.",
+      "recommended_fix": "Section 5: 'Severity follows impact; trigger likelihood is recorded separately. A hand-built reproduction of a state a normal run can reach (an interrupted seat, a truncated file, a failed write) still blocks when it shows a lost kept feature, a false COMPLETE, broken blinding or unsafe process handling.' Keep build-report's blocker rule; gate step 8 with a regression fixture per class.",
+      "priority": 1
+    },
+    {
+      "id": "F17",
+      "origins": ["Y8"],
+      "severity": "MEDIUM",
+      "basis": "SOURCE_CITATION",
+      "evidence_strength": "DETERMINISTIC",
+      "peer_responses": [
+        { "claim": "Y8", "response": "conceded" }
+      ],
+      "auditor_check": {
+        "result": "CONFIRMED",
+        "basis": "SOURCE_CITATION",
+        "evidence": "Plan Decision C requires 'a command and its output for each finding'; review-protocol.md:495-500 says a design or document claim has nothing to execute and accepts SOURCE_CITATION, STATIC_TRACE or a constraint trace; SKILL.md:287-291 already carries the same command-and-output recipe. The gap is wording: a document fix can still be shown with a diff or search command, so no fix-check finding is refused outright.",
+        "severity": "LOW",
+        "severity_reason": "The recipe already exists and a diff or search command satisfies it for a document fix, so this is a wording gap in Decision C that should adopt the protocol's 'evidence appropriate to the target' rule, not a lost result."
+      },
+      "final_state": "settled-agree",
+      "evidence": ["Decision C demands command output for every finding while the protocol accepts citations and traces for designs and documents."],
+      "summary": "Decision C's fix-check recipe demands a command and its output for every finding, which does not fit design and document targets the skills must still review.",
+      "recommended_fix": "Decision C: 'require evidence appropriate to the finding: a command and its output when executable, otherwise cited before/after passages and a constraint trace', matching review-protocol.md's verification rule, and let the fix-check reviewer read unchanged sibling paths needed to check the whole class.",
+      "priority": 3
+    }
+  ]
+}

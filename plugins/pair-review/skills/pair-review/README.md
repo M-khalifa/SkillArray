@@ -23,7 +23,7 @@ No npm install or sibling skill is required.
 
 For another skill-capable harness, use its skill directory and verify it can
 actually select the required models. Installing under Codex alone does
-not provide Claude subagents; a Codex-host review is a trial route in 1.1.0 (see SKILL.md and references/hosts/codex.md), and Claude Code is the supported host.
+not provide Claude subagents; a Codex-host review is a trial route (see SKILL.md and references/hosts/codex.md), and Claude Code is the supported host.
 
 ## Use
 

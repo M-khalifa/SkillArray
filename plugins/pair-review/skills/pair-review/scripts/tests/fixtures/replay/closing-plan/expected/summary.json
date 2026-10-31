@@ -1,0 +1,22 @@
+{
+  "steps": [
+    "validate: exit 0, 57 warning(s)",
+    "exchange prepare: exit 0, 57 warning(s)",
+    "exchange finish: exit 0, 57 warning(s)",
+    "audit-prep: exit 0, 0 warning(s)",
+    "translate: exit 0, 0 warning(s)",
+    "scorecard: exit 0, 0 warning(s)",
+    "manifest: exit 0, 0 warning(s)",
+    "report chat: exit 0, 0 warning(s)",
+    "report chat all: exit 0, 0 warning(s)"
+  ],
+  "status": "completed",
+  "missing_seat_files": null,
+  "findings": 17,
+  "states": {
+    "settled-agree": 15,
+    "unresolved-low-stakes": 1,
+    "settled-refuted": 1
+  },
+  "report_status": "COMPLETE"
+}

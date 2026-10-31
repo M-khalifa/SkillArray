@@ -4,7 +4,8 @@ import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertWin32Safe, winQuote, posixKillTree, killTree, spawnCli, preserveEarlierResult, treeGroups } from '../spawn-utils.mjs';
+import { fileURLToPath } from 'node:url';
+import { assertWin32Safe, winQuote, posixKillTree, killGroupOnExit, killTree, spawnCli, preserveEarlierResult, processTable, psBinary, stopMarkedProcesses, treeGroups, watchTreeGroups, atomicWriteJson, renameRetrying, jobSpawn } from '../spawn-utils.mjs';
 
 const IS_WIN32 = process.platform === 'win32';
 
@@ -83,6 +84,26 @@ test('spawnCli: the win32 branch runs under a shell and does not set detached', 
   assert.match(captured.cmdLine, /"codex" "exec"/);
   assert.equal(captured.opts.shell, true);
   assert.equal(captured.opts.detached, undefined);
+  // A caller with no console (a detached worker, an agent's tool shell) would otherwise open a window per child (field report).
+  assert.equal(captured.opts.windowsHide, true);
+  spawnCli('codex', ['exec'], { cwd: '/tmp' }, { spawnFn: (cmd, args, opts) => { captured = { opts }; return new EventEmitter(); }, platform: 'linux' });
+  assert.equal(captured.opts.windowsHide, true);
+});
+
+test('every direct spawn in the shared scripts hides its window (no console window per child on Windows)', async () => {
+  const dir = path.dirname(fileURLToPath(new URL('../spawn-utils.mjs', import.meta.url)));
+  const missing = [];
+  for (const name of (await fs.readdir(dir)).filter((n) => n.endsWith('.mjs'))) {
+    const lines = (await fs.readFile(path.join(dir, name), 'utf8')).split('\n');
+    lines.forEach((line, i) => {
+      if (!/\b(?:spawn|spawnSync|execFileSync)\(/.test(line) || /^\s*\/\//.test(line) || /\bfunction\b/.test(line)) return;
+      const call = lines.slice(i, i + 3).join(' ');
+      // POSIX-only "ps" probes never run on Windows; spawnCli's own calls get windowsHide inside spawnCli.
+      if (/'ps'/.test(call) || /spawnFn\(cmd/.test(call) || /spawnFn\(cmdLine/.test(call)) return;
+      if (!/windowsHide: true/.test(call)) missing.push(`${name}:${i + 1}`);
+    });
+  }
+  assert.deepEqual(missing, []);
 });
 
 test('spawnCli: an injected win32 platform actually reaches assertWin32Safe, so this guard is testable on any OS', () => {
@@ -101,6 +122,39 @@ function fakeChild(pid = 4242) {
   child.pid = pid;
   return child;
 }
+
+test('killGroupOnExit: on POSIX the exited child\'s group gets SIGKILL once, an empty group is no error, Windows is left alone', () => {
+  const sent = [];
+  const posix = Object.assign(new EventEmitter(), { pid: 4242 });
+  killGroupOnExit(posix, { platform: 'linux', kill: (pid, sig) => sent.push([pid, sig]) });
+  assert.deepEqual(sent, [], 'nothing before the child exits');
+  posix.emit('exit', 0);
+  posix.emit('exit', 0);
+  assert.deepEqual(sent, [[-4242, 'SIGKILL']]);
+  const empty = Object.assign(new EventEmitter(), { pid: 4243 });
+  killGroupOnExit(empty, { platform: 'darwin', kill: () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); } });
+  assert.doesNotThrow(() => empty.emit('exit', 0));
+  const win = Object.assign(new EventEmitter(), { pid: 4244 });
+  killGroupOnExit(win, { platform: 'win32', kill: () => sent.push('win') });
+  win.emit('exit', 0);
+  assert.equal(sent.length, 1);
+});
+
+test('killGroupOnExit: a command that leaves a job in the background still closes at once, and the job is gone [slow]', { skip: process.platform === 'win32' }, async () => {
+  const { spawn } = await import('node:child_process');
+  const child = spawn('/bin/sh', ['-c', 'sleep 60 & echo $! ; echo ok'], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  killGroupOnExit(child);
+  let out = '';
+  child.stdout.on('data', (d) => { out += d; });
+  const started = Date.now();
+  await new Promise((resolve) => child.on('close', resolve));
+  assert.ok(Date.now() - started < 10000, 'close does not wait for the background sleep');
+  const sleeper = Number(out.split('\n')[0]);
+  // A killed process answers signal 0 until init reaps it, which lags under load.
+  const alive = () => { try { process.kill(sleeper, 0); return true; } catch { return false; } };
+  for (let i = 0; i < 40 && alive(); i += 1) await new Promise((r) => setTimeout(r, 50));
+  assert.throws(() => process.kill(sleeper, 0), 'the background job was killed with the group');
+});
 
 test('posixKillTree: a child that never exits gets SIGTERM then SIGKILL, both targeting the process group', async () => {
   const calls = [];
@@ -210,13 +264,11 @@ test('killTree: on a non-win32 platform, delegates to posixKillTree (SIGTERM the
   assert.deepEqual(calls, [[-4242, 'SIGTERM'], [-4242, 0], [-4242, 'SIGKILL']]);
 });
 
-test('killTree: a log callback receives a message on taskkill failure (win32 branch)', async () => {
+test('killTree: a log callback receives a message on taskkill failure (win32 branch)', { skip: !IS_WIN32 && 'taskkill.exe only exists on Windows' }, async () => {
   // Exercises killTree's win32 branch without a real taskkill.exe: an invalid
   // pid still spawns taskkill, which will exit non-zero rather than error, so
   // this asserts killTree resolves rather than hangs -- the log callback
-  // itself is exercised in codex-dispatch.mjs's/opencode-dispatch.mjs's own
-  // integration-level tests, which run on real Windows CI.
-  if (!IS_WIN32) return; // taskkill.exe only exists on win32
+  // itself is exercised in the dispatchers' own integration-level tests, which run on real Windows CI.
   const child = fakeChild(999999999);
   await assert.doesNotReject(() => killTree(child, { platform: 'win32', log: () => {} }));
 });
@@ -230,4 +282,166 @@ test('preserveEarlierResult: a dead worker\'s live stderr log is archived with i
   assert.equal(await preserveEarlierResult(result), path.join(dir, 'result.attempt-1.json'));
   assert.equal(await fs.readFile(path.join(dir, 'result.attempt-1.stderr.live.log'), 'utf8'), 'ERROR exec_command failed: x\n');
   assert.equal(await fs.access(path.join(dir, 'result.stderr.live.log')).then(() => true, () => false), false);
+});
+
+test('Linux round linux-r1 F1: a background job left in a tool command group whose leader exited is stopped; a reused group id is not', () => {
+  const T = (rows) => new Map(rows.map(([pid, ppid, pgid, start]) => [pid, { ppid, pgid, start }]));
+  // The CLI 100 runs a tool shell 200 in its own group; the shell starts a background job 201 and exits.
+  const running = T([[1, 0, 1, 'a'], [100, 50, 100, 'c'], [200, 100, 200, 's'], [201, 200, 200, 'j'], [400, 1, 400, 'u']]);
+  const after = T([[1, 0, 1, 'a'], [201, 1, 200, 'j'], [400, 1, 400, 'u']]);
+  let table = running;
+  const kills = [];
+  const w = watchTreeGroups(100, { readTable: () => table, kill: (pid, sig) => kills.push([pid, sig]), platform: 'linux', intervalMs: 60000 });
+  table = after;
+  assert.deepEqual(w.stop(), [201], 'the job left in the dead leader group');
+  assert.deepEqual(kills, [[-200, 'SIGKILL']], 'only that group, never the unrelated group 400');
+  // The group emptied and its id came back for an unrelated process: not killed.
+  table = running;
+  const k2 = [];
+  const w2 = watchTreeGroups(100, { readTable: () => table, kill: (pid, sig) => k2.push([pid, sig]), platform: 'linux', intervalMs: 60000 });
+  table = T([[1, 0, 1, 'a'], [200, 1, 200, 'other']]);
+  assert.deepEqual(w2.stop(), []);
+  assert.deepEqual(k2, []);
+  assert.equal(watchTreeGroups(100, { platform: 'win32' }), null, 'Windows uses the job object');
+});
+
+test('Linux round linux-r1 F1: every process still carrying the run id is stopped, others and this process are not', () => {
+  const env = { 10: 'PATH=/x\0REVIEW_SEAT_RUN_ID=abc\0', 11: 'REVIEW_SEAT_RUN_ID=abcd\0', 12: 'HOME=/h\0', 13: 'REVIEW_SEAT_RUN_ID=abc\0' };
+  const kills = [];
+  const left = stopMarkedProcesses('abc', { listPids: () => [10, 11, 12, 13, 14], readEnviron: (pid) => { if (!(pid in env)) throw new Error('EACCES'); return env[pid]; }, kill: (pid, sig) => kills.push([pid, sig]), platform: 'linux', self: 13 });
+  assert.deepEqual(left, [10], 'an id that only starts the same is another run; this process is skipped; an unreadable one is skipped');
+  assert.deepEqual(kills, [[10, 'SIGKILL']]);
+  assert.deepEqual(stopMarkedProcesses('abc', { platform: 'darwin', readPsEnv: () => ({ status: 1 }) }), [], 'ps failed on macOS: nothing');
+  assert.deepEqual(stopMarkedProcesses('abc', { platform: 'win32', readPsEnv: () => { throw new Error('no ps on Windows'); } }), [], 'Windows uses the job object');
+  assert.deepEqual(stopMarkedProcesses('', { platform: 'linux', listPids: () => [10], readEnviron: () => env[10] }), [], 'no id, nothing');
+});
+
+test('macOS: every process whose environment in ps carries the run id is stopped, others and this process are not', () => {
+  const id = 'f0e1d2c3-0000-4000-8000-000000000001';
+  const stdout = [
+    `  201 node -e setInterval(() => {}, 1000) PATH=/usr/bin REVIEW_SEAT_RUN_ID=${id} HOME=/Users/x`,
+    `  202 node server.js REVIEW_SEAT_RUN_ID=${id}0 HOME=/Users/x`,
+    `  203 python3 job.py FOO=xREVIEW_SEAT_RUN_ID=${id}`,
+    '  204 /bin/sleep 300',
+    `  205 node self.js REVIEW_SEAT_RUN_ID=${id}`,
+    `  206 /opt/homebrew/bin/python3 w.py REVIEW_SEAT_RUN_ID=${id}`,
+    `    0 forged REVIEW_SEAT_RUN_ID=${id}`,
+    `    1 forged REVIEW_SEAT_RUN_ID=${id}`,
+    '',
+  ].join('\n');
+  const kills = [];
+  const left = stopMarkedProcesses(id, { platform: 'darwin', readPsEnv: () => ({ status: 0, stdout }), kill: (pid, sig) => kills.push([pid, sig]), self: 205 });
+  assert.deepEqual(left, [201, 206], 'a longer id, a marker glued to another variable, no marker, pid 0 or 1 and this process are left alone');
+  assert.deepEqual(kills, [[201, 'SIGKILL'], [206, 'SIGKILL']]);
+  const gone = stopMarkedProcesses(id, { platform: 'darwin', readPsEnv: () => ({ status: 0, stdout }), kill: (pid) => { if (pid === 201) throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, self: 205 });
+  assert.deepEqual(gone, [206], 'one that exited meanwhile is not named');
+  const err = Object.assign(new Error('spawnSync ps ENOBUFS'), { code: 'ENOBUFS' });
+  assert.deepEqual(stopMarkedProcesses(id, { platform: 'darwin', readPsEnv: () => ({ status: null, error: err, stdout }), kill: () => assert.fail('nothing is signalled') }), [], 'ps cut off: nothing');
+  assert.deepEqual(stopMarkedProcesses('', { platform: 'darwin', readPsEnv: () => assert.fail('no id, no ps') }), []);
+});
+
+test('the process table reads ps start times in UTC, so a time-zone change while a seat runs keeps each start the same', { skip: process.platform !== 'darwin' }, () => {
+  const before = process.env.TZ;
+  try {
+    process.env.TZ = 'America/Los_Angeles';
+    const west = processTable({ platform: 'darwin' })?.get(process.pid)?.start;
+    process.env.TZ = 'Asia/Tokyo';
+    const east = processTable({ platform: 'darwin' })?.get(process.pid)?.start;
+    assert.ok(west, 'ps gives a start');
+    assert.equal(east, west);
+  } finally {
+    if (before === undefined) delete process.env.TZ; else process.env.TZ = before;
+  }
+});
+
+test('Linux round linux-r2 F4: once the CLI has exited, a process that reuses its pid is not followed', () => {
+  const T = (rows) => new Map(rows.map(([pid, ppid, pgid, start]) => [pid, { ppid, pgid, start }]));
+  let table = T([[100, 50, 100, 'c'], [200, 100, 200, 's']]);
+  const kills = [];
+  const w = watchTreeGroups(100, { readTable: () => table, kill: (pid, sig) => kills.push([pid, sig]), platform: 'linux', intervalMs: 60000 });
+  // The CLI exits; pid 100 now holds an unrelated process whose child leads group 300.
+  table = T([[100, 1, 100, 'reused'], [300, 100, 300, 'x'], [200, 1, 200, 's']]);
+  w.sample();
+  assert.deepEqual(w.stop(), [200], 'only the group seen while the CLI ran');
+  assert.deepEqual(kills, [[-200, 'SIGKILL']], 'never the reused pid\'s group 300');
+});
+
+test('Linux round linux-r3 F7: off Linux the process table carries ps\'s start, so a reused pid is told apart', () => {
+  const runPs = () => ({ status: 0, stdout: '  101     1   101 Thu Oct 22 22:41:10 2026\n  102   101   102 Thu Oct 22 22:41:11 2026\n' });
+  const table = processTable({ platform: 'darwin', runPs });
+  assert.deepEqual(table.get(101), { ppid: 1, pgid: 101, start: 'Thu Oct 22 22:41:10 2026' });
+  assert.notEqual(table.get(102).start, table.get(101).start);
+  if (process.platform !== 'win32') {
+    const real = processTable({ platform: 'darwin' });
+    assert.ok(typeof real?.get(process.pid)?.start === 'string' && real.get(process.pid).start.length > 0, 'the real ps gives a start');
+  }
+});
+
+test('flake fix: a result.json rename Windows refuses for a moment (EPERM, EBUSY) is retried, so a detached worker does not die with its record still "running"', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rename retry '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'result.json');
+  await fs.writeFile(file, '{"status":"running"}\n');
+  const codes = ['EPERM', 'EBUSY'];
+  const calls = [];
+  const rename = async (from, to) => {
+    calls.push(to);
+    const code = codes.shift();
+    if (code) throw Object.assign(new Error(code), { code });
+    return fs.rename(from, to);
+  };
+  await atomicWriteJson(file, { status: 'completed' }, { rename });
+  assert.equal(calls.length, 3, 'two refusals, then the rename');
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).status, 'completed');
+  assert.deepEqual(await fs.readdir(dir), ['result.json'], 'no temp file is left');
+});
+
+test('flake fix: a rename refused every time, or refused for another reason, throws and leaves no temp file', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rename retry '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const from = path.join(dir, '.tmp');
+  for (const [code, tries] of [['EPERM', 3], ['EXDEV', 1]]) {
+    await fs.writeFile(from, 'x');
+    let calls = 0;
+    const rename = async () => { calls += 1; throw Object.assign(new Error(code), { code }); };
+    await assert.rejects(renameRetrying(from, path.join(dir, 'to'), { rename, tries: 3, delayMs: 1 }), { code });
+    assert.equal(calls, tries, `${code}: ${tries} attempt(s)`);
+    assert.deepEqual(await fs.readdir(dir), [], `${code}: the temp file is removed`);
+  }
+});
+
+test('macOS reads ps by its path, so the process checks do not depend on PATH; elsewhere ps is looked up on PATH', () => {
+  assert.equal(psBinary('darwin'), '/bin/ps');
+  assert.equal(psBinary('linux'), 'ps');
+  assert.equal(psBinary('freebsd'), 'ps');
+});
+
+test('jobSpawn: the PowerShell wrapper starts with this process\'s PSModulePath, and the command still gets the PSModulePath of the env it was given', async (t) => {
+  const saved = Object.keys(process.env).filter((k) => k.toLowerCase() === 'psmodulepath').map((k) => [k, process.env[k]]);
+  for (const [k] of saved) delete process.env[k];
+  process.env.PSModulePath = 'own-modules';
+  t.after(() => { delete process.env.PSModulePath; for (const [k, v] of saved) process.env[k] = v; });
+  const spawned = [];
+  const spawnFn = (cmd, args, opts) => { spawned.push(opts.env); return new EventEmitter(); };
+  for (const [env, forCommand] of [[{ Path: 'bin' }, '<unset>'], [{ Path: 'bin', psmodulepath: 'given-modules' }, 'given-modules']]) {
+    const { dir } = jobSpawn('echo x', { cwd: os.tmpdir(), env, spawnFn });
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const shellEnv = spawned.at(-1);
+    assert.deepEqual(Object.keys(shellEnv).filter((k) => k.toLowerCase() === 'psmodulepath'), ['PSModulePath'], 'one PSModulePath key');
+    assert.equal(shellEnv.PSModulePath, 'own-modules', 'the wrapper starts with this process\'s value');
+    assert.equal(shellEnv.PREFLIGHT_EXEC_PSMODULEPATH, forCommand, 'the command gets the value of the env it was given');
+  }
+});
+
+test('jobSpawn: the command sees the PSModulePath of the env it was given, or none [slow]', { skip: process.platform !== 'win32' && 'Windows job wrapper' }, async (t) => {
+  const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'psmodulepath'));
+  for (const [env, want] of [[{ ...base, PSModulePath: 'given-modules' }, '[given-modules]'], [base, '[%PSModulePath%]']]) {
+    const { child, dir } = jobSpawn('echo [%PSModulePath%]', { cwd: os.tmpdir(), env });
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    const code = await new Promise((resolve) => child.on('close', resolve));
+    assert.equal(code, 0);
+    assert.equal(out.trim(), want);
+  }
 });

@@ -1,171 +1,390 @@
 # Changelog
 
+## 1.2.0 - 2026-10-28
+
+Fixes from field runs on real collectors, from self-reviews on Windows, macOS and Linux, and from five rounds of the skills
+reviewing their own code.
+
+- Codex seats start with every MCP server off, because a server like node_repl runs code outside Codex's read-only sandbox.
+  If Codex can't list its servers, the seat doesn't start.
+- `preflight --exec-file <file>` runs one command per line as written. Use it on Windows PowerShell 5.1, which drops inner
+  quotes from `--exec`.
+- Preflight now refuses a bad setup before any paid call: a run folder inside the target, a target git ignores, no git, a
+  repository git can't open, or a Codex seat with no working `codex`.
+- The snapshot a CLI seat reviews has the same contents, modes and names as the target's tracked and non-ignored
+  untracked files, staged files and line endings included (extended attributes are not copied), and git hooks don't run
+  while it's built.
+- `review-run --wait` is safe to rerun at any step. It never runs a step twice, and its `next:` line tells you what to run next.
+- Ctrl-C stops everything a run started, including background jobs a seat left on Linux and macOS. On macOS the run id
+  finds a job that is a non-Apple program (node, Homebrew python); an Apple system program (`/bin/sh`, `/bin/sleep`,
+  `/usr/bin/perl`) hides its environment and is not found.
+- A seat CLI that keeps running after its final answer is stopped 30 seconds later and the answer kept (result.json
+  `stoppedAfterAnswer`), instead of holding memory until its timeout.
+- `review-run` shows that stop, and warns (also in the report) when the seat's output stayed open after it, because a
+  process it started may still be running.
+- A native Codex agent whose last turn was aborted is no longer read as finished: `review-run` asks you to resume it.
+- `review-config seats` notes when a seat or the auditor runs as a native agent, which also sees the host's own
+  instructions and memory.
+- From a macOS self-test: preflight `--exec` no longer waits for output that a process outside the command's process group
+  holds open (it warns and records `outputHeldOpen`), and on Linux and macOS it warns when it stops what a command left in
+  its process group. Every seat and auditor brief says to read nothing in the run folder beyond the files it names. A run
+  with a seat's Phase 1 file missing is recorded as incomplete. The host pre-flight warns about a `P1`-style label in the
+  task packet. The model catalog lists gpt-6.1-sol.
+- From a Linux self-test: a run-folder path a seat pasted into its findings reaches the other seat and the auditor as
+  `<run-dir>`; on Linux and macOS a path written as `//root/...` counts in the run-folder checks; on Linux letter case is
+  no longer folded there (a folder `r` next to the run folder `R` is another folder); a seat CLI that had exited while
+  its output was still open is no longer signalled, and the warning says so.
+- From the third closing review: after the `<run-dir>` rewrite, the run-folder guard runs over the peer views and the
+  auditor's files and stops on any other spelling (`~`, a variable, a drive-less or short name, a link); the `Blocked:`
+  reader takes the section heading at any level and any run of list, number, heading, table or task-box markers; the
+  pre-flight label warning covers the letters A, B, X and Y too; an empty or cut-off seat file counts as missing; a
+  timeout or Ctrl-C never signals a seat CLI that already exited; audit-prep retries a rename Windows briefly refuses and
+  leaves no staging folder; a native agent that ends its last turn with no reply gets a warning.
+- From the fourth closing review: the `Blocked:` reader also takes an emphasized or numbered section heading, a
+  letter or roman list label (`a.`, `iv)`) and a full-width colon; build-manifest counts a seat file only with an unfenced
+  `## Checks performed` or `## No findings` and reads the original Phase 1 copy first; a seat CLI that exits without an
+  answer while its output stays open ends after 5 s with a warning instead of waiting for the timeout; `%USERNAME%`,
+  `$USER` and `$env:USERNAME` inside a path count in the run-folder checks; the run-folder guard, the `<run-dir>`
+  rewrite and the re-review packet's path rewrite agree on where a folder name ends; a relative path that walks up
+  through `..` (`docs/../../runs/...`) is checked against the target; preflight and the OpenCode dispatcher never stop
+  the tree of a command that already exited; a resumed native Claude agent's turn with no text no longer reports the
+  earlier turn's reply; the Phase 2 resume message allows what the delta brief allows; the packet template's own
+  examples no longer look like claim labels.
+- From the fifth closing review: a relative path that walks up through `..` is also found inside markdown emphasis,
+  strikethrough, a table cell or a quote; a `Blocked:` line may follow several stacked list labels (`1. a.`);
+  build-manifest and build-report read the seat's section under the same headings review-run's reader takes, and a seat
+  file with only that heading (no claim, no No findings) counts as missing; a finite `--timeout` that falls due after a
+  seat CLI exited with no answer and its output open ends the run as the exit wait does (its exit code, a warning), not as
+  a kill, and review-run records it; the re-review packet's path rewrite leaves a longer path that ends with the old one
+  alone; `$USER` and `$USERNAME` fall back to each other; the resume messages also allow the seat's own output file.
+- Upgrade note: finish or restart any review that uses an isolated copy (a Claude CLI seat, or OpenCode with `--isolate`)
+  before updating. The new version refuses to resume a copy made by the old one; remove that copy and restart the affected
+  review steps.
+- If the target changes during a review, `audit --finish` names the changed files and can go on with `--accept-drift`, which
+  the report then shows. A refused auditor file comes back with a ready message for the auditor.
+- The report no longer counts withdrawn findings under their severity, and its cost columns mean the same thing for every
+  seat. A seat that says it could not read or run things gets a warning.
+- New: `--exec-in-file`, `review-run status` for several runs at once, and `preflight --probe-reach` to check what a Codex
+  seat can reach.
+- The re-review packet maps every repository of the old run (`--repo-target`), can build its own diff (`--since-dirs`), and
+  words each old finding as "still present", so REFUTED means fixed.
+- Findings keep the seat's "Same shape elsewhere" sites and a new "Trigger" line (what input makes the bug happen). The
+  report shows both, the next re-review checks those sites too, and a light audit no longer starts silently after a HIGH
+  claim was conceded.
+- The report shows the review round (with a step-back note from round 3), wall and orchestrator time, a "Where" hint per
+  finding from the change diff, and reads outcome words in the notes (fixed, wrong, intentional, not-worth-it, decided), which
+  the next re-review packet uses too.
+- A repository's REVIEW.md (the committed copy by default) goes into the seat and auditor briefs. Two repository tools:
+  `bench/outcomes.mjs` counts outcomes per seat model, and `bench/case-from-run.mjs` turns a finished run into a bench case.
+- On Windows each `preflight --exec` command runs in a job object, so a background process it leaves is stopped even after
+  the program that started it has exited. The brief's run-folder check sees spaced folders and `${env:X}` /
+  `%HOMEDRIVE%%HOMEPATH%` spellings and paths through a link or junction. Each seat ends its Checks performed with a
+  `Blocked: none` or `Blocked: <what>: <error>` line, the only signal for the blind-seat warning: a No findings seat without it
+  stops the step (the wording guess is gone). The packet scans take a backticked path whole and a bare one up to the first
+  space, and only URLs, IPv4, [IPv6] and localhost as endpoints. The orchestrator copies project knowledge into the packet.
+- From the first Windows CI run: the Windows job wrapper starts PowerShell with this process's `PSModulePath` and sets
+  the filtered one only on the command it starts. Before, the wrapper took about 20 seconds per seat CLI or `--exec`
+  command on a GitHub Windows runner (0.5 s now); the command's environment is unchanged. Test files (`.diff`, `.jsonl`,
+  `.txt`) check out with LF line endings on every OS, the stored-run replays no longer depend on the skill's version,
+  and a path test no longer assumes the temp folder and the working folder share a drive.
+
+Restructure (one entry, fewer moving parts):
+
+- Tests: nine stored review runs replay through validate, the exchange, audit-prep, translate, the manifest and the
+  report, and must give the recorded result.
+- Per-seat environment: `review-config seats --env <role>=NAME,...`, `--env-mode <role>=inherit` and
+  `--use-api-key <role>` write variable names (never values) into run.json, and `review-run` passes them to every
+  dispatch of that seat or the auditor, so a Bedrock seat no longer needs a hand-run dispatcher.
+- OpenCode is gone: the dispatcher, its catalog providers, host rules, tests and docs. Seat B of a cross-review runs on
+  Codex.
+- The Claude and Codex dispatchers share one process module (`cli-run.mjs`) for the answer stop, the exit wait, the
+  timeout and Ctrl-C. On Windows each seat CLI runs in a job object, so a process it started is stopped with it, also
+  one whose launcher has exited (result.json `leftoversStopped`); a refused job is named (`jobRefused`) and the old
+  warning stays.
+- One strict seat file format, read by one module (`seat-file.mjs`) in review-run, the manifest and the report: claims,
+  then exactly `## Checks performed` (or only `## No findings`), with exactly one line `Blocked: none` or
+  `Blocked: <what>: <the error>` and no other unfenced Blocked text. A refused file goes back to its seat once with the
+  reasons; refused again, the review is INCOMPLETE (`phase1/format-refused.json`). The loose `Blocked:` readers are gone.
+  A `## No findings` seat that names a block makes the manifest incomplete, also in a run built without review-run.
+- One entry: `review-run` (with `review-config` and `preflight`). blind-relabel, exchange, build-brief, build-manifest,
+  build-report and build-recheck-packet are modules that review-run calls in-process, with no command line and no help
+  text. New `review-run` commands: `manifest`, `report`, `recheck`, `splice`, `scan` and `verifier-brief`. Tests inject
+  the steps (`io.steps`); `REVIEW_RUN_SCRIPTS_DIR` is gone. The manual route and its options (`--seat-b-harness`,
+  `--incomplete-seats`) are gone.
+- Every audit re-checks every claim: the light audit, `--audit-depth` and the depth advice are gone. A `run.json` from an
+  older run keeps the depth it ran with.
+- Every Phase 1 claim fills `Same shape elsewhere:`; a claim without it is refused (one rewrite).
+- The report prints the observed overlap of the two seats: raised by seat A only, seat B only, or both.
+- A step module started with node by hand exits 2 and points at `review-run`, instead of doing nothing and exiting 0.
+- From the first review of the restructure: a deep verify the user asks for after the audit (a run that started without
+  falsification) is staged and read by translate, also after the audit finished (the earlier output and findings are kept); `review-run status` names a seat file refused twice also after the
+  manifest is written, and says when a manifest is incomplete; the report renders such a run as INCOMPLETE instead of
+  failing; rebuilding the manifest of a run written before the strict format no longer marks it incomplete (a format
+  note and a report caveat instead); a quoted `Blocked:` line in an inline code span of any width is read as code; a
+  format rewrite that failed before its CLI reported a session is sent again on the Phase 1 session; a verifier started
+  with `--run-dir` gets the auditor's run.json environment settings; a refused Windows job is reported also when the
+  seat was stopped after its answer; messages no longer advise dispatcher options `review-run` cannot pass.
+- From the second review of the restructure: `review-run phase2 --wait --incomplete-seat <A|B>` finishes the exchange
+  without a seat that cannot be resumed (the review is recorded as incomplete); after a finished audit, a changed native
+  auditor file waits for `--native-done auditor` again; a seat file refused twice no longer also gets the "written before
+  that rule" note; the report says "blind exchange: no" and "fresh auditor: none" when neither ran, and names only files
+  that exist; a git target with submodules names a native seat as the way to review it; preflight `--exec` reports a refused Windows job also on a timeout or stop; the ten-line output cap keeps
+  warning and failure lines first; the docs say how a deep verify after the audit works with a native auditor and that a
+  CLI auditor needs a run with `--falsification`.
+- From the third review of the restructure: `--incomplete-seat` stops that seat's Phase 2 CLI when it is still running,
+  so it cannot write rebuttals after the finish; the manifest records a blind exchange only when rebuttals were
+  appended; a seat file with text after `Blocked: none` is refused; a deep verify after a finished native audit is
+  scanned and staged for the resumed auditor; when warnings overflow the ten-line cap, the rest share one line instead
+  of being dropped; the scorecard and the docs say a CLI auditor needs a new run with `--falsification` for a deep
+  verify; the submodule message says such a target cannot be reviewed from a Codex host.
+- From the pair review after the third review: a `Blocked:` line that says "none" with anything after it, or another
+  word for nothing (`n/a`, `nothing`, `-`, `(none)`), gets the one rewrite instead of being read as a block; a saved
+  configuration this version cannot use (an OpenCode seat) names its file and says reset, then setup; when warnings
+  overflow the ten-line cap, each one keeps its start and the omitted progress lines are counted; a seat that answered
+  and is still running when its `--timeout` ends keeps its answer; the identity scan no longer stops on the target's
+  own folder name (or a source folder's) when it holds a vendor word; review-run's usage names `--accept-drift` and
+  `--local` where they are accepted, and the ten-line cap is stated for the phase commands only; the replay test data is
+  no longer ignored by git (the repository check now refuses an ignored fixture), its byte counts no longer depend on
+  the temp folder's length, and a short-form profile name was removed from it; the phase-2 docs say how to send a
+  redaction request to a CLI seat.
+- From the Linux review (Ubuntu 24.04, the review run as root): on Linux and macOS a background job a seat's tool command
+  left running is stopped when the seat ends, also one in a process group whose leader has exited (the groups the CLI's
+  tool commands lead are watched while it runs, once a second) and one that left its group (every process the CLI or a
+  preflight `--exec` command starts carries a run id, `REVIEW_SEAT_RUN_ID`); `leftoversStopped` names them. On macOS the
+  run id finds a job that is a non-Apple program (node, Homebrew python); an Apple system program (`/bin/sh`,
+  `/bin/sleep`, `/usr/bin/perl`) hides its environment and is not found. The run-folder guard reads `$PWD`,
+  `${PWD}`, `/proc/self/cwd`, `/proc/thread-self/cwd` and `~user/` from the reader's folder, and on
+  Linux and macOS a backslash as a separator. Preflight probes whether the run folder's file system folds letter case
+  (WSL `/mnt/c`, CIFS, exFAT) and records it in run.json (`flags.foldsCase`); the run-folder checks and the identity scan
+  use it. `--incomplete-seat` also stops a seat worker that has not started its CLI yet. A claim-level defect in a seat
+  file (a missing or invalid field, a duplicate heading, an unclosed fence) gets the same one rewrite as the section
+  format. `phase2 --start` moves a seat's leftover Phase 1 scratch folder out of the run folder (to
+  `<run-dir>-scratch-kept`). phase1 --start no longer warns about outside paths a reach probe of the run already read. A
+  failed exchange step's summary keeps the line that names a run-folder leak. The WMI worker start has a timeout. Tests
+  that held on Windows only (a fake process in the caller's process group, a lower-case spelling of a case-sensitive
+  folder) and test timeouts too short for a full parallel run were fixed.
+- From a second Linux review: stopping a recorded seat (`--incomplete-seat`, Ctrl-C) also stops every process that carries
+  its run id, and sends the seat worker SIGTERM before SIGKILL; a preflight `--exec` command that times out or is stopped
+  has its marked leftovers stopped too (`leftoversStopped`). The group watch stops when the CLI process is gone or was
+  replaced. The run-folder guard no longer rewrites `/proc/<pid>/cwd` of another process, and resolves a relative run
+  folder from a CLI seat's worktree as well. The identity scan reads the case-folding setting on every check. The
+  claim-level check reads both seat files together and reports a target it cannot read. A step counts as finished only
+  when its record holds its own result (a findings list, the exchange's appended seats, a manifest status). Replay
+  summaries count each step's warnings.
+- From other sessions' field runs: preflight runs `python` (`python3` on Linux and macOS), `rg` and `git` inside the Codex
+  sandbox (`codex sandbox`, free) and warns about each one a Codex seat cannot start, naming where this host has it (the
+  Windows sandbox account cannot start a program under the user profile); `phase1 --start` repeats it (`seat-tools.json`).
+  A run stopped after Phase 1 gets a report of each seat's own claims, marked as neither cross-examined nor audited. A
+  split GO / NO GO ticket whose NO GO rests on a finding the auditor confirmed says the finding settles it. The
+  orchestrator's own transcript with no usage in its window is a manifest warning, not a failed manifest. `review-run
+  cleanup` lists and, with `--yes`, deletes the seats' scratch folders. `review-config seats --replace` overwrites an
+  existing seats file. `--audit-depth` names what replaced it. SKILL.md says the next `--wait` dispatches again only the
+  CLI seat that stopped part way.
+- From a third review on Linux: the run-folder guard follows a link before a "..": "/proc/<pid>/cwd/../x" and
+  "<link>/../x" land where the link points. It also reads a path with shell quotes in it, a path glued to an option
+  ("-C/x", "--out=/x"), and "~+", "$(pwd)" and "`pwd`". Shell globs, brace lists and "${PWD%...}" operators are still not
+  read. `cleanup` skips a folder that is a link or lies behind one. On macOS the process table carries each process's
+  start, so a reused pid is told apart. A manifest of an older run whose exchange record has counts but no list of
+  appended seats reads its rebuttal sections again. An unreadable source folder at the Phase 1 format check is a FAILED
+  line, not a stack trace. The Phase 1 report needs both seat files finished (each reached its closing section); a seat's claim IDs reach the other seat's code check even when its own file cannot be parsed yet. A Codex rollout with no token
+  events in the orchestrator's window is a manifest warning. `--incomplete-seat` repeats what the stopped worker's log
+  says its CLI left running. From a third review on Windows: the guard and the scrub read Git Bash's /tmp spelling of a run folder in the OS temp folder and a drive-relative path ("C:../x"); `cleanup` names a folder it cannot list or delete (EBUSY) and fails with a next: line instead of reporting it clean.
+- From a fourth review on Linux and Windows: the guard reads every shell's working-folder form in any letter case
+  ("$pwd", "${pwd}", "$(Get-Location)", "%CD%", "$(pwd -W)", "`pwd -P`", also inside quotes), a path glued to an option
+  cluster ("tar -czf../x"), a one-letter option before a relative path that walks up ("-Cdocs/../x") and, on Windows, a
+  switch glued to a path ("/LOG:..\x", "/Fo..\x"). `phase2 --start` moves no scratch folder out of a linked phase or seat
+  folder, and `cleanup` no longer follows a seat folder inside a linked phase folder. The Phase 1 report needs both seat
+  files well formed, the closing section with its Blocked: line. A falsification verifier's file that names the run
+  folder is refused before it reaches the auditor. A seat file whose fence is not closed still lends every claim heading
+  to the other seat's code check. The guard looks up each folder's link once per text.
+- From a fifth review on Linux: an option cluster before a rooted or "./" path ("tar -cf/x/../run") and a one-letter
+  option before a folder name ("-Cdocs/../run") are both read, as the two readings cannot be told apart; the link walk
+  covers the first 20 cuts of each path, so a linked folder whose name has a space is followed too. The Phase 1 report
+  applies only the format rules the seat's brief stated (a run older than the Blocked: or Same shape rule is read without
+  it), also on the zero-finding path. A verification file that arrives after the auditor brief is staged on the next
+  `audit --finish`, which says to resume the auditor.
+- From a fifth review on Windows: the guard reads Windows switches with "+:" ("/LOG+:"), dash-colon switches ("-out:",
+  "-Path:") and "/Fo" before "./" or a folder name, and reads switches before glued options, so "-out:..\x" is not taken
+  for a drive-relative path. `phase2 --start` moves no scratch folder into a linked `<run-dir>-scratch-kept`. The Phase 1
+  report refuses a seat file with an unclosed fence, and reads a format rule from the protocol's own wording in the
+  brief, not from the word in a quoted log. Two stray fence lines that balance still hide the claim between them: no
+  script can tell them from a quoted claim block.
+- From a sixth review on Linux: after `audit --finish --accept-missing-verifiers`, the rerun its next: line names no
+  longer fails the missing-verifier check again; a verification file that arrives later says how to reach a CLI auditor.
+  Off Windows the guard also reads a path with a backslash-escaped space or shell character ("my\ side"). A dangling
+  `<run-dir>-scratch-kept` link counts as a link. The Phase 1 report reads the format rules from the brief outside its
+  frozen packet, and a run older than the Blocked: rule is excused that rule only.
+- From a sixth review on Windows: a quoted relative path whose first folder name has a space ("All Users/../run") is
+  read as a path; on Windows "/Users/x/../run" stays a rooted path (the "/Fo" switch reading is the second reading
+  only). A verification file that arrives after the auditor brief stops `audit --finish` naming it, as verifiers run
+  between `audit --prepare` and `--finish`; after a finished audit a CLI auditor is told to start a new run with
+  falsification. An older run is excused every Blocked-line rule, and a packet quoting the closing reminder does not
+  make it strict.
+- From a seventh review on Linux and Windows: the guard reads a path as the shell makes it from a line: quoted parts
+  joined to their neighbours ("All Users"/../run), a backslash escape before any character off Windows and before a
+  space or shell character on Windows (Git Bash), and $'...' quoting; a quoted piece is read between two quotes of one
+  kind, so an apostrophe or inline code around it does not hide it. A deep verify after a finished audit is staged and
+  the step stops, so the auditor is resumed with the file in its folder before translate; a verification file changed
+  after it was staged stops the step. An older run is excused the Blocked-line rules by their own wording only.
+- From two field runs on Windows: the second preflight now warns when the task packet names the run folder (an
+  evidence folder inside it), instead of the first refusal coming at `phase1 --start`; the Quickstart says to keep the
+  evidence folder outside the run folder. The warning about packet paths outside the target, which a Codex seat may not
+  read, now also shows on Windows, and in the second preflight too, before Phase 1 is paid for. When the Codex seat can
+  run neither python nor rg, preflight says once that it will review by reading only. The scratch-folder line at
+  `phase2 --start` names the seat. The chat report lists the flagged criteria past the first eight by tag, and names the
+  findings the seats left unresolved. The packet template says which label spellings count as claim labels.
+  `review-run recheck` without a diff lists the files changed since the previous run from its snapshot, and
+  `review-run status` prints each run's first brief time (the latest safe start of an orchestrator usage window).
+  When translate refuses a CLI auditor's file, the attempt is moved aside by the step itself, so rerunning
+  `audit --finish` dispatches the auditor again; no file has to be removed by hand.
+  `review-run recheck` prints the step-back note from round 3 on, before the round is paid for.
+  A Claude CLI seat that hits a session limit (the CLI's "You've hit your session limit · resets 3:30am", given as the
+  result text) is recorded as rate-limited with its reset time instead of a plain error, and a failed wait names the
+  error, so a limit can be told from a crash.
+  `review-run status` and the report say when manifest.json was built before the finished audit (its findings hash
+  differs, or it has none and is not complete), so a manifest left by a failed chain is rebuilt, not trusted. The
+  Codex-seat warnings say to paste the test result lines into the packet, since a log outside the target may not be
+  readable to that seat. The replay records of closing-plan, closing-r3 and closing-r5 were rewritten for the new
+  `unresolved (F<n>)` and `MORE` report lines; nothing else in them changed.
+  A Tier 2 command that times out now says its limit and the flag that raises it ("timeout after 1800 s (raise with
+  --timeout <seconds>, 0 = unlimited)"); the Quickstart shows `--timeout`.
+  On a target that is not a git repository, the drift check now leaves out Python and Gradle caches (`__pycache__`,
+  `*.pyc`, `.pytest_cache`, `.gradle`) that a build or test run wrote, so a review is no longer stopped for them; a
+  seat that writes into the target is still caught by its own write check (`touchedFiles`). SKILL.md notes how to
+  split a large target into several scoped runs, and the Windows PowerShell Constrained Language limit of a Codex seat.
+  The private project names in the test data are replaced with neutral ones.
+  A seat may now add an optional `Pre-existing: yes | no | unknown` line to a claim, for a review of a change. The
+  report lists a finding as pre-existing from that line only when no seat wrote `no`, the author's notes say nothing
+  about it, its evidence is not on lines the change added, and it is not a blocker (a HIGH or CRITICAL stays under Fix
+  now or Decide). The second preflight warns when the change is over 500 files or 8,000 changed lines in tracked
+  files, and suggests several scoped runs. The pull request template asks for the risk and how to revert.
+  `preflight --host ... --keep-target-copy` keeps the target's files as the seats review them in
+  `<run-dir>-target-copy` (git: tracked and untracked files git does not ignore; links are not followed; each copy is
+  checked against its source), so a run can later become a bench case. Phase 1 refuses a target that changed after the
+  host preflight, so the copy is the reviewed code.
+- From a review of the proposed next features: a REFUTED auditor check or falsification verdict needs a command and its
+  output or the cited lines; `Basis: INFERENCE` with REFUTED is refused (absence of proof is INCONCLUSIVE), for a
+  verifier file already when `audit --finish` stages it, before the auditor runs. A CRITICAL claim can no longer be
+  dropped as `dropped-speculative`; unchecked, it stays `unresolved-high-stakes`. `translate` refuses a top-level
+  `severity_audited` in the auditor's file (it is set only from `auditor_check.severity`).
+  `review-run recheck --drop-tag` refuses a hypothesis tag, which in a re-review packet is a previous finding (it was
+  removed without a trace); use `--skip F<n>`. The re-review packet and the recheck output count the previous findings
+  carried as hypotheses and those decided. Preflight reads the committed REVIEW.md of every folder between `--cd` and
+  the repository root, not only those two (the 8 KB limit covers all of them, so a repository near the limit can now
+  be refused). Docs: one `review-run manifest` call is enough (`--init` is optional), the Decide group is the list a
+  person must settle, static analysis tools run as preflight `--exec` (a secret scanner only in redacting mode), a
+  recipe for counting false positives on a known-clean target, and the protocol no longer says the auditor spot-checks.
+- From the release gate on a loaded Windows host: a seat worker whose result.json rename Windows refused for a moment
+  (EPERM, EBUSY: a virus scan or a reader holding the file) crashed and left the seat "running" until `--wait` called
+  its worker gone. The dispatchers now retry that rename (and the `--final-message-out` one) for up to 5 s. On Windows a
+  stop waits up to 30 s for taskkill instead of 5 s: taskkill ends with the dispatcher, so a slow one was cut off and
+  left the process it was stopping running. A usage limit's clock time (`retryAfter`) is the first moment, from one
+  hour before its record was written (`finishedAt`, else `startedAt`), at which the local clock shows that time (a
+  time the spring change skips counts when the clock jumps past it), instead of within 12 hours of the moment it is
+  read: read after midnight, a day later or on either daylight-saving night (also a reset in the repeated autumn
+  hour), a passed time no longer counts as tomorrow, which made `--wait-retry` wait and `review-run` refuse to
+  dispatch for about a day, and a reset from 12 to just under 23 hours ahead no longer counts as passed.
+  Tests that assumed a fast host now leave room for a slow one.
+- From field reports of other review sessions: `review-run phase2 --start` before Phase 1 has finished refuses and
+  names `phase1 --wait`, instead of failing in exchange prepare on a missing findings file. Preflight `--base
+  <commit>` lists the diff and changed files of work already committed (snapshotHash is unchanged), and
+  `review-run recheck --since-commit <commit>` writes the change since that commit with line counts; `recheck
+  --preflight <file>` writes the evidence section from the evidence preflight (snapshotHash, each repository's HEAD,
+  each command's result and log) instead of a FILL line. `--seat-transcript orchestrator=auto` reads every transcript
+  of the session (a session that moved to another project folder has one in each) and counts a call once, so its
+  cost is no longer lost. Every report (terminal, markdown, chat, HTML, `--json`) and `scorecard.md` ends with one
+  line naming the skill, its version and the project page.
+- From a Linux review of those changes and two more field reports: a usage limit whose look-back starts on the spring
+  clock jump is no longer moved a day; of the copies of one session's transcript (the same file name in several project
+  folders) only the one with the latest entry is counted, so working time and commands no longer depend on the order
+  the copies are given (one file given twice with overlapping windows still counts twice), a role's other transcripts
+  are still timed apart, and `auto` skips a copy with no reply (errors name the full path); the auditor's
+  instructions say that a changed severity needs `auditor_check.severity_reason` (three runs were refused without it); recheck evidence quotes the last test-summary line, names a non-empty stderr log, warns when a command changed
+  the target or left a process behind, and is added to a packet that had no evidence
+  section; `recheck --out` creates its folder; each carried-over FILL line names its section; changed-file lists
+  (preflight Tier 1, `--base`, context-builder, the run fingerprint) name a renamed file's old path too; the
+  `phase2 --start` refusal says a run from before this version needs one `phase1 --wait`; preflight `--help` names
+  the shell `--exec` runs through (cmd.exe on Windows, /bin/sh elsewhere).
+- From a Linux review of those changes: `review-run manifest` now counts the archived `result.attempt-<n>.json` of a
+  retried call for every actor (exchange, redaction, auditor, verifiers), not only Phase 1, so a refused auditor run
+  that is dispatched again keeps its cost and time, and it warns about such a file that was left out. An attempt that
+  ended without completing (error, timed out, rate-limited) is still not counted. Because the retried calls are
+  merged, an auditor or verifier retried with another model or effort is now refused as for a seat; a different
+  worktree is accepted for them, since each such dispatch gets its own temporary worktree. The left-out-call warning
+  also reads the auditor's `<run-dir>-audit-dispatch` folder, and with `--run-dir` it scans the run folder wherever
+  `--out` writes the manifest. With several
+  `--seat-transcript` windows for one role, `counted_from` and `counted_until` are the earliest start and the latest
+  end (left out when a transcript was given without that bound), and the late-start warning reads that earliest start.
+  The scorecard says copies of one session count once only when given the same window. The auditor brief and the
+  protocol say which fields translate refuses a claim ID in, and that `auditor_check.evidence` is not checked.
+- Final field fixes: on Windows the preflight tool check runs `python`, `rg` and `git` in the Codex sandbox through
+  PowerShell, the seat's own shell, so a Python the seat can run is no longer reported as missing, and a missing
+  tool's "is not recognized" line is the reason shown; the advice adds a copy under Program Files on PATH. A report
+  run on an audited run before `review-run manifest` now says NOT FINAL (run the manifest, then the report again)
+  instead of INCOMPLETE, in every format and in `--json`. `recheck --since-dirs` leaves `.git` folders out of
+  `since.diff`. `review-run manifest` warns once when the orchestrator's own cost is not counted and names the
+  `--seat-transcript orchestrator=auto@<first brief time>` flag to add. A re-review packet adds one hypothesis on the
+  edge values (null, missing, empty, zero, negative) of the fields the change reads; its no-diff FILL line names
+  `--since-commit`, `--since-dirs` and `--since-diff`, and a carried-over section's FILL line says its counts are the
+  previous packet's. A `--wait` that exits 3 says not to start the next phase yet; an agent id that matches no
+  transcript says to check the id the Agent tool returned. The report says when an auditor file was refused and
+  `audit --finish` is still pending, and that the auditor does not rule on a hypothesis the seats disagree on. The
+  Claude Code host notes say how to wait on Windows, where Git Bash has no `pgrep`. The stored replay records' report
+  hashes were made again for the new split-hypothesis caveat.
+- From a Linux review of those changes: a report whose manifest was built before the current `phase3/findings.json`
+  is NOT FINAL instead of COMPLETE or INCOMPLETE. The orchestrator-cost warning is skipped only for a manifest-body
+  orchestrator entry that holds a number, not for a null or empty one. `audit --finish` removes
+  `phase3/prompt-auditor-fix.txt` once translate passes, so a later failure is not reported as a refused auditor file.
+  The manual worktree cleanup in phase-3-scorecard.md also reads `result.attempt-<n>.json`.
+- `--since-commit` and `--since-dirs` run `git diff --no-color`: with `color.ui` or `color.diff` set to `always` in the Git
+  config, `--since-commit` stopped with a TypeError. `--since-commit` also sets the `a/` `b/` prefixes: with `diff.noprefix`,
+  `diff.mnemonicPrefix`, `diff.srcPrefix` or `diff.dstPrefix` it listed wrong paths or left out a binary file.
+  `review-run status` reports an audit after the manifest was built as pending, not finished: a re-audit (findings moved
+  to `findings.attempt-<n>.json`) or an auditor file that was refused (`prompt-auditor-fix.txt` only).
+- From a macOS review: a seat's background job that left its process group is now found on macOS too, by the run id in
+  its environment (see Known issues). The process table reads start times in UTC, so a time-zone change while a seat
+  runs no longer stops the group watch. `NODE_USE_SYSTEM_CA` reaches the seats in the filtered environment.
+  `--since-commit` lists a submodule pointer change also when the Git config sets `diff.submodule=log`. A test helper no
+  longer counts a live process as stopped on macOS. On macOS every process check runs `/bin/ps` by its path, so a PATH
+  without `/bin` (or another `ps` on it) does not hide what a seat left running. The macOS run-folder and fsmonitor
+  advice is in SKILL.md.
+
+### Known issues
+
+- macOS: a run folder whose name is stored decomposed (NFD) and that a seat quotes composed (NFC) stops the exchange
+  with a run-folder leak. Use an ASCII run-folder path.
+- macOS with `core.precomposeunicode`: an untracked file with a decomposed (NFD) name is recreated under its composed
+  (NFC) name in the snapshot. The contents are the same.
+- With `core.fsmonitor=true` in the Git config, the snapshot's git commands start git fsmonitor daemons that keep running
+  after the run. Set `core.fsmonitor=false`. A future fix with `-c core.fsmonitor=false` needs git 2.36 or later.
+- macOS: a leftover job that is an Apple system program (`/bin/sh`, `/bin/sleep`, `/usr/bin/perl`) is not found by the
+  run id.
+- Windows: a job-object helper can hang in a kernel wait until the machine restarts.
+- Linux as root: the Codex sandbox may block `python` or `git`, so the report carries the "may have reviewed blind"
+  caveat.
+- The blinding scan can stop on product names when the reviewed code is itself about those products. A
+  redaction with `review-run splice` gets past it.
+- After a "No findings" seat with a `Blocked:` line, the `next:` line says to rerun `--wait` while the message says to
+  start a new run. Start a new run.
+- `preflight --exec` with the default filtered environment passes no proxy or CA variables (the dispatchers do). Name
+  them in `--env-passthrough`, or use `--env-mode inherit`.
+
 ## 1.1.0 - 2026-10-05
 
-### What changed
-
-- Plugin names: each review skill now ships as its own plugin in the `skillarray` marketplace, `pair-review` (`plugins/pair-review/skills/pair-review`) and `cross-review` (`plugins/cross-review/skills/cross-review`); they were one `reviews` plugin in the `skill-array` marketplace. An existing plugin install is removed and reinstalled with `/plugin marketplace add M-khalifa/SkillArray`, then `/plugin install pair-review@skillarray` and `/plugin install cross-review@skillarray`; the skills are then invoked as `/pair-review:pair-review` and `/cross-review:cross-review`. A copy in `~/.claude/skills` keeps `/pair-review` and `/cross-review`.
-- Chat report: `build-report.mjs --format chat` prints a banner, severity bars, an action table (fix now, fix next, can wait, decide, withdrawn) and a colour-coded diff block with the audit and criteria status, all inside the limits of a chat window (no ANSI, no emoji, code lines within 100 characters). `--all` appends the full report. The groups follow the Finding status lines of report-notes.md (needs decision, fixed after the snapshot, disclosure only), the Decisions needed text is shown, the audit line states disputed and withdrawn findings, and hypotheses are named by tag. The verdict that ends a seat's check line (MET, PARTIAL or NOT MET, in any case, spacing or dash; or a table row's verdict cell) is counted per criterion; only lines that start with the tag count for it, and the worst seat wins. Per-ticket `<id>: GO` / `NO GO` lines are shown (any separator after the id; the worst line of a seat), a NO GO from either seat wins. The chat banner blocker count is the same as in the other formats and names the blockers the report notes moved; criteria not met without a finding are named apart from criteria with findings; the coverage, verdict and failing-check counts are on separate lines within 100 characters.
-- Peer-report round: a scan hit names the matched token and a second redaction round is allowed when it names a different one; the cost table has a Cache write column and a note that native agents have no output tokens; `review-run` names every unfinished seat; `build-recheck-packet` takes `--target`, `--title`, `--skip` and `--drop-tag` and adds an author-reported evidence slot; `preflight --fail-on-command-error` exits 4 when a command failed; `preflight --host --repo` records extra repositories in run.json and `review-run` warns when one changes; a Finding status of "pre-existing" gets its own row in the chat report. A claim heading that names its criterion without brackets ("violates AC-1") still counts, a check line that reports a failure with no tagged finding raises one caveat for all such criteria instead of reading as clean (failure words count only on a line with no verdict word), and the auditor row and Claude cache write now appear in the cost table. A criterion that carries a finding is never counted as met, and the chat banner and diff block name each criterion with findings. A grouped line in the diff block names the hidden finding ids, and the markdown report no longer prints "(not written)" for a missing Why. When the reader of their output closes the pipe early (head, Select-Object -First), the scripts stop printing and keep their real exit code instead of dying with EPIPE; build-report writes its --out, --json and --html files before it prints. The chat report gives a refuted hypothesis its own line. `review-config seats --auditor <model>` runs the auditor on another model than seat A. The report calls opposite seat outcomes on a hypothesis a split (not a refutation), names a ticket the seats disagree on, shows why a criterion is PARTIAL, prints the recommended fix of each finding in the markdown and --all report, and says "unresolved" (not "disputed") for a finding the seats and the auditor did not settle. The recommended fix prints in full, a PARTIAL reason is wrapped under its line, a split hypothesis is labelled in the table with a one-line legend, the banner names up to eight criteria, and a ticket verdict line lists the findings tagged to its criteria. A tag that ends in a ticket number (BUG-6030, PROD-6030) belongs to that ticket, and a long criterion reason keeps its last sentences. A finding whose claim heading carries a tag of a ticket (BUG-6030, PROD-6030) is listed on that ticket line even when the packet names the tag only in prose. `review-config checklists` lists and prints your own bug checklists from the config folder (outside the repository), SKILL.md says when to stop reviewing the same code, and the task packet template says where checklist items go. A tag the Tickets line does not list (AC-30-F6 beside "6030 = AC-30-1..") joins the one listed ticket whose number ends in its number. The report's cost table has a Commands column, the shell commands each seat tried and how many failed (from its Codex thread rollout, its Claude session or its native transcript; unknown when that record is missing, never estimated), and the short chat report adds a COMMANDS line for a seat none of whose commands succeeded, so a "no findings" from a seat that could not run anything is not read as a clean result. A severity the auditor changed is shown with its reason, the preflight summary line lists the changed files and the untracked ones by name, and the seat rules say how to write the Checks performed lines (tag first, MET / PARTIAL / NOT MET or CONFIRMED / REFUTED, with an example). A criterion a seat marked NOT MET or PARTIAL with no finding tagged is labelled that way in every report format, never "no issue found", and the criteria summary counts it apart. Seats now run a class sweep when they confirm a defect: one finding lists every site with the same defect shape (`Same shape elsewhere:`), or what was searched; the older rule that asked for one claim per site is removed. The seat brief no longer carries the orchestrator-only Model identity section (about 1.4 KB less per seat), and the seat rules show the per-ticket GO / NO GO line. A refused step now prints the reason lines of the failing script (without stack frames, each cut at 160 characters; the FAILED line is kept when the output is over ten lines), the fence rule has an example, and a NOT MET criterion must have a finding tagged to it. Also fixed from two self-reviews: "will not be fixed", "cannot be fixed", "partly fixed" or "fixed? no" in report notes is never read as fixed; findings.json, manifest.json, the notes and the packet may start with a byte-order mark; a comma-separated or bold Tickets line, a bold criterion tag and a range in --drop-tag are handled; the re-review packet rewrites a Windows path written with the other drive-letter case and leaves "old(backup)" alone; preflight treats a --repo that is the target in another case as the target; the cost table reads Claude and OpenCode usage (auditor included) as input and cache apart, and prints unknown instead of 0 when the shape does not fit; the scorecard reads claim-heading tags as the report does; a hypothesis confirmed for one variant and refuted for another counts as partly confirmed; the preflight summary counts untracked files, not folders; a null finding id no longer stops the text report. Also fixed from live Codex testing: a `codex doctor` that exits 1 with a failed sandbox row now stops the host preflight (it was reported as skipped); the host preflight refuses, before any paid call, a run folder inside the target's git repository that is not git-ignored when a Claude CLI or OpenCode seat would snapshot that repository; `--native-agent` and `--seat-transcript` accept a Codex thread id and find its rollout; the cost section says that session probes and earlier failed attempts are not counted; and the task packet template anchors a wrong result at HIGH. A byte-order mark before the first heading of a native seat file no longer hides its claims, a finished agent with a file that has no claim heading fails with the reason instead of waiting, `audit --finish` before `audit --prepare` says to run `--prepare` first, the seat rules ask for UTF-8 without a byte-order mark, and the run-folder check probes a file inside the folder because git reports every folder path ignored when .gitignore has CRLF line endings and a blank line. A failed Codex command that logs one line matching several failure patterns counts once in the sandbox warnings. `exchange.mjs finish` asks for a full audit after an all-conceded exchange only when a conceded claim is HIGH or CRITICAL; with only MEDIUM and LOW claims it prints a note, because a look-back over 45 past runs found no conceded claim refuted by a full audit. pair-review SKILL.md recommends cross-review for high-stakes work. From a macOS self-review: path checks compare real paths (macOS /tmp is /private/tmp, a symlinked home or skills folder), so the blinding and grant-isolation guards, build-manifest's result-file match, the worktree root check and preflight's --repo check see through symlinks; every script runs when started through a symlinked path instead of exiting 0 with no output; an untracked symlink (dangling or to a folder) is hashed and copied as a link instead of crashing preflight and the worktree (on Windows without the symlink privilege, the file it points to is copied); git diff calls ignore the user's diff settings (colour, no-prefix, context lines, external diff, textconv) and list non-ASCII file names as written; a vendor word inside the target, source or temp folder path is no longer an identity leak; stopping preflight stops its --exec commands, and every stop-signal handler (preflight and the dispatchers) waits for the process-group kill before it exits; the process-group kill sends SIGKILL to a member that outlived its leader; the macOS worker start token is read in UTC; claude-dispatch grants a seat's out folder under its typed and its real path (not yet verified on macOS with a live CLI seat); validate-repository checks every script the two skills share, not a hand-kept list; the README heading for trial routes no longer says unsupported. From the end-to-end cross-review of these skills: a four-backtick fence holding a three-backtick line no longer hides a seat's "Review incomplete" statement from the Phase 1 check; a non-empty --worktree folder without a snapshot marker is never deleted (a worktree of the same repository may hold uncommitted work), except the dispatcher's own interrupted build, marked by its .snapshot-building file and still a detached worktree of the target; a dispatcher or preflight timeout waits for the process-group kill before it returns; the exchange counts and the report's seat parsing ignore lines inside fences; a plain-folder inventory records symlinks and junctions, so retargeting one changes the snapshot hash; a requested deep-verify pass that ran fewer verifiers than claims qualified marks the manifest incomplete; audit-prep's identity scan gets --source-dir, and the scan masks the run folder and its parent; review-run refuses --max-wait 0 and gives a seat at least 1 s when the wait budget is spent, because a dispatcher reads 0 as no limit. From a second macOS self-review (cross-review of 3a581e2): A `--cd` typed in another letter case than the folder on disk (macOS and Windows) made a Claude CLI seat's isolated working folder an empty sibling of the snapshot, and nothing failed. `realPath` uses the native `realpath`, which restores the on-disk case; the same change makes every other path comparison agree with git's spelling. `exchange.mjs finish` counted conceded HIGH claims by splitting the raw rebuttal file at `### `, so rebuttals written with `## P<n>` headings or as headingless `Claim:` entries (both accepted by `append-rebuttals`) counted as zero and the full-audit warning was replaced by a "none of them HIGH" note. It now counts with the parser `append-rebuttals` uses. A run whose exchange finished with an incomplete seat was written to the manifest as `completed` and reported COMPLETE. `build-manifest --init` reads `phase2/exchange-result.json`: an incomplete seat makes the status `incomplete`, and `exchange.incomplete_seats`, `exchange.reason` and `exchange.no_peer_claims` are recorded as the protocol documents. A detached dispatcher worker killed with SIGKILL left its seat CLI running in its own process group, and `review-run` then dispatched a second seat beside it. The dispatchers record the CLI child's pid and start token; `--wait` and `review-run` stop that group (only while the pid still has the recorded start token) before reporting the worker gone or dispatching again. The "worker is gone" message also offers a Claude seat's session id for `--session`. POSIX only. `claude-dispatch --env-passthrough` silently dropped a `CLAUDE*` or `CODEX_` variable it was given (a `CLAUDE_CODE_USE_BEDROCK` setup could not reach the seat). A named variable now passes; unnamed host markers are still removed, and `ANTHROPIC_API_KEY` still needs `--use-api-key`. `codex-dispatch` built its touched-file list from `git status`, which cannot see a write to a file that was already dirty, to a new file in an untracked folder, or under an ignored folder. Git targets now use the content-hash inventory the other dispatchers use; `git status` stays as the fallback for a tree too large to hash. The deep-verify completeness gate compared counts, so verification files for other claims let a disputed HIGH claim go unverified. `audit-prep` writes the anonymous IDs of the disputed claims (`disputed_ids`) to the falsification breakdown, and `review-run` and `build-manifest` check that each has a verification file. A breakdown without `disputed_ids` is still checked by count. The grant-isolation check treated a link inside an own folder, or a folder too big to walk, as clean. It now refuses both. It still walks only grants inside the run folder: the seat's read tools are not scoped to the grant list, so the check guards against mistakes and is not a sandbox. `build-brief` refuses a task packet that names the run folder through a link (`/tmp/x` for `/private/tmp/x`) even when `--run-dir` was given in the other spelling. `preflight` stops with a clear message on Node older than 22. The two per-skill `.github/workflows/test.yml` files never ran (GitHub reads only the root `.github/workflows`) and duplicated it; removed. The pair-review README no longer says a Codex-host review is unsupported (it is a trial route, as SKILL.md says). Known, not changed: the identity scan masks the target's, source repositories' and run's own folders, not every absolute path, so a path to an unrelated folder that contains a vendor word is still reported. `scripts/compare-baseline.mjs --base HEAD` reports stale entries in its drops file. On Windows, a Claude CLI seat whose out folder is on a mapped network drive keeps working (the UNC spelling of the folder is left out of its write grant, since no permission rule can name it), and a URL such as https://... in a task packet is not read as a drive path. On Windows, a detached worker ended with taskkill /F no longer leaves its seat CLI running: the dispatchers record the child's start time, and --wait and review-run stop the recorded process tree, or the children of its ended cmd.exe shell started within 10 seconds of that time, only while the start time matches. build-manifest --run-dir keeps the hand-added fields of a body written with --init without naming it in --in, and recomputes the fields read from the run. The Code review profile has a runtime-contract lens; the task packet template has guidance for listing earlier fixed findings, an opt-in mutation spot-check hypothesis and a filled short packet for a fix diff; SKILL.md has a recipe for a single fresh reviewer on a small fix diff. SKILL.md starts with a Node.js check: without Node.js 22 or newer the skill stops before any setup or paid call and names how to install it. From a Linux self-review: stopping a killed worker's seat (and a timed-out seat) also kills the process groups the seat CLI's own tree leads, where its tool commands run; a zombie worker in a container whose PID 1 does not reap counts as gone; an untracked file whose name is not valid UTF-8 no longer stops preflight or the isolated worktree (its name is kept as bytes). From a third Linux round: stopping a recorded seat checks the start token first, also for a zombie, so a pid now held by another process (a zombie group leader with live members included) is never signalled; opencode-dispatch records its seat CLI in child.json and review-run stops it before dispatching an OpenCode seat again after the dispatcher was killed; configuration.md's helper commands use only the skill's own folder. From a Codex review on Linux: a recorded seat process that is gone is no longer stopped through its group id, which an unrelated group can hold by then; a stop signal to preflight stops its --exec command (and starts no next one), `claude -p --help`, `codex doctor`, the paid probes and the probe folder before it exits, and a signalled dispatcher exits with the signal code instead of writing a finished result; the identity scan also counts the run's seat-lettered file names (`A-findings.md`, `brief-A.txt`, `phase1/A/`); Codex seats keep the proxy and CA variables Claude seats keep; claude-dispatch runs its git check in the C locale; a plain-folder target with a name that is not valid UTF-8 is hashed instead of failing; `--wait` dispatches a CLI seat an earlier `--start` never started, and a dispatcher's `--wait` on a missing result.json exits 1; release-check runs `python3` off Windows; README and this changelog say a Codex-host review runs on trial routes.
-- Claude CLI adapter: `claude-dispatch.mjs` runs a Claude seat, the auditor or a
-  verifier as a headless `claude -p` session with its own worktree. On Claude Code the native
-  agents stay the default and behave as in 1.0.0. A Codex-host review runs only on trial
-  routes (README "Hosts"); the route trial is in each skill's `references/hosts/codex.md`.
-- Host table in each `SKILL.md`, and one host file per host
-  (`references/hosts/claude-code.md`, `references/hosts/codex.md`). A run reads
-  `SKILL.md`, one host file and the current phase file. The host files are not
-  shared between the two skills.
-- Run descriptor: `preflight.mjs --host` writes `run.json` in the run directory.
-  It records the host, the flags, the Phase 1 fingerprint and every actor, and
-  every later script reads it. It also checks the dispatchers and the `claude -p`
-  flags the adapter uses. It spends nothing unless `--probe-dispatch --yes-paid`
-  is given.
-- Sequencer: `review-run.mjs` runs `phase1`, `phase2` and `audit` from `run.json`,
-  each in two halves. It prints at most ten lines and one `next:` line, and stops
-  at the first failed step.
-- Private per-seat output folders: a CLI seat writes only into
-  `phase1/seat-<role>/` or `phase2/seat-<role>/`. The sequencer copies its file
-  to the canonical path and records both hashes.
-- Manifest: each seat entry records `transport` and `readOnly` from the dispatcher result,
-  and `host` when the manifest body sets it: no dispatcher stamps the host yet, so it is
-  null for CLI actors. The auditor and the verifiers are listed under `actors`.
-  `usageSemantics` says whether a result's usage is cumulative or per call.
-  `claude-dispatch` stamps `per-call`; `codex-dispatch` stamps nothing, so a Codex result
-  is read by its `threadId` (a thread's usage is cumulative).
-- The auditor and the verifiers read a fresh worktree rebuilt from the Phase 1
-  fingerprint, and every actor's worktree is removed at the end of Phase 3.
-- Fixed: worktree isolation of a repository with submodules failed open. It now
-  refuses and names `--no-isolate`.
-- Flaky tests: timeout, kill and detach tests now repeat five times inside one
-  run, so a race shows up in the suite instead of in a release.
-- Tools: `scripts/compare-baseline.mjs` rebuilds the briefs of an earlier
-  revision byte for byte and checks that every documented rule is still present.
-  `scripts/install-check.mjs` copies each skill into a Claude Code and a Codex
-  project layout and checks the copy.
-- Packaging: a Codex plugin manifest (`plugins/reviews/.codex-plugin/plugin.json`)
-  and a Codex marketplace file (`.agents/plugins/marketplace.json`).
-- Manifest usage total: an OpenCode result now carries `usageSemantics: per-call`, and a
-  seat's OpenCode calls are added together (an older OpenCode result with a `sessionId`,
-  no `threadId` and no stamp is read the same way, as in 1.0.0). Results that all carry a
-  usable `usage_delta` are added through the deltas, so a Codex thread that had usage before
-  the review now reports only this review's tokens; the total 1.0.0 printed for that case was
-  higher. Whether OpenCode's tokens are cumulative inside one multi-step run is still unverified.
-- Sequencer: `audit --finish` now fails on a target write recorded by any verifier (registered
-  or not, every attempt file). The report line shows a `touchedFilesNote` (the `node_modules`
-  folder was not inventoried), and the Codex and OpenCode dispatchers now write that note to
-  `result.json`. An OpenCode seat whose dispatcher died before writing `result.json` is
-  dispatched again, after its old `result.json` and worker log move aside as attempt files. A
-  failed Phase 1 seat is retried in the worktree its failed attempt recorded. A worker's
-  liveness on Linux and macOS no longer depends on the wall clock: the worker records a start
-  token (`/proc` start ticks, or the start time `ps` stores) next to its start time.
-- Known remaining limits: a Codex-host review runs only on trial routes, and the OpenCode seat is not
-  verified end to end (see "Known unsupported cells"). The start token was only unit-tested on
-  Windows, where it is not used; its Linux and macOS readers have not run on those systems.
-- `review-run --wait`: a native seat whose file has no claim heading yet (only the header) now
-  counts as still running (exit 3), not finished. Phase 2 needs at least one `### P<n>` block.
-- Docs: each skill's `references/hosts/claude-code.md` has a complete sample `seats.json`, and
-  `preflight.mjs --help` shows the same minimal sample. A test checks both against the same validation.
-- `blind-relabel.mjs splice`: new `--match-line-file <path>` takes the exact line from a file, so a
-  line with double quotes works on Windows PowerShell 5.1.
-- `exchange.mjs finish`: warns when one seat conceded all of at least 3 peer claims, not only when both do.
-- `blind-relabel.mjs scorecard`: a Note line after the totals when the auditor checked no claim and
-  HIGH or CRITICAL findings stand on concession only.
-- `build-manifest.mjs`: effort `"default"` in the body and null in `result.json` are no longer reported as a difference.
-- `review-run.mjs`: a native seat's file alone no longer ends `--wait` (the agent writes findings as it goes). `--wait` exits 3 until the orchestrator passes `--native-done <A|B|A,B>` after the agent replied "written".
-- `pair-review`: the two seats can be two distinct OpenAI models through Codex (provider `openai`, runtime `codex`), chosen at setup; a pair never mixes vendors. `codex-dispatch.mjs` now ships in pair-review and writes `modelResolved` from the thread rollout, which the distinct-model check reads. A Codex auditor is dispatched like a Claude one (final message saved as `findings.audit.json`), and `preflight.mjs --host` skips the Claude CLI check when no actor runs on Claude.
-- `run-descriptor.mjs` / `preflight.mjs`: `run.json` is now checked against the skill's layout rules before anything is started (cross-review: Claude seat A, a Codex or OpenCode seat B, two vendors, adversarial mode; pair-review: one vendor, distinct models) and the flags are validated (`mode`, `auditDepth`, boolean `falsification`). `preflight.mjs --host codex` is refused unless `--allow-unsupported-host` is passed. `run-descriptor.mjs` now imports `review-config.mjs`.
-- Docs: pair-review's configuration, Phase 1 and README text no longer assume two Claude models; the Maintenance sections name the repository-level parity checker and the shared `codex-dispatch.mjs` correctly.
-- Host support is decided per actor (host, runtime, transport) in the new `scripts/host-support.mjs`: supported, trial or unsupported, enforced by `run-descriptor.mjs` on every read and write and by `preflight.mjs --host` (`--allow-trial` opens a trial route and writes `support[]` into `run.json`; `--allow-unsupported-host` is gone). An OpenCode seat is now a trial route. A native agent writes its own findings file whatever its vendor (`channelFor` follows the transport), so a native Codex agent can be a seat from a Codex orchestrator (pair-review, trial). `build-manifest --run-dir` copies `host`, `support` and `host_status`; a Codex rollout passed as `--seat-transcript` also records its model.
-- `--detach` (`claude-dispatch`, `codex-dispatch`) on Windows tries WMI first and, when WMI is refused (a Codex sandbox answers `Access denied`), starts the worker as a plain detached process and says so on stderr. `REVIEW_DETACH_MODE` is `auto` (default), `plain` or `wmi` (no fallback). The Codex-host support table follows: a single-call Claude CLI actor (auditor, verifiers) is a trial route there; a Claude CLI seat is a trial only after `preflight --host codex --probe-claude-session --yes-paid` proves the session survives (two small Haiku calls: remember a nonce, resume and recall it; the result is recorded in `support[].probe` and re-checked on every read), because a Codex launch may or may not persist it; a nested Codex CLI stays unsupported.
-- `review-run.mjs` waits and `final-F5` race: when an OpenCode dispatcher's log says it ended but `result.json` was missing at the first read, the result is read again before a second dispatcher is started (the full pair-review suite saw two dispatcher starts under load).
-- Less for the orchestrator to read and write (field feedback): SKILL.md has a Quickstart of the whole run; every phase file opens by saying it is for failures and manual dispatch; `review-config seats --host <host> [--transport cli] [--out file]` writes `seats.json` from the saved choices; `references/task-packet-template.md` is a packet skeleton with tagged acceptance criteria and a Windows note; `phase1/phase2 --start` and the native-auditor step write a ready message file (`prompt-<role>.txt`) for each native agent; `build-manifest --run-dir` collects the packet, the untouched Phase 1 copies, the peer views, findings, verification files and every completed result.json by itself, and `--init` writes the minimal body; `review-run --local` puts the local time and UTC on the first line; the scorecard header shows the share of peer claims that were conceded, and a second table groups findings by the bracketed tags (`[AC-1]`) in the claim headings.
-- Scorecard Note shows the counter-fact: the auditor may add `counter_fact` (the disputing seat's counter-fact, its first sentence, one line of at most 240 characters, no claim label) to a `disputed-with-counter-fact` peer response; `translate` checks the field (and still refuses a claim label in it) and the Note for a refuted or unresolved finding quotes it.
-- `native-agent.mjs`: a Claude agent that was resumed read as "still working" for ever, because the hand-back call is followed by its own `tool_result` entry (found by a live cross-review); the state now ignores tool-result and meta entries and only a real new prompt after the last reply means it works again. `audit --finish --native-agent auditor=<id>` now waits on the auditor agent when its file does not exist yet, and fails when the agent finished without writing it. The failure now comes only after a 15 s wait for the file (`REVIEW_FILE_GRACE_S` changes it): the transcript can show the turn as ended just before the final write lands (found by a live review).
-- `review-run.mjs`: `--max-wait` is one budget for the whole `--wait` call (default 480 s) instead of per seat, so a call stays under a 10-minute tool limit; `audit --prepare|--finish --audit-depth <light|full>` writes the depth into `run.json` (refused once the auditor brief exists), and the all-concede `next:` line offers it.
-- `review-run.mjs --native-agent <A|B|auditor>=<agent id or transcript path>` (new `native-agent.mjs`): `--wait` and `audit --finish` wait on a native agent's own transcript (a Claude end_turn or hand-back, a Codex `task_complete`) instead of a trusted `--native-done`; the id is kept in `<run-dir>/native-agents.json`, which `build-manifest --run-dir` uses as the seat transcript. The manifest now splits a transcript seat's input into `new_input_tokens` and `context_reread_tokens` with a note, points `reviewers[]` at `seat_usage` (`usage_ref`) and carries the transcript model. `audit --prepare` says a native auditor needs `--native-done auditor` or `--native-agent`.
-- `SKILL.md` (both skills; from a live Codex test): the Quickstart names the Codex preflight flags (`--allow-trial`, and `--probe-claude-session --yes-paid` where a Claude CLI seat is used) and says what to do when a native agent cannot read its brief because its tools time out (host failure, keep the agent and the run, report incomplete). Pair-review's host summary no longer says the only Codex route is native OpenAI: a Claude pair runs there as a trial after the probe.
-- `review-run.mjs phase1 --start` (from a second live Codex test): a CLI seat's line now names its status record (`phase1/<seat>/result.json`, not the seat output folder), and a warning appears when the task packet says web verification is off but `flags.repoOnly` is not true (the seat would then start with web access on). The host files now list `repoOnly` and recommend a `timeoutS` bound for smoke tests.
-- `review-run.mjs --wait --native-agent` (from a third live Codex test): a native seat whose agent ended without a usable findings file now fails after the 15 s file grace with the agent's last reply quoted (new `agentLastReply` in `native-agent.mjs`) and the host-failure rule, instead of answering "has not written" with exit 3 for ever. The three seat/auditor prompt files ask the agent to reply `blocked:` plus the error when it cannot read the brief or write the file. The detach integration test waits up to 150 s (it took 68 s under the full gate's load).
-- `review-run.mjs` (found by the 1.1.0 end-to-end review): rerunning `phase1 --start` or `phase2 --start` no longer starts a seat that already has a dispatch; the saved source fingerprint is checked at phase 1 start and end and at exchange start and finish; `--timeout 0` is now passed to OpenCode seats too (the dispatcher defaults to 1800 s); a native auditor needs `--native-done auditor`; `audit --finish` refuses to go on when falsification was requested and fewer verification files exist than qualifying claims (`--accept-missing-verifiers` goes on and reports the pass INCOMPLETE); the exchange warning that every rebuttal conceded now reaches the report and `next:` asks for the audit-depth decision; a seat or auditor that hit a usage limit is not dispatched again before its `retryAfter` time; native seats print "effective distinctness unverified".
-- `run-descriptor.mjs` / `preflight.mjs`: every actor (seats, auditor, verifiers) needs a non-empty model and a supported provider/runtime pair; a native actor must be a runtime the host can start natively (Claude on Claude Code); verifier runtimes are included in the dispatcher check.
-- `review-run.mjs`: seats, resumes and the auditor run with `--timeout 0` (no limit) unless run.json `flags.timeoutS` is set; before, the dispatchers' 1800 s default stopped long passes against the "no time limit" rule. `flags.checklists` is passed as `--checklist` to validate, exchange, audit-prep, scan and translate.
-- `blind-relabel.mjs scorecard`: a HIGH/CRITICAL settled-agree row the auditor did not check gets the row Note "settled by concession only; the auditor did not check it", also when the auditor checked other claims.
-- `preflight.mjs` (field feedback, two-repository review): new `--exec-in <path> "<command>"` runs a Tier 2 command in another repository and reports it under `tier2Repos` with that repository's own `snapshotHash`, `targetChanged` and `touchedFiles`, so each repository's evidence can be stale-checked.
-- `review-config.mjs seats --repo-only` sets `flags.repoOnly` in the seats file (no hand-editing). `review-run phase1 --start` prints the "web verification is off but repoOnly is not true" warning to stderr before it starts any seat, and its text now names the fix.
-- `review-run --wait`: a native seat with a remembered agent whose file has no claims yet now says its agent is still working and that the id stays remembered, instead of hinting that the file is malformed. `phase2 --wait` prints the all-rebuttals-conceded warning once, not also once per seat.
-- `preflight.mjs --out` now also prints one stdout line (snapshotHash, each command's exit code, `targetChanged`), and its help and the Phase 1 reference list the `tier2.results[]` keys.
-- `references/task-packet-template.md`: the evidence slot asks for one `Evidence per repo: <path> <snapshotHash> <stale?>` line per `--exec-in` repository.
-- `blind-relabel.mjs validate`/translate (field feedback): a `Severity:`, `Basis:` or `Evidence strength:` line that holds a valid level word followed by a note (`MEDIUM (docs risk)`, `HIGH - reason`) now counts as that level instead of failing Phase 1 validation; two levels (`HIGH or MEDIUM`) are still refused.
-- `preflight.mjs --host` (field feedback): a Codex seat now runs the local `codex doctor --summary` first. When its sandbox row shows a failure, one small read-only `codex exec` (about 13-23k tokens) must read a nonce from a temp file; the preflight is refused only when that probe cannot run a command, because the doctor row can keep showing an earlier, repaired failure. `--skip-codex-doctor` bypasses both; the result reports `codexDoctor`.
-- `review-run phase1 --wait` (field feedback): a CLI seat whose file is only `## No findings` and says its review was incomplete, or whose stderr shows a failed `exec_command`, now fails the step as an incomplete seat instead of validating clean and moving to Phase 2.
-- `review-run phase2 --start`: the `next:` line no longer asks to resume a native seat that was skipped.
-- `preflight.mjs --host` and `review-run phase1 --wait` (field feedback): the Codex sandbox failure is intermittent, so a probe that passes after `exec_command` failures is reported as `unstable` with a warning, and `phase1 --wait` adds a warning line for a CLI seat whose stderr logged `exec_command` failures even when its verdict looks fine.
-- New `scripts/build-report.mjs` (design reviewed with the user): the review report is built from `findings.json`, `manifest.json`, the task packet and the Phase 1 files and printed in the terminal by default (colour only on a terminal, plain when `NO_COLOR` is set). It shows a mechanical status (COMPLETE/INCOMPLETE) and a blocker count (no merge or ship verdict), findings by severity, every packet criterion as issue found, no issue found or NOT VERIFIED, coverage, caveats and cost. `--out` writes a markdown copy, `--json` the facts, `--html` an optional standalone page, only when asked. Seat cost includes a Codex seat's usage from the manifest reviewers; criteria are listed per ticket (all rows, not only the ones with findings; a `Tickets: 6041 = AC-OWN-C, ...` line in the packet maps tags that carry no ticket number; a tag may map to several tickets and is listed under each, with a note that its findings apply to the tag and not to each ticket, and a range such as `AC-6040-1..-5` expands); criteria and hypotheses have separate counts; hypotheses are counted apart and shown as checked, since their outcome is not parsed; the notes file can add per-finding status (`Finding status`, a fixed-after-snapshot status adds a not-re-reviewed caveat), `Open items` and `Criteria source`.
-- `review-run phase1|phase2 --wait` (field feedback): a "still running" exit (3) now prints one status line per seat: a CLI seat's elapsed time and its `exec_command` failures so far, a finished seat's duration, a native seat's elapsed time and tool-call count from its transcript (with `--native-agent`). `codex-dispatch.mjs` writes `result.stderr.live.log` while the seat runs, so failures show before it finishes.
-- New `scripts/build-recheck-packet.mjs --from-run <old-run-dir> --since-diff <diff> --out <packet.md>` (field feedback): drafts the task packet for a re-review. The old findings become hypotheses `[H1]`... to confirm fixed or refute, the diff becomes a changed-file list, the old evidence and any older "What changed since" section are reset, and every part only the author knows stays a `FILL` line that the script lists. It never overwrites its output.
-- `build-report.mjs`: a hypothesis outcome (confirmed, refuted, partly confirmed, mixed) is read from the seat's `Checks performed` line and counted in the header (`1 REFUTED | 4 confirmed`); the task-packet template asks seats to end each hypothesis line with CONFIRMED, REFUTED or PARTLY CONFIRMED. Criterion tags now match as whole tags, so `H1` no longer matches inside `H10`. Cost is one table with the same columns for every seat (new input, cache read, output, calls): a Codex seat's new input is its input minus the cached part, which is shown under cache read, and a resumed seat adds each call's own new input beneath the table.
-- `review-run phase2 --wait`: after a zero-dispute exchange of at most 3 conceded claims, `next:` gives the `--audit-depth full` command directly instead of asking for a decision; a larger run still asks.
-- `build-report.mjs` (independent review): a seat that wrote checks but named no criterion or hypothesis tag is named in the report and as a caveat (its checks are not counted); a criterion a seat called incomplete (unverified, could not, not available) is flagged beside its no-issue result; a tag no longer matches inside a longer dotted tag (`AC-X` in `AC-X.1`); a negated outcome (`not confirmed`, `could not be confirmed`) is not read as confirmed; `not fixed` is not a fix after the snapshot; a severity the auditor changed shows as `claimed X` on every finding line, in markdown and in HTML; severities outside the four levels are counted as `other`; a finding that is not settled shows its state; markdown escapes finding text and shows `unknown` for a missing exchange figure; the HTML bar counts criteria only; per-call new input is `unknown` when a call has no cached figure; 999500 tokens prints as 1M; a repeated notes heading adds to the first.
-- `review-run audit --prepare|--finish` and `build-report.mjs` (field feedback, a zero-claim run): when neither seat raised a claim there is nothing for an auditor to check, so `audit --prepare` says so, writes an empty `phase3/findings.json` (`zero_claims: true`), builds no auditor brief, and `next:` points at `build-manifest` and `build-report`; `build-report` also prints a run whose `findings.json` is missing when neither seat file has a claim, with the criteria table and an "audit not run" caveat.
-- `preflight.mjs --host` warns when `<run-dir>/task-packet.md` does not exist yet (run.json is still written; write the packet before `phase1 --start`, no rerun needed). `review-config seats` help and each SKILL.md quickstart name the one-run model override `--a <model> --b <model>`, which already worked.
-- `preflight.mjs --host` (independent review): the Codex sandbox probe is a paid call, so it needs `--yes-paid` and runs only after the route is accepted; a `codex doctor` that exits non-zero or prints nothing is reported as skipped, not as a healthy sandbox; `--exec` and `--exec-in` are refused with `--host`; every `--exec-in` folder is checked before any command runs; an `--exec-in` command that changes files under `--cd` is reported (`execInChangedTarget`, warning on stderr). One failed-command pattern is shared with `review-run`.
-- `review-run`: `seatRanNothing` counts only the seat's own opening statement in its `No findings` text, not the same words inside a sentence about the target; the audit-depth `next:` line no longer says "zero-dispute" when there were disputes. `blind-relabel`: a `Severity:` line with a second level in any form (`MEDIUM-HIGH`, `HIGH, MEDIUM`, `HIGH (or MEDIUM)`) is refused.
-- `build-recheck-packet.mjs`: the diff reader follows hunk line counts (content lines that start with `--` or `++` count), decodes quoted paths, reads a plain `diff -u`, and reports a diff with no files; a BOM in `findings.json` is accepted and bad JSON names the file; a title no longer stops at `e.g.` or `etc.` (also in `build-report`).
-- `review-config seats`: `--audit-depth light|full` and `seats --help`.
-- `review-config seats --out` on an existing file says to choose a new `--out`; the SKILL.md quickstart says to decide `--repo-only` (web on or off) before the seats file, because it cannot be added once run.json exists.
-- Pair-review of the skills (opus and fable, adversarial, full audit; 18 findings, all confirmed): a native seat that writes `No findings` and says its review was incomplete now fails Phase 1 like a CLI seat; the zero-claim path clears the cache and removes seat worktrees; `build-report` treats a run with no `findings.json` as zero-claim only when every seat wrote the `No findings` marker, no longer counts a refuted or dropped claim as an issue found, and groups a plain `AC-1` tag under `Criteria` instead of an invented ticket; a present but unaccepted `Severity:` value is reported as such (`Severity value "HIGH or MEDIUM" is not exactly one of ...`); `review-config seats --falsification` exists and `audit --finish` warns about verification files that run.json will not use; the live stderr log of a dead Codex worker is archived with its attempt instead of erased; the re-review packet repeats the hypothesis outcome instruction; both SKILL.md files read `configuration.md` and `model-capabilities.md` only when needed; pair-review's manual Phase 2 command no longer says to always pass `--seat-b-harness`. Repository gate: the fixture folders are compared as whole trees, and two duplicate checks were removed from `validate-repository` and `release-check`.
-- Review of those fixes (independent reviewer): a native seat's `No findings` statement counts anywhere in its section (not only the first line), never inside a fence, and never for a file that has claims; a refuted claim on a tag no seat listed stays `no issue found` and is shown in the HTML report too; the live stderr log is removed after every finished Codex run, also when stderr was empty; `AC-6040-1.2` is a ticket tag; the quickstart names `--falsification` beside `--repo-only`; `validate-repository` names a missing fixtures folder; the post-audit verification warning no longer suggests a step preflight refuses.
-- `preflight.mjs --out` summary line: each compact command shows the last summary line it printed next to its exit code (`exit 0 (152 passed in 4.2s)`), so the evidence block for a packet needs no JSON reading.
-- `build-report.mjs`: colour also turns on with `FORCE_COLOR` (and `NO_COLOR` still wins); the quickstart runs the report with `--color always` and says to show the output as printed, because a tool that captures output is not a terminal. Maintainer installer (outside the repo): identical test files run once, and tests marked `[slow]` (the ones that start real processes or git repositories: 307 test lines, 79% of all test time) are skipped day to day; `scripts/release-check.mjs` still runs every test.
-
-### Known unsupported cells
-
-- Cross-review on a Codex host, and a Claude pair on a Codex host: a trial only when the session probe passes. In two
-  `codex exec` runs a Claude CLI call left no session, so the exchange could not resume the seat (`No conversation found with
-  session ID`); another Codex launch path kept it. A nested Codex CLI start is blocked. The native OpenAI pair-review there is
-  a trial that has completed one short run. See each skill's `references/hosts/codex.md`.
-- The OpenCode seat is not verified end to end. A live trial (OpenCode 1.18.25, isolated worktree, two free models) ended twice with no final text after tool calls, and the dispatcher reported that as an error. A direct short OpenCode call returned the events the dispatcher parses.
+- Each skill is its own plugin in the `skillarray` marketplace (`pair-review@skillarray`, `cross-review@skillarray`).
+- A seat can run headless through the Claude CLI as well as a native agent, and reviews can be started from Codex as a trial.
+- `preflight --host` writes a `run.json` for the run, and `review-run.mjs` drives the three phases from it with a short
+  status and one `next:` line.
+- pair-review can pair two OpenAI models through Codex.
+- `build-report.mjs` prints a short chat report: severity bars, a fix now / fix next / decide table, and the cost per seat with
+  the commands each seat ran.
+- The OpenCode seat is still not verified end to end.
 
 ## 1.0.0 - 2026-10-01
 
-### What it does
-
-- `cross-review`: two reviewers from different providers (a Claude seat, and
-  a Codex or OpenCode-routed seat) review the same target on their own. They
-  exchange findings once, with model names and claim numbers hidden, and each
-  accepts or disputes the other's claims with evidence. A fresh auditor, which
-  never sees who wrote what, settles every finding.
-- `pair-review`: the same process with two different Claude models, in
-  collaborate, adversarial or independent mode.
-- Output: `findings.json` (each finding with its severity, evidence, each
-  reviewer's response and the auditor's own check), a scorecard, and
-  `manifest.json` with content hashes, the models and skill versions used, and
-  each seat's token use and working time.
-- Blinding: claim numbers are relabeled for each reader, and every handoff is
-  scanned for model and vendor names, seat letters and leftover claim numbers,
-  evidence blocks included. A hit stops the run until the reviewer redacts it.
-- Evidence rules: every finding says how it was found and how strong its
-  evidence is. A rebuttal overturns a claim only with a checkable counter-fact.
-  The audit checks disputed claims (light) or every claim ("double check all
-  claims"), and optional verifiers re-check disputed high-severity findings
-  ("deep verify disputed high-severity findings").
-- Pre-flight evidence: repository state, optional test runs tied to a content
-  snapshot of the target, and how far each clone is behind its upstream.
-- Model setup on first run, saved preferences, and `setup`, `config` and
-  `reset` commands.
-
-### Known limitations
-
-- A light audit does not re-check claims both reviewers agree on. When both
-  are wrong the same way, only a full audit catches it.
-- Writing style can still hint at a reviewer's identity. The scan catches
-  explicit mentions only.
-- There is no protection against prompt injection in the reviewed material.
-- A Claude seat (seat A in cross-review, both seats in pair-review) is
-  read-only by instruction only; the target is checked for changes after each
-  phase. A Codex seat runs in a read-only sandbox and an OpenCode seat in a
-  disposable worktree.
-- An OpenCode seat has no web access.
-- Resuming an ended orchestrator session was tested headless only.
-- `translate` takes the auditor's word that a dispute carried a counter-fact;
-  it does not re-read the rebuttals.
+- First release. In `cross-review` a Claude reviewer and a Codex or OpenCode reviewer check the same target on their own,
+  trade findings once without knowing who wrote what, and a fresh auditor settles each finding. `pair-review` does the same
+  with two Claude models.
+- A run leaves `findings.json`, a scorecard and a `manifest.json` with file hashes, models, token use and time.
+- A light audit only re-checks disputed findings. Ask for "double check all claims" when both reviewers could be wrong the same
+  way.

@@ -7,9 +7,10 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { writeRunDescriptor } from '../run-descriptor.mjs';
-import { parseArgs, run as runInProcess, clockLine, seatRanNothing, execFailureCount, formatElapsed, seatStatusLines, otherPendingSeats, warnExtraRepos, failureDetail, tail, print } from '../review-run.mjs';
+import { readRunDescriptor, writeRunDescriptor } from '../run-descriptor.mjs';
+import { parseArgs, run as runInProcess, clockLine, seatDepth, shallowSeatNote, execFailureCount, formatElapsed, seatStatusLines, otherPendingSeats, warnExtraRepos, failureDetail, tail, print } from '../review-run.mjs';
 import { computeSnapshotHash } from '../preflight.mjs';
+import { runStep as relabelStep } from '../blind-relabel.mjs';
 import { evaluateSupport } from '../host-support.mjs';
 
 const SCRIPTS = fileURLToPath(new URL('../', import.meta.url));
@@ -38,11 +39,11 @@ const m = /^seat-([AB])$/.exec(path.basename(outDir));
 const role = m ? m[1] : 'auditor';
 const phase = path.basename(path.dirname(outDir));
 fs.mkdirSync(outDir, { recursive: true });
-if (m) fs.writeFileSync(path.join(outDir, role + (phase === 'phase1' ? '-findings.md' : '-rebuttals-raw.md')), '# findings from ' + role + '\\n');
+if (m) fs.writeFileSync(path.join(outDir, role + (phase === 'phase1' ? '-findings.md' : '-rebuttals-raw.md')), (role === 'A' && phase === 'phase1' && ctl.finalA) || '# findings from ' + role + '\\n' + (phase === 'phase1' ? '\\n## No findings\\n\\nBlocked: none\\n' : ''));
 else if (!ctl.auditorWritesNothing) fs.writeFileSync(path.join(outDir, 'findings.audit.json'), '{"fake":true}\\n');
 fs.writeFileSync(path.join(path.dirname(brief), 'result.json'), JSON.stringify({
   status: 'completed', sessionId: 'sess-' + role, modelResolved: ctl.resolved && role in ctl.resolved ? ctl.resolved[role] : 'resolved-' + role, worktreePath: ctl.worktrees?.[role] ?? null,
-  touchedFiles: ctl.touched && role in ctl.touched ? ctl.touched[role] : [],
+  touchedFiles: ctl.touched && role in ctl.touched ? ctl.touched[role] : [], ...(m ? null : ctl.recordAuditor),
 }));
 `,
   'codex-dispatch.mjs': `
@@ -51,8 +52,8 @@ const brief = get('--brief');
 const out = get('--final-message-out');
 const role = /[\\\\/]A-(findings|rebuttals)/.test(out) ? 'A' : 'B';
 const resolved = ctl.codexResolved && role in ctl.codexResolved ? ctl.codexResolved[role] : get('--model');
-fs.writeFileSync(path.join(path.dirname(brief), 'result.json'), JSON.stringify({ status: 'completed', threadId: 'thread-' + role, worktreePath: null, modelResolved: resolved }));
-fs.writeFileSync(out, path.basename(out) === 'findings.audit.json' ? '{"fake":true}\\n' : (role === 'B' && ctl.finalB) || '# findings from ' + role + '\\n');
+fs.writeFileSync(path.join(path.dirname(brief), 'result.json'), JSON.stringify({ status: 'completed', threadId: 'thread-' + role, worktreePath: null, modelResolved: resolved, ...(role === 'B' ? ctl.recordB : null) }));
+fs.writeFileSync(out, path.basename(out) === 'findings.audit.json' ? '{"fake":true}\\n' : (role === 'B' && ctl.finalB) || '# findings from ' + role + '\\n' + (/-findings\\.md$/.test(out) ? '\\n## No findings\\n\\nBlocked: none\\n' : ''));
 `,
   'build-brief.mjs': `
 if (ctl.failBuild === get('--mode')) { process.stderr.write('build-brief: refused\\n'); process.exit(1); }
@@ -62,34 +63,19 @@ fs.writeFileSync(get('--out'), 'brief ' + get('--mode') + '\\n');
   'blind-relabel.mjs': `
 const sub = argv[0];
 if (sub === 'validate' && ctl.validateExit) { process.stderr.write('validate: claim A1 lacks Evidence\\n'); process.exit(ctl.validateExit); }
+if (sub === 'validate' && ctl.validateWarn) process.stderr.write('blind-relabel: WARNING: seat A A1 is HIGH with no "Trigger:" line\\nblind-relabel: WARNING: seat B B2 cites x.py:900\\n');
 if (sub === 'scan' && ctl.scanExit) { process.stderr.write('scan: IDENTITY hit\\n'); process.exit(ctl.scanExit); }
 if (sub === 'flip') fs.writeFileSync(get('--out'), '{"A":"X","B":"Y"}\\n');
 if (sub === 'audit-prep') {
   fs.mkdirSync(get('--out-dir'), { recursive: true });
   fs.writeFileSync(path.join(get('--out-dir'), 'task-packet.md'), 'packet\\n');
-  fs.writeFileSync(path.join(get('--out-dir'), 'X-findings.md'), ctl.zeroClaims ? '## No findings\\n' : '## X1\\nclaim\\n');
-  fs.writeFileSync(path.join(get('--out-dir'), 'Y-findings.md'), ctl.zeroClaims ? '## No findings\\n' : '## Y1\\nclaim\\n');
+  fs.writeFileSync(path.join(get('--out-dir'), 'X-findings.md'), ctl.emptyStaged ? '' : ctl.zeroClaims ? '## No findings\\n' : '## X1\\nclaim\\n');
+  fs.writeFileSync(path.join(get('--out-dir'), 'Y-findings.md'), ctl.emptyStaged ? '' : ctl.zeroClaims ? '## No findings\\n' : '## Y1\\nclaim\\n');
   fs.mkdirSync(path.dirname(get('--breakdown-out')), { recursive: true });
   fs.writeFileSync(get('--breakdown-out'), JSON.stringify({ falsificationBreakdown: { high_or_critical: 3, disputed: ctl.qualified ?? 0, conceded: 1, unaddressed: 0, ...(ctl.qualifiedIds ? { disputed_ids: ctl.qualifiedIds } : {}) } }) + '\\n');
 }
-if (sub === 'translate' && ctl.translateExit) { process.stderr.write('translate: prose field contains a claim ID\\n'); process.exit(ctl.translateExit); }
+if (sub === 'translate' && ctl.translateExit) { process.stderr.write((ctl.translateMessage ?? 'translate: prose field contains a claim ID') + '\\n'); process.exit(ctl.translateExit); }
 if (sub === 'translate' || sub === 'scorecard') fs.writeFileSync(get('--out'), 'out\\n');
-`,
-  'opencode-dispatch.mjs': `
-if (!ctl.opencodeSleepMs) {
-  process.stderr.write('relay: refused to start\\n');
-  process.exit(2);
-}
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ctl.opencodeSleepMs);
-const resultPath = path.join(path.dirname(get('--brief')), 'result.json');
-if (fs.existsSync(resultPath)) {
-  let n = 1;
-  while (fs.existsSync(path.join(path.dirname(resultPath), 'result.attempt-' + n + '.json'))) n++;
-  fs.renameSync(resultPath, path.join(path.dirname(resultPath), 'result.attempt-' + n + '.json'));
-}
-fs.writeFileSync(get('--final-message-out'), '# findings from B\\n');
-fs.writeFileSync(resultPath, JSON.stringify({ status: 'completed', sessionId: 'sess-B', touchedFiles: [], worktreePath: null }));
-process.stdout.write('relay: done.\\n');
 `,
   'exchange.mjs': `
 const run = get('--run-dir');
@@ -166,7 +152,7 @@ async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = 
   }
   const desc = {
     skill, skillDir: path.join(base, skill), targetDir: target, host,
-    flags: { auditDepth: 'light', falsification: false, mode: 'adversarial', ...flags }, fingerprint,
+    flags: { falsification: false, mode: 'adversarial', ...flags }, fingerprint,
     seatA: actor(run, 'A', seatA),
     seatB: actor(run, 'B', { provider: 'openai', runtime: 'codex', model: 'gpt-5.5', ...seatB }),
     auditor: actor(run, 'auditor', { outputDir: `${run}-audit-input`, ...auditor }),
@@ -179,7 +165,7 @@ async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = 
   const execute = (args) => {
     let out = '';
     let err = '';
-    const io = { stdout: { write: (chunk) => { out += chunk; } }, stderr: { write: (chunk) => { err += chunk; } }, runner: inProcessRunner(hook), skill: state.runAs };
+    const io = { stdout: { write: (chunk) => { out += chunk; } }, stderr: { write: (chunk) => { err += chunk; } }, steps: inProcessRunner(hook), skill: state.runAs };
     return runInProcess(args, io).then((code) => ({ code, out, err }));
   };
   const rr = async (...args) => {
@@ -197,7 +183,12 @@ async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = 
 const names = (calls) => calls.map((c) => `${c.script.replace('.mjs', '')}:${c.script.endsWith('dispatch.mjs') && c.argv.includes('--detach') ? 'start' : c.argv[0]}`);
 
 test('parseArgs: exactly one half per command, and the half names differ for audit', () => {
-  assert.deepEqual(parseArgs(['phase1', '--run-dir', 'r', '--start']), { command: 'phase1', runDir: 'r', half: 'start', maxWait: 480, nativeDone: [], nativeAgents: {}, acceptMissingVerifiers: false, auditDepth: null, local: false });
+  assert.deepEqual(parseArgs(['phase1', '--run-dir', 'r', '--start']), { command: 'phase1', runDir: 'r', half: 'start', maxWait: 480, nativeDone: [], nativeAgents: {}, acceptMissingVerifiers: false, acceptDrift: false, local: false, incompleteSeat: null });
+  assert.equal(parseArgs(['audit', '--run-dir', 'r', '--finish', '--accept-drift']).acceptDrift, true);
+  // Field feedback S6: old notes still pass the removed flag; the error says what replaced it.
+  assert.throws(() => parseArgs(['audit', '--run-dir', 'r', '--prepare', '--audit-depth', 'full']), /--audit-depth is gone: every audit re-checks every claim/);
+  assert.equal(parseArgs(['phase1', '--run-dir', 'r', '--wait', '--accept-drift']).acceptDrift, true);
+  assert.equal(parseArgs(['phase2', '--run-dir', 'r', '--wait', '--accept-drift']).acceptDrift, true);
   assert.equal(parseArgs(['audit', '--run-dir', 'r', '--finish', '--max-wait', '5']).maxWait, 5);
   assert.throws(() => parseArgs(['phase1', '--run-dir', 'r']), /needs one of/);
   assert.throws(() => parseArgs(['phase1', '--run-dir', 'r', '--start', '--wait']), /exactly one/);
@@ -257,16 +248,25 @@ test('phase1 start then wait: publishes the file-channel seat, validates, and th
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
   const r = await s.rr('phase1', '--run-dir', s.run, '--wait');
   assert.equal(r.code, 0, r.out + r.err);
-  assert.equal(await fs.readFile(path.join(s.run, 'phase1', 'A-findings.md'), 'utf8'), '# findings from A\n');
-  assert.equal(await fs.readFile(path.join(s.run, 'phase1', 'B-findings.md'), 'utf8'), '# findings from B\n');
+  assert.equal(await fs.readFile(path.join(s.run, 'phase1', 'A-findings.md'), 'utf8'), '# findings from A\n\n## No findings\n\nBlocked: none\n');
+  assert.equal(await fs.readFile(path.join(s.run, 'phase1', 'B-findings.md'), 'utf8'), '# findings from B\n\n## No findings\n\nBlocked: none\n');
   const wait = (await s.calls()).slice(4);
   assert.deepEqual(names(wait), ['claude-dispatch:--wait', 'codex-dispatch:--wait', 'blind-relabel:validate']);
   assert.equal(s.flag(wait[2], '--phase1-dir'), path.join(s.run, 'phase1'));
   assert.equal(s.flag(wait[2], '--packet'), path.join(s.run, 'task-packet.md'));
+  assert.equal(s.flag((await s.calls()).find((c) => c.script === 'build-brief.mjs'), '--run-dir'), s.run, 'the seat brief checks the packet against the run folder before any seat runs');
   assert.ok(r.lines.some((l) => /published A-findings\.md/.test(l)));
   assert.match(r.lines.at(-1), /^next: run: review-run phase2 --run-dir .* --start$/);
+  assert.ok(r.lines.includes('validate Phase 1: clean'));
+  await s.ctl({ validateWarn: true });
   const again = await s.rr('phase1', '--run-dir', s.run, '--wait');
   assert.equal(again.code, 0, 'a second --wait republishes nothing and still passes');
+  assert.ok(again.lines.includes('validate Phase 1: clean, 2 warning(s), e.g. seat A A1 is HIGH with no "Trigger:" line'), 'validate warnings are not dropped');
+  // Round 5 F8: a repeated --start that starts no seat keeps the "Phase 1 finished" record.
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: phase1 finished; next: /);
+  const repeat = await s.rr('phase1', '--run-dir', s.run, '--start');
+  assert.ok(repeat.lines.filter((l) => /already started/.test(l)).length === 2, repeat.out);
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: phase1 finished; next: /);
 });
 
 test('the sequencer stops at the first failed step, names it, runs nothing after it and keeps every artifact', async (t) => {
@@ -307,7 +307,7 @@ test('a seat still running after the wait window exits 3 with a rerun line', asy
   await s.ctl({ claudeWait: 3 });
   const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
   assert.equal(r.code, 3);
-  assert.match(r.lines.at(-1), /^next: seat A \(claude\) is still running; rerun this command: review-run phase1 --run-dir .* --wait$/);
+  assert.match(r.lines.at(-1), /^next: seat A \(claude\) is still running; rerun this command: review-run phase1 --run-dir .* --wait; do not start phase2 until this exits 0$/);
 });
 
 test('a native seat is waited for by its output file and a missing file exits 3', async (t) => {
@@ -316,7 +316,7 @@ test('a native seat is waited for by its output file and a missing file exits 3'
   const waiting = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
   assert.equal(waiting.code, 3);
   assert.match(waiting.lines.at(-1), /native seat A has not written .*A-findings\.md/);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A')).code, 0);
 });
 
@@ -329,14 +329,14 @@ test('a native seat whose Phase 1 file holds only the header is still running: e
   assert.match(r.lines.at(-1), /seat A: .*A-findings\.md has no claims yet, the agent may still be running; if it already replied "written", the file is malformed: return it to the seat \(do not hand-edit\)/);
   assert.equal(r.lines.some((l) => l.includes('output found (native)')), false);
   assert.equal((await s.calls()).some((c) => c.script === 'blind-relabel.mjs'), false, 'validate must not run');
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 - x\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 - x\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A')).code, 0);
 });
 
 test('a native seat with a claim in its file is not done until --native-done names it: exit 3 and no validate', async (t) => {
   const s = await setup(t, { seatA: { transport: 'native' } });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 - partial\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 - partial\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
   assert.equal(r.code, 3, r.out);
   assert.match(r.lines.at(-1), /seat A is native: .*A-findings\.md exists but a file alone cannot show the agent finished.*rerun this command with --native-done A/);
@@ -352,6 +352,10 @@ test('--native-done rejects an empty list and an unknown seat letter', () => {
   assert.throws(() => parseArgs(['phase1', '--run-dir', 'r', '--wait', '--native-done', 'C']), /--native-done takes seat letters/);
   assert.throws(() => parseArgs(['phase1', '--run-dir', 'r', '--wait', '--native-done', ',']), /--native-done takes seat letters/);
   assert.deepEqual(parseArgs(['phase1', '--run-dir', 'r', '--wait', '--native-done', 'A,B']).nativeDone, ['A', 'B']);
+  // Field northwind-1a: a repeated flag adds to the list instead of keeping only the last one.
+  assert.deepEqual(parseArgs(['phase2', '--run-dir', 'r', '--wait', '--native-done', 'A', '--native-done', 'B']).nativeDone, ['A', 'B']);
+  assert.deepEqual(parseArgs(['phase2', '--run-dir', 'r', '--wait', '--native-done', 'A', '--native-done', 'A,B']).nativeDone, ['A', 'B']);
+  assert.throws(() => parseArgs(['phase1', '--run-dir', 'r', '--wait', '--native-done', 'A', '--native-done', ',']), /--native-done takes seat letters/);
 });
 
 test('a native seat with the No findings marker is finished; a peer-letter heading is not a claim for this seat', async (t) => {
@@ -359,14 +363,14 @@ test('a native seat with the No findings marker is finished; a peer-letter headi
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
   await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## B1 - wrong letter\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1')).code, 3);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## No findings\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## No findings\n\nBlocked: none\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A')).code, 0);
 });
 
 test('a native seat in Phase 2 is finished only with a ### P block; a header-only file exits 3', async (t) => {
   const s = await setup(t, { seatA: { transport: 'native' } });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1 - x\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1 - x\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A')).code, 0);
   assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
   const file = path.join(s.run, 'phase2', 'A-rebuttals-raw.md');
@@ -402,7 +406,7 @@ test('pair-review with native seats compares the requested ids and records famil
   for (const [modelB, code] of [['model-B', 0]]) {
     const s = await make(modelB);
     assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-    for (const role of ['A', 'B']) await fs.writeFile(path.join(s.run, 'phase1', `${role}-findings.md`), `## ${role}1\nclaim\n`);
+    for (const role of ['A', 'B']) await fs.writeFile(path.join(s.run, 'phase1', `${role}-findings.md`), `## ${role}1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n`);
     const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A,B');
     assert.equal(r.code, code, r.out);
     if (code === 1) assert.match(r.lines.at(-2), /both seats ran model-A \(requested id\)/);
@@ -481,6 +485,146 @@ test('phase2 --start runs exchange prepare, resumes every CLI seat on its Phase 
   assert.ok(wait.lines.some((l) => /exchange finish: done \(appended A,B; concede 1, dispute 2\)/.test(l)));
 });
 
+test('restructure round 2 F10: phase2 --wait --incomplete-seat finishes the exchange without a seat that cannot be resumed', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
+  // Restructure round 3 F5: the declared seat's CLI is still working on its exchange: it is stopped before the finish.
+  const { processStartMs, processStartToken, processExists } = await import('../detach-utils.mjs');
+  const { spawn } = await import('node:child_process');
+  // A real seat CLI leads its own process group on POSIX (spawnCli, detached), which the stop signals.
+  const stuck = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: process.platform !== 'win32' });
+  t.after(() => { try { stuck.kill(); } catch { /* already gone */ } });
+  await new Promise((r) => stuck.once('spawn', r));
+  const recordA = path.join(s.run, 'phase2', 'A', 'result.json');
+  await fs.writeFile(recordA, JSON.stringify({ status: 'running', sessionId: 'sess-A', childPid: stuck.pid, childStartedAt: new Date(processStartMs(stuck.pid) ?? Date.now()).toISOString(), childStartToken: processStartToken(stuck.pid) }));
+  const before = (await s.calls()).length;
+  const wait = await s.rr('phase2', '--run-dir', s.run, '--wait', '--incomplete-seat', 'A');
+  assert.equal(wait.code, 0, wait.out + wait.err);
+  const calls = (await s.calls()).slice(before);
+  assert.deepEqual(names(calls), ['codex-dispatch:--wait', 'exchange:finish'], 'seat A is not waited for');
+  assert.equal(s.flag(calls.at(-1), '--incomplete-seats'), 'A');
+  assert.ok(wait.lines.some((l) => /seat A: declared incomplete \(--incomplete-seat\)/.test(l)), wait.out);
+  assert.ok(wait.lines.some((l) => /seat A: its Phase 2 CLI was still running and was stopped/.test(l)), wait.out);
+  for (let i = 0; i < 50 && processExists(stuck.pid); i += 1) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(processExists(stuck.pid), false, 'the declared seat\'s CLI is gone');
+  for (const bad of [['phase2', '--run-dir', s.run, '--start', '--incomplete-seat', 'A'], ['phase1', '--run-dir', s.run, '--wait', '--incomplete-seat', 'A'], ['phase2', '--run-dir', s.run, '--wait', '--incomplete-seat', 'C']]) {
+    assert.equal((await s.rr(...bad)).code, 2, bad.join(' '));
+  }
+});
+
+test('run.json env settings reach every CLI dispatch as flags: phase1 start, the phase2 resume and the auditor', async (t) => {
+  const s = await setup(t, {
+    seatA: { env: { pass: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_REGION'], apiKey: true } },
+    seatB: { env: { mode: 'inherit', pass: ['OPENAI_BASE_URL'] } },
+    auditor: { env: { pass: ['CLAUDE_CODE_USE_BEDROCK'] } },
+  });
+  const envOf = (call) => ({ mode: call.argv.includes('--env-mode') ? s.flag(call, '--env-mode') : null, pass: call.argv.includes('--env-passthrough') ? s.flag(call, '--env-passthrough') : null, apiKey: call.argv.includes('--use-api-key') });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
+  const starts = (await s.calls()).filter((c) => c.script.endsWith('dispatch.mjs') && c.argv.includes('--detach'));
+  assert.equal(starts.length, 4);
+  for (const call of starts.filter((c) => c.script === 'claude-dispatch.mjs')) assert.deepEqual(envOf(call), { mode: null, pass: 'CLAUDE_CODE_USE_BEDROCK,AWS_REGION', apiKey: true });
+  for (const call of starts.filter((c) => c.script === 'codex-dispatch.mjs')) assert.deepEqual(envOf(call), { mode: 'inherit', pass: 'OPENAI_BASE_URL', apiKey: false });
+  assert.ok(starts.some((c) => c.script === 'codex-dispatch.mjs' && c.argv.includes('--session')), 'the resume carries the setting too');
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--wait')).code, 0);
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--prepare')).code, 0);
+  const before = (await s.calls()).length;
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 0);
+  const auditor = (await s.calls()).slice(before).find((c) => c.script === 'claude-dispatch.mjs' && c.argv.includes('--detach'));
+  assert.deepEqual(envOf(auditor), { mode: null, pass: 'CLAUDE_CODE_USE_BEDROCK', apiKey: false });
+});
+
+// The real dispatchers, started detached by review-run itself, against fake CLIs that answer with the environment they got.
+test('run.json env: named variables reach a fake CLI and others do not, detached in Phase 1, resumed in Phase 2 and in the foreground [slow]', async (t) => {
+  const pair = CURRENT === 'pair-review';
+  const s = await setup(t, {
+    skill: CURRENT,
+    seatA: { env: { pass: ['SEAT_A_VAR'], apiKey: true } },
+    seatB: pair ? { provider: 'anthropic', runtime: 'claude', model: 'model-B', env: { pass: ['SEAT_B_VAR'] } } : { env: { pass: ['SEAT_B_VAR'] } },
+  });
+  const hook = path.join(s.base, 'env-hook');
+  const bin = path.join(s.base, 'bin');
+  await fs.mkdir(hook);
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(hook, 'build-brief.mjs'), COMMON + "fs.mkdirSync(path.dirname(get('--out')), { recursive: true }); fs.writeFileSync(get('--out'), '{}');\n");
+  await fs.writeFile(path.join(hook, 'exchange.mjs'), `${COMMON}
+const p2 = path.join(get('--run-dir'), 'phase2');
+fs.mkdirSync(path.join(p2, 'A'), { recursive: true });
+fs.writeFileSync(path.join(p2, 'A', 'delta-brief.txt'), '{}');
+process.stdout.write(JSON.stringify({ briefs: { A: path.join(p2, 'A', 'delta-brief.txt'), B: null }, rebuttals: { A: null, B: null }, skipped: { B: 'fixture' } }));
+`);
+  await fs.copyFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-claude.mjs'), path.join(bin, 'fake-claude.mjs'));
+  await fs.writeFile(path.join(bin, 'fake-codex.mjs'), [
+    "if (process.argv.includes('mcp')) { process.stdout.write('[]\\n'); process.exit(0); }",
+    "let input = ''; for await (const c of process.stdin) input += c;",
+    "const say = (e) => process.stdout.write(JSON.stringify(e) + '\\n');",
+    "say({ type: 'thread.started', thread_id: 'env-thread' });",
+    "say({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ env: process.env }) } });",
+    "say({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } });",
+    '',
+  ].join('\n'));
+  for (const [name, fake] of [['claude', 'fake-claude.mjs'], ['codex', 'fake-codex.mjs']]) {
+    await fs.writeFile(path.join(bin, process.platform === 'win32' ? `${name}.cmd` : name), process.platform === 'win32'
+      ? `@echo off\r\n"${process.execPath}" "${path.join(bin, fake)}" %*\r\n`
+      : `#!/bin/sh\nexec "${process.execPath}" "${path.join(bin, fake)}" "$@"\n`, { mode: 0o755 });
+  }
+  const gitDir = path.dirname(spawnSync(process.platform === 'win32' ? 'where' : 'which', ['git'], { encoding: 'utf8' }).stdout.trim().split(/\r?\n/)[0]);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
+  Object.assign(env, { PATH: [bin, gitDir].join(path.delimiter), REVIEW_DETACH_MODE: 'plain', SEAT_A_VAR: 'a', SEAT_B_VAR: 'b', SEAT_OTHER_VAR: 'other', ANTHROPIC_API_KEY: 'fixture-key' });
+  // The real dispatchers run as child processes with this environment; build-brief and exchange are fakes.
+  const steps = (name, argv) => spawnSync(process.execPath, [path.join(name.endsWith('-dispatch.mjs') ? SCRIPTS : hook, name), ...argv], { encoding: 'utf8', env, timeout: 120000 });
+  const reviewRun = async (...args) => {
+    let stdout = '';
+    let stderr = '';
+    const status = await runInProcess(args, { stdout: { write: (c) => { stdout += c; } }, stderr: { write: (c) => { stderr += c; } }, steps, skill: s.state.runAs });
+    return { status, stdout, stderr };
+  };
+  // Up to 10 minutes: under release-check's full parallel load a detached Windows worker took over 3 minutes to finish.
+  const settled = async (file) => {
+    for (let i = 0; i < 3000; i++) {
+      const record = JSON.parse(await fs.readFile(file, 'utf8').catch(() => '{}'));
+      if (record.status && record.status !== 'running') return record;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert.fail(`${file} never settled`);
+  };
+  const seen = (record) => JSON.parse(record.finalMessage).env;
+  const start = await reviewRun('phase1', '--run-dir', s.run, '--start');
+  assert.equal(start.status, 0, start.stdout + start.stderr);
+  const a1 = await settled(path.join(s.run, 'phase1', 'A', 'result.json'));
+  const b1 = await settled(path.join(s.run, 'phase1', 'B', 'result.json'));
+  assert.equal(a1.status, 'completed', a1.error);
+  assert.equal(b1.status, 'completed', b1.error);
+  assert.equal(a1.detached, true);
+  const [envA, envB] = [seen(a1), seen(b1)];
+  assert.deepEqual([envA.SEAT_A_VAR, envA.SEAT_B_VAR, envA.SEAT_OTHER_VAR, envA.ANTHROPIC_API_KEY], ['a', undefined, undefined, 'fixture-key']);
+  assert.deepEqual([envB.SEAT_A_VAR, envB.SEAT_B_VAR, envB.SEAT_OTHER_VAR, envB.ANTHROPIC_API_KEY], [undefined, 'b', undefined, undefined]);
+  // phase2 --start before phase1 --wait has finished refuses and names the wait, instead of failing in exchange prepare.
+  const early = await reviewRun('phase2', '--run-dir', s.run, '--start');
+  assert.notEqual(early.status, 0);
+  assert.match(early.stdout + early.stderr, /Phase 1 has not finished[\s\S]*a run started before this version has no marker[\s\S]*phase1 --run-dir .* --wait/);
+  // The fake seats write no findings for phase1 --wait to validate, so Phase 1 is marked finished here.
+  await fs.writeFile(path.join(s.run, 'phase1-done.json'), '{}\n');
+  // Phase 2 resumes seat A on its Phase 1 session through the same setting.
+  const resume = await reviewRun('phase2', '--run-dir', s.run, '--start');
+  assert.equal(resume.status, 0, resume.stdout + resume.stderr);
+  const a2 = await settled(path.join(s.run, 'phase2', 'A', 'result.json'));
+  assert.equal(a2.status, 'completed', a2.error);
+  assert.ok(JSON.parse(a2.finalMessage).argv.includes('--resume'), 'the seat was resumed');
+  assert.deepEqual([seen(a2).SEAT_A_VAR, seen(a2).SEAT_OTHER_VAR, seen(a2).ANTHROPIC_API_KEY], ['a', undefined, 'fixture-key']);
+  // The dispatcher in the foreground with the flags review-run builds from the same setting, without the key opt-in.
+  const folder = path.join(s.base, 'foreground');
+  await fs.mkdir(folder);
+  await fs.writeFile(path.join(folder, 'brief.txt'), '{}');
+  const fg = spawnSync(process.execPath, [path.join(SCRIPTS, 'claude-dispatch.mjs'), '--brief', path.join(folder, 'brief.txt'), '--cd', s.target, '--model', 'model-A', '--env-passthrough', 'SEAT_A_VAR', '--timeout', '60'], { encoding: 'utf8', env, timeout: 90000 });
+  assert.equal(fg.status, 0, fg.stderr);
+  const own = seen(JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8')));
+  assert.deepEqual([own.SEAT_A_VAR, own.SEAT_OTHER_VAR, own.ANTHROPIC_API_KEY], ['a', undefined, undefined]);
+});
+
 test('phase2 skips a seat whose peer had nothing to rebut and does not wait for it', async (t) => {
   const s = await setup(t);
   await s.ctl({ skipped: { A: 'seat B has no findings' } });
@@ -525,7 +669,7 @@ test('audit --prepare flips once, stages the auditor folder outside the run dire
   const again = await s.rr('audit', '--run-dir', s.run, '--prepare');
   assert.equal(again.code, 1, 'a second prepare finds the staged folder non-empty');
   assert.match(again.lines.at(-2), /^FAILED audit-prep: .* is not empty/);
-  assert.ok(again.lines.includes('flip: kept the earlier coin flip'));
+  assert.ok(!again.lines.some((l) => /^flip:/.test(l)), 'refused before any step runs');
 });
 
 async function prepared(t, options) {
@@ -534,8 +678,8 @@ async function prepared(t, options) {
   return s;
 }
 
-test('audit --finish with a CLI auditor: brief with the requested depth, dispatch, translate, scorecard, clear-cache, in the documented order', async (t) => {
-  const s = await prepared(t, { flags: { auditDepth: 'full', falsification: true } });
+test('audit --finish with a CLI auditor: the full-audit brief, dispatch, translate, scorecard, clear-cache, in the documented order', async (t) => {
+  const s = await prepared(t, { flags: { falsification: true } });
   await fs.writeFile(path.join(s.run, 'phase3', 'verification-X1.md'), 'verified\n');
   const before = (await s.calls()).length;
   const r = await s.rr('audit', '--run-dir', s.run, '--finish');
@@ -544,7 +688,7 @@ test('audit --finish with a CLI auditor: brief with the requested depth, dispatc
   assert.deepEqual(names(calls), ['blind-relabel:scan', 'build-brief:--mode', 'claude-dispatch:start', 'claude-dispatch:--wait', 'blind-relabel:translate', 'blind-relabel:scorecard', 'blind-relabel:clear-cache']);
   const [, brief, dispatch, , translate] = calls;
   assert.equal(s.flag(brief, '--mode'), 'auditor');
-  assert.equal(s.flag(brief, '--audit-depth'), 'full', 'the requested depth reaches the auditor brief');
+  assert.equal(brief.argv.includes('--audit-depth'), false, 'the auditor brief has one depth: every claim');
   assert.equal(s.flag(brief, '--out'), path.join(`${s.run}-audit-dispatch`, 'auditor-brief.txt'));
   assert.equal(s.flag(brief, '--output-path'), path.join(`${s.run}-audit-input`, 'findings.audit.json'));
   assert.equal(s.flag(brief, '--run-dir'), s.run);
@@ -553,7 +697,7 @@ test('audit --finish with a CLI auditor: brief with the requested depth, dispatc
   assert.equal(s.flag(translate, '--audit-depth'), 'full');
   assert.equal(s.flag(translate, '--verification-dir'), path.join(s.run, 'phase3'));
   assert.equal(await fs.readFile(path.join(s.run, 'phase3', 'findings.audit.json'), 'utf8'), '{"fake":true}\n');
-  assert.match(r.lines.at(-1), /^next: write the manifest/);
+  assert.match(r.lines.at(-1), /^next: run: review-run manifest --run-dir .*, then review-run report --run-dir /);
 });
 
 test('audit --finish after a refused translate and a corrected auditor file keeps the refused copy and continues', async (t) => {
@@ -561,27 +705,149 @@ test('audit --finish after a refused translate and a corrected auditor file keep
   await s.ctl({ translateExit: 1 });
   const refused = await s.rr('audit', '--run-dir', s.run, '--finish');
   assert.equal(refused.code, 1, refused.out + refused.err);
-  assert.match(refused.lines.join('\n'), /FAILED translate/);
+  // The refusal is the auditor's file, named as such, with the reason; the refused copy is moved aside at once.
+  assert.match(refused.lines.at(-2), /^FAILED auditor output: the auditor's file was refused \(kept as findings\.audit\.attempt-1\.json\): translate: prose field contains a claim ID/);
+  assert.match(refused.lines.at(-1), /dispatches the auditor again/);
   const auditFile = path.join(s.run, 'phase3', 'findings.audit.json');
-  assert.equal(await fs.readFile(auditFile, 'utf8'), '{"fake":true}\n');
-  await fs.writeFile(path.join(`${s.run}-audit-input`, 'findings.audit.json'), '{"corrected":true}\n');
+  assert.equal(await fs.readFile(path.join(s.run, 'phase3', 'findings.audit.attempt-1.json'), 'utf8'), '{"fake":true}\n');
+  await assert.rejects(fs.access(auditFile));
+  assert.match(await fs.readFile(path.join(s.run, 'phase3', 'prompt-auditor-fix.txt'), 'utf8'), /was refused: translate: prose field contains a claim ID\..*rewrite it in one write/);
+  // Round 6: a long reason reaches the auditor whole (the step line cuts it at 220 characters; its instruction is at the end).
+  const long = 'blind-relabel: prose field "findings.0.suggested_fix.0" contains "X1", an anonymous claim ID of this run -- prose fields are copied verbatim (never ID-rewritten), so this would publish an unresolved label; cite claims only in origins/peer_responses/verifications and re-run the auditor output';
+  // Field run: the CLI auditor's result.json and output are moved aside, so a plain rerun dispatches it again.
+  const dispatched = async () => (await s.calls()).filter((c) => c.script === 'claude-dispatch.mjs' && c.argv?.includes('--brief')).length;
+  const before = await dispatched();
+  await s.ctl({ translateExit: 1, translateMessage: long });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 1);
+  assert.equal(await dispatched(), before + 1, 'the rerun dispatched the auditor again');
+  assert.ok((await fs.readFile(path.join(s.run, 'phase3', 'prompt-auditor-fix.txt'), 'utf8')).includes(`was refused: ${long.slice('blind-relabel: '.length)}. Read the Output`));
   await s.ctl({});
-  const dispatches = (await s.calls()).filter((c) => c.script === 'claude-dispatch.mjs').length;
   const done = await s.rr('audit', '--run-dir', s.run, '--finish');
   assert.equal(done.code, 0, done.out + done.err);
-  assert.equal((await s.calls()).filter((c) => c.script === 'claude-dispatch.mjs').length, dispatches, 'the auditor is not dispatched again');
-  assert.equal(await fs.readFile(auditFile, 'utf8'), '{"corrected":true}\n');
-  assert.equal(await fs.readFile(path.join(s.run, 'phase3', 'findings.audit.attempt-1.json'), 'utf8'), '{"fake":true}\n');
-  assert.ok(done.lines.some((l) => /findings\.audit\.attempt-1\.json/.test(l)));
+  assert.equal(await dispatched(), before + 2);
+  assert.ok(await fs.readFile(auditFile, 'utf8'));
 });
 
-test('audit --finish without falsification passes no --verification-dir and keeps the light depth [slow]', async (t) => {
+test('a refused CLI auditor dispatched again in a new temporary worktree: audit --finish and manifest both succeed and count both calls [slow]', async (t) => {
+  const s = await prepared(t, { git: true });
+  const record = (input) => ({ modelRequested: 'model-auditor', isolated: true, usageSemantics: 'per-call', usage: { input_tokens: input }, durationMs: input * 10 });
+  const wt = (name) => path.join(s.base, name);
+  await s.ctl({ translateExit: 1, worktrees: { auditor: wt('rv-aaaa1111') }, recordAuditor: record(900) });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 1);
+  await s.ctl({ worktrees: { auditor: wt('rv-bbbb2222') }, recordAuditor: record(100) });
+  const done = await s.rr('audit', '--run-dir', s.run, '--finish');
+  assert.equal(done.code, 0, done.out + done.err);
+  assert.equal((await dispatches(s)).length, 2);
+  let err = '';
+  const code = await runInProcess(['manifest', '--run-dir', s.run], { stdout: { write: () => {} }, stderr: { write: (c) => { err += c; } } });
+  assert.equal(code, 0, err);
+  const auditor = JSON.parse(await fs.readFile(path.join(s.run, 'manifest.json'), 'utf8')).actors.find((a) => a.role === 'auditor');
+  assert.deepEqual([auditor.usage.input_tokens, auditor.duration_ms, auditor.worktreePath], [1000, 10000, wt('rv-bbbb2222')]);
+  assert.doesNotMatch(err, /not passed to --reviewer-result/);
+});
+
+test('audit --finish with a native auditor whose file translate refuses: next names the fix message for the agent', async (t) => {
+  const s = await prepared(t, { auditor: { transport: 'native' } });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor')).code, 0);
+  await fs.writeFile(auditOut(s), '{"native":true}\n');
+  await s.ctl({ translateExit: 1 });
+  const r = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.lines.at(-1), /^next: send the auditor agent the message in .*prompt-auditor-fix\.txt \(never edit its file yourself\)/);
+  await assert.rejects(fs.access(auditOut(s)), 'the refused file is moved aside, so a rerun waits for the rewritten one');
+});
+
+test('audit --finish: the fix message keeps the blind labels (X/Y), and a crash of translate is not sent back to the auditor', async (t) => {
+  const s = await prepared(t, { auditor: { transport: 'native' } });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor')).code, 0);
+  await fs.mkdir(path.join(s.run, 'phase3-private'), { recursive: true });
+  await fs.writeFile(path.join(s.run, 'phase3-private', 'seat-to-audit-label.json'), JSON.stringify({ A: 'Y', B: 'X' }));
+  await fs.writeFile(auditOut(s), '{"native":true}\n');
+  await s.ctl({ translateExit: 1, translateMessage: 'blind-relabel: claim "B3" appears as an origin of more than one finding' });
+  const r = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(r.code, 1, r.out);
+  const fix = await fs.readFile(path.join(s.run, 'phase3', 'prompt-auditor-fix.txt'), 'utf8');
+  assert.match(fix, /claim "X3" appears as an origin/);
+  // A whole word: the random temp folder name in the message can hold the same letters ("review run rB3w0m").
+  assert.doesNotMatch(fix, /\bB3\b/);
+  // Mac round 4 F6: a seat file name is mapped to its audit label too, and a reason that still names a seat is never sent.
+  await fs.writeFile(auditOut(s), '{"native":true}\n');
+  await s.ctl({ translateExit: 1, translateMessage: 'blind-relabel: translated origin "A9" has no "## A9" heading in A-findings.md; refusing' });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor')).code, 1);
+  const mapped = await fs.readFile(path.join(s.run, 'phase3', 'prompt-auditor-fix.txt'), 'utf8');
+  assert.match(mapped, /origin "Y9" has no "## Y9" heading in Y-findings\.md/);
+  assert.doesNotMatch(mapped, /\b[AB]9\b|\b[AB]-findings\.md/);
+  await fs.rm(path.join(s.run, 'phase3', 'prompt-auditor-fix.txt'));
+  await fs.writeFile(auditOut(s), '{"native":true}\n');
+  await s.ctl({ translateExit: 1, translateMessage: 'blind-relabel: the claim of seat A is malformed' });
+  const named = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(named.code, 1);
+  assert.match(named.out, /names a seat, so it is not sent back to the auditor/);
+  await assert.rejects(fs.access(path.join(s.run, 'phase3', 'prompt-auditor-fix.txt')), 'no fix prompt that names a seat');
+  await fs.writeFile(auditOut(s), '{"native":true}\n');
+  await s.ctl({ translateExit: 1, translateMessage: 'blind-relabel: unexpected failure: boom' });
+  const crash = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.match(crash.lines.at(-2), /^FAILED translate: /);
+  assert.match(crash.lines.at(-1), /^next: fix "translate"/);
+});
+
+test('audit --finish removes the fix message once translate passes, so a later crash is not reported as a refused auditor file', async (t) => {
+  const s = await prepared(t, { auditor: { transport: 'native' } });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor')).code, 0);
+  const fix = path.join(s.run, 'phase3', 'prompt-auditor-fix.txt');
+  await fs.writeFile(auditOut(s), '{"native":true}\n');
+  await s.ctl({ translateExit: 1 });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor')).code, 1);
+  assert.ok(fsSync.existsSync(fix), 'the refusal wrote the fix message');
+  await fs.writeFile(auditOut(s), '{"native":"rewritten"}\n');
+  await s.ctl({});
+  const done = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(done.code, 0, done.out + done.err);
+  assert.equal(fsSync.existsSync(fix), false, 'a passed translate removes the fix message');
+  // A resumed auditor's changed file archives the findings; translate then crashes, which is not the auditor's to fix.
+  await fs.writeFile(auditOut(s), '{"native":"resumed"}\n');
+  await s.ctl({ translateExit: 1, translateMessage: 'blind-relabel: unexpected failure: boom' });
+  const crash = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.match(crash.lines.at(-2), /^FAILED translate: /);
+  assert.equal(fsSync.existsSync(path.join(s.run, 'phase3', 'findings.json')), false, 'the earlier findings were archived');
+  assert.equal(fsSync.existsSync(fix), false);
+  const { loadRun } = await import('../build-report.mjs');
+  await fs.mkdir(path.join(s.run, 'phase1'), { recursive: true });
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 x\nSeverity: LOW\nSame shape elsewhere: none found\n\n## Checks performed\n- ok.\nBlocked: none\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## No findings\n\nBlocked: none\n');
+  const report = await loadRun(s.run);
+  assert.equal(report.status, 'INCOMPLETE');
+  assert.ok(!report.caveats.some((c) => c.startsWith("The auditor's file was refused")), report.caveats.join(' | '));
+});
+
+test('audit --finish without falsification passes no --verification-dir; translate reads a new run as full and an older run by its own depth [slow]', async (t) => {
   const s = await prepared(t);
   assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 0);
-  const calls = await s.calls();
-  const translate = calls.find((c) => c.argv[0] === 'translate');
+  const translate = (await s.calls()).find((c) => c.argv[0] === 'translate');
   assert.equal(translate.argv.includes('--verification-dir'), false);
-  assert.equal(s.flag(translate, '--audit-depth'), 'light');
+  assert.equal(s.flag(translate, '--audit-depth'), 'full');
+  const old = await prepared(t, { flags: { auditDepth: 'light' } });
+  assert.equal((await old.rr('audit', '--run-dir', old.run, '--finish')).code, 0);
+  assert.equal(old.flag((await old.calls()).find((c) => c.argv[0] === 'translate'), '--audit-depth'), 'light', 'a run.json from an older run keeps its depth');
+  // Restructure round 1 F7: a deep verify the user asked for after the audit (the run started without falsification)
+  // is staged and read by translate; with no verifier file nothing is required.
+  const late = await prepared(t);
+  await fs.writeFile(path.join(late.run, 'phase3', 'verification-X1.md'), 'verified\n');
+  const r = await late.rr('audit', '--run-dir', late.run, '--finish');
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(late.flag((await late.calls()).find((c) => c.argv[0] === 'translate'), '--verification-dir'), path.join(late.run, 'phase3'));
+  assert.equal(await fs.readFile(path.join(`${late.run}-audit-input`, 'verification-X1.md'), 'utf8'), 'verified\n');
+  assert.equal(r.lines.some((l) => /verification file\(s\) in phase3 are ignored/.test(l)), false);
+  // A deep verify after a finished audit needs a native auditor, which can be resumed (phase-3 file; that route is the
+  // restructure round 3 F6 test); with a CLI auditor the step stops and says to run the review again with falsification.
+  const after = await prepared(t);
+  assert.equal((await after.rr('audit', '--run-dir', after.run, '--finish')).code, 0);
+  await fs.writeFile(path.join(after.run, 'phase3', 'findings.json'), '{"earlier":true}\n');
+  await fs.writeFile(path.join(after.run, 'phase3', 'verification-X1.md'), 'verified\n');
+  const rerun = await after.rr('audit', '--run-dir', after.run, '--finish');
+  assert.equal(rerun.code, 1, rerun.out + rerun.err);
+  assert.match(rerun.out, /FAILED stage verification: verification-X1\.md staged after the audit, but a CLI auditor cannot be resumed to read them: run the review again with falsification/);
+  assert.equal(await fs.readFile(path.join(after.run, 'phase3', 'findings.json'), 'utf8'), '{"earlier":true}\n', 'the finished findings stay');
 });
 
 test('audit --finish with a native auditor builds the brief in the staged folder and waits for the auditor output', async (t) => {
@@ -596,6 +862,16 @@ test('audit --finish with a native auditor builds the brief in the staged folder
   assert.equal(second.code, 0, second.out + second.err);
   assert.equal((await s.calls()).filter((c) => c.script === 'build-brief.mjs').length, 1, 'the brief is not rebuilt on the rerun');
   assert.equal(await fs.readFile(path.join(s.run, 'phase3', 'findings.audit.json'), 'utf8'), '{"native":true}\n');
+  // Restructure round 2 F1: after the audit finished, a changed file (a resumed auditor) waits for --native-done again.
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 0, 'an unchanged file needs nothing new');
+  await fs.writeFile(path.join(`${s.run}-audit-input`, 'findings.audit.json'), '{"native":"resumed, half written"}\n');
+  const early = await s.rr('audit', '--run-dir', s.run, '--finish');
+  assert.equal(early.code, 3, early.out);
+  assert.match(early.out, /changed since the audit finished \(a resumed auditor\) but a file alone cannot show the agent finished/);
+  assert.equal(await fs.readFile(path.join(s.run, 'phase3', 'findings.audit.json'), 'utf8'), '{"native":true}\n', 'the earlier copy is untouched');
+  const done = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(done.code, 0, done.out + done.err);
+  assert.equal(await fs.readFile(path.join(s.run, 'phase3', 'findings.audit.json'), 'utf8'), '{"native":"resumed, half written"}\n');
 });
 
 test('audit --finish refuses a CLI auditor when the target no longer matches the Phase 1 fingerprint', async (t) => {
@@ -633,6 +909,9 @@ test('audit --finish removes every actor worktree named in the result files and 
     await assert.rejects(fs.access(wt(name)));
     await assert.rejects(fs.access(`${wt(name)}.snapshot-complete`));
   }
+  const again = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(again.code, 0, again.out + again.err);
+  assert.ok(again.lines.includes('worktrees: removed 0'), 'a rerun counts what it removed, not what was recorded');
 });
 
 test('a run.json made for the other skill is refused', async (t) => {
@@ -649,18 +928,22 @@ test('a missing run.json fails the run.json step', async (t) => {
   const r = await s.rr('phase1', '--run-dir', s.run, '--start');
   assert.equal(r.code, 1);
   assert.match(r.lines.at(-2), /^FAILED run\.json: cannot read run descriptor/);
+  // Overnight queue: no run.json means the host preflight refused or never ran; the next line says to run it.
+  assert.match(r.lines.at(-1), /^next: run\.json is written by the host preflight: run preflight\.mjs --host <host> .*--run-dir .*, then rerun: review-run phase1/);
+  await fs.writeFile(path.join(s.run, 'run.json'), '{ not json');
+  assert.match((await s.rr('phase1', '--run-dir', s.run, '--start')).lines.at(-1), /^next: fix "run\.json"/, 'a broken run.json is still "fix"');
 });
 
-test('the CLI itself runs the sequencer through the REVIEW_RUN_SCRIPTS_DIR hook with real child processes [slow]', async (t) => {
-  const pair = CURRENT === 'pair-review';
-  const s = await setup(t, { skill: CURRENT, ...(pair ? { seatB: { provider: 'anthropic', runtime: 'claude', model: 'model-B' } } : {}) });
-  const r = spawnSync(process.execPath, [path.join(SCRIPTS, 'review-run.mjs'), 'phase1', '--run-dir', s.run, '--start'], {
-    encoding: 'utf8', env: { ...process.env, REVIEW_RUN_SCRIPTS_DIR: s.hook },
-  });
-  assert.equal(r.status, 0, r.stdout + r.stderr);
-  const lines = r.stdout.trim().split('\n');
-  assert.match(lines.at(-1), /^next: run: review-run phase1 --run-dir .* --wait$/);
-  assert.deepEqual(names(await s.calls()), ['build-brief:--mode', 'claude-dispatch:start', 'build-brief:--mode', pair ? 'claude-dispatch:start' : 'codex-dispatch:start']);
+test('the CLI entry runs: status of a fresh run folder, and a usage error with exit 2; REVIEW_RUN_SCRIPTS_DIR no longer replaces a step [slow]', async (t) => {
+  const s = await setup(t, { skill: CURRENT, ...(CURRENT === 'pair-review' ? { seatB: { provider: 'anthropic', runtime: 'claude', model: 'model-B' } } : {}) });
+  const cli = (...args) => spawnSync(process.execPath, [path.join(SCRIPTS, 'review-run.mjs'), ...args], { encoding: 'utf8', env: { ...process.env, REVIEW_RUN_SCRIPTS_DIR: s.hook } });
+  const status = cli('status', '--run-dir', s.run);
+  assert.equal(status.status, 0, status.stdout + status.stderr);
+  assert.match(status.stdout, /: not started; next: phase1 --start/);
+  const bad = cli('phase1', '--run-dir', s.run);
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /phase1 needs one of --start \/ --wait/);
+  assert.equal((await s.calls()).length, 0, 'no fake step ran');
 });
 
 const auditDir = (s) => `${s.run}-audit-dispatch`;
@@ -735,6 +1018,69 @@ test('a CLI seat an earlier --start never started (brief, no result.json) is dis
   assert.equal(await fs.readFile(path.join(s.run, 'phase2', 'A', 'delta-brief.txt'), 'utf8'), 'delta brief\n');
 });
 
+test('review rules: --rules <run-dir>/review-rules.md goes to the seat and auditor briefs only when run.json has reviewRules', async (t) => {
+  const briefs = async (s) => (await s.calls()).filter((c) => c.script === 'build-brief.mjs');
+  const plain = await setup(t);
+  for (const half of [['phase1', '--start'], ['phase1', '--wait'], ['phase2', '--start'], ['phase2', '--wait']]) assert.equal((await plain.rr(half[0], '--run-dir', plain.run, half[1])).code, 0);
+  assert.equal((await plain.rr('audit', '--run-dir', plain.run, '--prepare')).code, 0);
+  assert.ok((await briefs(plain)).every((c) => !c.argv.includes('--rules')), 'no rules, no flag');
+  const s = await setup(t);
+  const file = path.join(s.run, 'run.json');
+  await fs.writeFile(file, JSON.stringify({ ...JSON.parse(await fs.readFile(file, 'utf8')), reviewRules: { mode: 'head', sha256: 'x', changedByTarget: false, files: [] } }));
+  for (const half of [['phase1', '--start'], ['phase1', '--wait'], ['phase2', '--start'], ['phase2', '--wait']]) assert.equal((await s.rr(half[0], '--run-dir', s.run, half[1])).code, 0);
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--prepare')).code, 0);
+  const withRules = (await briefs(s)).filter((c) => ['phase1', 'auditor'].includes(s.flag(c, '--mode')));
+  assert.ok(withRules.length >= 2);
+  for (const c of withRules) assert.equal(s.flag(c, '--rules'), path.join(s.run, 'review-rules.md'), s.flag(c, '--mode'));
+});
+
+test('audit --prepare: empty staged findings files are not a clean zero-claim review; the auditor still runs', async (t) => {
+  const s = await setup(t);
+  await s.ctl({ emptyStaged: true });
+  const r = await s.rr('audit', '--run-dir', s.run, '--prepare');
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.ok(!r.lines.some((l) => /no claims from either seat/.test(l)), r.out);
+  await assert.rejects(fs.access(path.join(s.run, 'phase3', 'findings.json')), 'no empty findings.json is written');
+  assert.match(r.lines.at(-1), /--finish/);
+});
+
+test('a wait rerun after the exchange or the audit finished runs nothing and points to the next step', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--wait')).code, 0);
+  // An empty exchange-result.json (an interrupted write) is not a finished exchange: phase2 --wait runs finish again.
+  await fs.writeFile(path.join(s.run, 'phase2', 'exchange-result.json'), '');
+  let before = (await s.calls()).length;
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--wait')).code, 0);
+  assert.ok((await s.calls()).slice(before).some((c) => c.argv[0] === 'finish'), 'an empty record is not taken as done');
+  await fs.writeFile(path.join(s.run, 'phase2', 'exchange-result.json'), '{"appended":["A","B"]}\n');
+  before = (await s.calls()).length;
+  for (const phase of ['phase2', 'phase1']) {
+    const r = await s.rr(phase, '--run-dir', s.run, '--wait');
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.match(r.lines.at(-1), /^next: run: review-run audit .*--prepare$/, `${phase} after the exchange`);
+  }
+  // An older record with conceded HIGH claims gets the same next line: every audit is full.
+  await fs.writeFile(path.join(s.run, 'phase2', 'exchange-result.json'), '{"concede":8,"dispute":0,"high_conceded":2}\n');
+  for (const phase of ['phase2', 'phase1']) {
+    const r = await s.rr(phase, '--run-dir', s.run, '--wait');
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.match(r.lines.at(-1), /^next: run: review-run audit .*--prepare$/, `${phase} with an older record`);
+  }
+  assert.deepEqual(await s.calls().then((c) => c.slice(before)), [], 'neither the seats, validate nor exchange finish run again');
+  await fs.mkdir(path.join(s.run, 'phase3'), { recursive: true });
+  await fs.writeFile(path.join(s.run, 'phase3', 'findings.json'), '{"findings":[]}\n');
+  before = (await s.calls()).length;
+  for (const phase of ['phase1', 'phase2']) {
+    const r = await s.rr(phase, '--run-dir', s.run, '--wait');
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.match(r.lines.at(-1), /^next: run: review-run manifest --run-dir .* then review-run report --run-dir /);
+  }
+  assert.deepEqual((await s.calls()).slice(before), []);
+});
+
 test('a CLI seat whose result.json exists but cannot be parsed yet is waited for, not dispatched a second time', async (t) => {
   const s = await setup(t);
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
@@ -801,6 +1147,28 @@ test('F4: an auditor that wrote into the target fails the finish step before tra
   assert.equal((await s.calls()).some((c) => c.argv[0] === 'translate'), false);
 });
 
+test('zero-claim finish: an empty findings.json from an interrupted write is written again, and a changed target is refused', async (t) => {
+  const { computeSnapshotHash } = await import('../preflight.mjs');
+  const s = await setup(t);
+  s.desc.fingerprint = { head: null, diffSha256: null, untrackedSha256: null, snapshotHash: await computeSnapshotHash(s.target) };
+  await fs.rm(path.join(s.run, 'run.json'));
+  await writeRunDescriptor(s.run, s.desc);
+  await s.ctl({ zeroClaims: true });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--prepare')).code, 0);
+  const file = path.join(s.run, 'phase3', 'findings.json');
+  await fs.writeFile(file, '');
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 0);
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).zero_claims, true, 'the empty file was replaced');
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).audit_depth, 'full', 'the record names the one depth');
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish', '--audit-depth', 'full')).code, 2, 'there is no depth to choose');
+  await fs.rm(file);
+  await fs.writeFile(path.join(s.target, 'file.txt'), 'changed after the seats reviewed it\n');
+  const r = await s.rr('audit', '--run-dir', s.run, '--finish');
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.lines.at(-2), /^FAILED fingerprint: /);
+  await assert.rejects(fs.access(file), 'no zero-claim record for a changed target');
+});
+
 test('F4: the target fingerprint is checked again before translate', async (t) => {
   const { computeSnapshotHash } = await import('../preflight.mjs');
   const s = await prepared(t, { auditor: { transport: 'native' } });
@@ -814,6 +1182,86 @@ test('F4: the target fingerprint is checked again before translate', async (t) =
   assert.equal(r.code, 1, r.out);
   assert.match(r.lines.at(-2), /^FAILED fingerprint: /);
   assert.equal((await s.calls()).some((c) => c.argv[0] === 'translate'), false);
+});
+
+test('field northwind-1a: phase1 --wait stops on drift with a next: line naming --accept-drift; with it the run goes on and records step phase1; phase1 --start never accepts it', async (t) => {
+  const { computeSnapshotHash, fingerprintFiles } = await import('../preflight.mjs');
+  const s = await setup(t);
+  const file = path.join(s.run, 'run.json');
+  const desc = JSON.parse(await fs.readFile(file, 'utf8'));
+  desc.fingerprint = { head: null, diffSha256: null, untrackedSha256: null, snapshotHash: await computeSnapshotHash(s.target) };
+  await fs.writeFile(file, JSON.stringify(desc));
+  await fs.writeFile(path.join(s.run, 'fingerprint-files.json'), JSON.stringify(await fingerprintFiles(s.target)));
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  await fs.writeFile(path.join(s.target, 'file.txt'), 'changed by another session\n');
+  const refused = await s.rr('phase1', '--run-dir', s.run, '--wait');
+  assert.equal(refused.code, 1, refused.out);
+  assert.match(refused.lines.at(-2), /^FAILED fingerprint: .*changed: file\.txt/);
+  assert.match(refused.lines.at(-1), /rerun this command with --accept-drift/);
+  const accepted = await s.rr('phase1', '--run-dir', s.run, '--wait', '--accept-drift');
+  assert.equal(accepted.code, 0, accepted.out);
+  assert.ok(accepted.lines.some((l) => /accepted with --accept-drift.*a seat still working may have read the changed files/.test(l)), accepted.out);
+  const record = JSON.parse(await fs.readFile(path.join(s.run, 'phase3', 'drift-accepted.json'), 'utf8'));
+  assert.deepEqual(record.accepted.map((a) => [a.step, a.files]), [['phase1', ['file.txt']]]);
+  const s2 = await setup(t);
+  const file2 = path.join(s2.run, 'run.json');
+  const desc2 = JSON.parse(await fs.readFile(file2, 'utf8'));
+  desc2.fingerprint = { head: null, diffSha256: null, untrackedSha256: null, snapshotHash: 'not-the-current-hash' };
+  await fs.writeFile(file2, JSON.stringify(desc2));
+  assert.equal((await s2.rr('phase1', '--run-dir', s2.run, '--start', '--accept-drift')).code, 1, 'nothing paid has run yet, so --start stays strict');
+});
+
+test('audit --finish names the files that drifted after Phase 1, and --accept-drift goes on and records them for the manifest', async (t) => {
+  const { computeSnapshotHash, fingerprintFiles } = await import('../preflight.mjs');
+  const { initBody } = await import('../build-manifest.mjs');
+  const s = await prepared(t, { auditor: { transport: 'native' } });
+  s.desc.fingerprint = { head: null, diffSha256: null, untrackedSha256: null, snapshotHash: await computeSnapshotHash(s.target) };
+  await fs.rm(path.join(s.run, 'run.json'));
+  await writeRunDescriptor(s.run, s.desc);
+  await fs.writeFile(path.join(s.run, 'fingerprint-files.json'), JSON.stringify(await fingerprintFiles(s.target)));
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor')).code, 0);
+  await fs.writeFile(path.join(s.target, 'file.txt'), 'changed by another session\n');
+  await fs.writeFile(auditOut(s), '{"native":true}\n');
+  const refused = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(refused.code, 1, refused.out);
+  assert.match(refused.lines.at(-2), /^FAILED fingerprint: .*changed: file\.txt/);
+  assert.match(refused.lines.at(-1), /--accept-drift/);
+  const accepted = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor', '--accept-drift');
+  assert.equal(accepted.code, 0, accepted.out);
+  assert.equal(accepted.lines.filter((l) => /warning: the target changed after Phase 1 \(changed: file\.txt\); accepted with --accept-drift.*the auditor reads the current target/.test(l)).length, 1, accepted.out);
+  assert.match(refused.lines.at(-1), /rerun: review-run audit --run-dir .* --finish --accept-drift \(the manifest/);
+  assert.equal((await s.calls()).some((c) => c.argv[0] === 'translate'), true);
+  const record = JSON.parse(await fs.readFile(path.join(s.run, 'phase3', 'drift-accepted.json'), 'utf8'));
+  assert.deepEqual(record.accepted.map((a) => a.files), [['file.txt']]);
+  assert.deepEqual((await initBody(s.desc, s.run)).drift_accepted.map((a) => a.files), [['file.txt']]);
+});
+
+test('audit --finish --accept-drift with a CLI auditor prints the drift warning once, although the target is checked three times', async (t) => {
+  const { computeSnapshotHash, fingerprintFiles } = await import('../preflight.mjs');
+  const s = await prepared(t);
+  s.desc.fingerprint = { head: null, diffSha256: null, untrackedSha256: null, snapshotHash: await computeSnapshotHash(s.target) };
+  await fs.rm(path.join(s.run, 'run.json'));
+  await writeRunDescriptor(s.run, s.desc);
+  await fs.writeFile(path.join(s.run, 'fingerprint-files.json'), JSON.stringify(await fingerprintFiles(s.target)));
+  await fs.writeFile(path.join(s.target, 'file.txt'), 'changed by another session\n');
+  const r = await s.rr('audit', '--run-dir', s.run, '--finish', '--accept-drift');
+  assert.equal(r.code, 0, r.out);
+  assert.equal(r.lines.filter((l) => l.startsWith('warning: the target changed after Phase 1')).length, 1, r.out);
+});
+
+test('a verifier file with Verdict REFUTED and Basis INFERENCE fails staging before the auditor runs; with cited lines it is staged [slow]', async (t) => {
+  const stage = async (body) => {
+    const s = await prepared(t, { flags: { falsification: true } });
+    await fs.writeFile(path.join(s.run, 'phase3', 'verification-Y1.md'), body);
+    return { s, r: await s.rr('audit', '--run-dir', s.run, '--finish') };
+  };
+  const inferred = await stage('Claim: Y1\nVerdict: REFUTED\nBasis: INFERENCE\nEvidence: it looks fine\n');
+  assert.equal(inferred.r.code, 1, inferred.r.out);
+  assert.match(inferred.r.lines.at(-2), /^FAILED stage verification: verification-Y1\.md says Verdict REFUTED with Basis INFERENCE/);
+  await assert.rejects(fs.access(path.join(`${inferred.s.run}-audit-input`, 'verification-Y1.md')), 'the file is not staged');
+  // A fenced example is not the verdict, above the real lines or in the evidence.
+  const cited = await stage('```\nVerdict: REFUTED\nBasis: INFERENCE\n```\nClaim: Y1\nVerdict: REFUTED\nBasis: STATIC_TRACE\nEvidence: a.js:3 returns early\n```\nBasis: INFERENCE\n```\n');
+  assert.equal(cited.r.code, 0, cited.r.out);
 });
 
 test('F1: only verification-<anonymous id>.md files that match a staged claim are staged, and each is scanned [slow]', async (t) => {
@@ -850,26 +1298,6 @@ test('F5: two CLI seats need two distinct init model ids; a missing id is a fail
   assert.equal((await s.calls()).some((c) => c.script === 'blind-relabel.mjs'), false);
 });
 
-test('F9: an OpenCode dispatcher that exits without a result.json fails the wait instead of running forever [slow]', async (t) => {
-  const previous = process.env.REVIEW_RUN_SCRIPTS_DIR;
-  t.after(() => { if (previous === undefined) delete process.env.REVIEW_RUN_SCRIPTS_DIR; else process.env.REVIEW_RUN_SCRIPTS_DIR = previous; });
-  const s = await setup(t, { seatA: { transport: 'native' }, seatB: { provider: 'opencode', runtime: 'opencode', model: 'opencode/fake' } });
-  process.env.REVIEW_RUN_SCRIPTS_DIR = s.hook;
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  for (let i = 0; i < 100 && !(await s.calls()).some((c) => c.script === 'opencode-dispatch.mjs'); i++) await new Promise((resolve) => setTimeout(resolve, 100));
-  const workerLog = path.join(s.run, 'phase1', 'B', 'dispatch-worker.log');
-  for (let i = 0; i < 300; i++) {
-    const log = await fs.readFile(workerLog, 'utf8').catch(() => '');
-    if (log.includes('refused to start')) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
-  const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-done', 'A');
-  assert.equal(r.code, 1, r.out);
-  assert.match(r.lines.at(-2), /^FAILED wait seat B: the opencode dispatcher \(pid \d+\) exited without writing a result\.json: relay: refused to start/);
-});
-
 test('F10: audit finish removes a CLI verifier worktree found in the verifier output folder [slow]', async (t) => {
   const s = await setup(t, { git: true, auditor: { transport: 'native' } });
   const folder = path.join(s.run, 'phase3', 'verifier-1');
@@ -899,7 +1327,7 @@ function realScanRunner(hook) {
   return (name, argv) => {
     if (name !== 'blind-relabel.mjs' || argv[0] !== 'scan') return fake(name, argv);
     fsSync.appendFileSync(path.join(hook, 'calls.log'), JSON.stringify({ script: name, argv }) + '\n');
-    return spawnSync(process.execPath, [path.join(SCRIPTS, 'blind-relabel.mjs'), ...argv], { encoding: 'utf8' });
+    return relabelStep(argv).then((r) => ({ status: r.code, stdout: r.stdout, stderr: r.stderr }));
   };
 }
 
@@ -907,7 +1335,7 @@ async function finishWithRealScan(s, io = {}) {
   let out = '';
   let err = '';
   const code = await runInProcess(['audit', '--run-dir', s.run, '--finish'], {
-    stdout: { write: (c) => { out += c; } }, stderr: { write: (c) => { err += c; } }, runner: realScanRunner(s.hook), skill: s.state.runAs, ...io,
+    stdout: { write: (c) => { out += c; } }, stderr: { write: (c) => { err += c; } }, steps: realScanRunner(s.hook), skill: s.state.runAs, ...io,
   });
   return { code, out, err, lines: out.trim().split('\n') };
 }
@@ -915,8 +1343,8 @@ async function finishWithRealScan(s, io = {}) {
 async function stageRealScanRun(t, evidence, options = {}) {
   const s = await prepared(t, { flags: { falsification: true }, ...options });
   await fs.mkdir(path.join(s.run, 'phase1'), { recursive: true });
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim a\n');
-  await fs.writeFile(path.join(s.run, 'phase1', 'B-findings.md'), '## B1\nclaim b\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim a\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'B-findings.md'), '## B1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim b\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   await fs.mkdir(path.join(s.run, 'phase2'), { recursive: true });
   await fs.writeFile(path.join(s.run, 'phase2', 'peer-view-for-A.md'), '## P1\nx\n');
   await fs.writeFile(path.join(s.run, 'phase2', 'peer-view-for-B.md'), '## P1\nx\n');
@@ -930,6 +1358,15 @@ test('R2-F3: a verification file that cites a real seat claim ID is stopped by t
   assert.equal(r.code, 1, r.out + r.err);
   assert.match(r.lines.at(-2), /^FAILED stage verification: .*1 real claim-ID leak/);
   await assert.rejects(fs.access(path.join(`${s.run}-audit-input`, 'verification-X1.md')), 'a leaking file is not copied to the auditor folder');
+});
+
+test('Linux round linux-r4 B4: a verification file that names the run folder is stopped and never staged', async (t) => {
+  const s = await stageRealScanRun(t, 'Evidence: the code at file.txt line 1 shows the defect.');
+  await fs.writeFile(path.join(s.run, 'phase3', 'verification-X1.md'), `Verdict: confirmed.\n\nEvidence: compared with ${path.join(s.run, 'phase1')}.\n`);
+  const r = await finishWithRealScan(s);
+  assert.equal(r.code, 1, r.out + r.err);
+  assert.match(r.lines.at(-2), /^FAILED stage verification: verification-X1\.md names the run folder/);
+  await assert.rejects(fs.access(path.join(`${s.run}-audit-input`, 'verification-X1.md')), 'not copied to the auditor folder');
 });
 
 test('R2-F3: the verification scan gets the Phase 1 dir, both seats and the Phase 2 dir; a clean file is staged', async (t) => {
@@ -1085,34 +1522,6 @@ test('R2-F2: audit --finish keeps waiting for an auditor whose worker is alive',
   assert.equal((await dispatches(s)).length, 0);
 });
 
-async function opencodeWait(t, { pid, startedAt, logText }) {
-  const s = await setup(t, { seatA: { transport: 'native' }, seatB: { provider: 'opencode', runtime: 'opencode', model: 'opencode/fake' } });
-  const folder = path.join(s.run, 'phase1', 'B');
-  await fs.mkdir(folder, { recursive: true });
-  await fs.writeFile(path.join(folder, 'dispatch-pid.json'), JSON.stringify({ pid, startedAt }));
-  await fs.writeFile(path.join(folder, 'dispatch-worker.log'), logText);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
-  return s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '2', '--native-done', 'A');
-}
-
-test('R2-F8: an OpenCode dispatcher pid that another process now holds does not keep the seat running [slow]', async (t) => {
-  const child = liveChild(t);
-  const r = await opencodeWait(t, { pid: child.pid, startedAt: new Date(Date.now() - 3600000).toISOString(), logText: '' });
-  assert.ok(r.lines.some((l) => /^seat B: the previous opencode dispatcher \(pid \d+\) ended without a result\.json; dispatched again/.test(l)), r.out);
-});
-
-test('R2-F8: a terminal line in dispatch-worker.log ends the wait even while the recorded pid is alive', async (t) => {
-  const child = liveChild(t);
-  const r = await opencodeWait(t, { pid: child.pid, startedAt: new Date().toISOString(), logText: 'relay: unexpected failure: boom\n' });
-  assert.ok(r.lines.some((l) => /^seat B: the previous opencode dispatcher \(pid \d+\) ended without a result\.json; dispatched again/.test(l)), r.out);
-});
-
-test('R2-F8: a live matching dispatcher with only progress lines in its log is still running', async (t) => {
-  const child = liveChild(t);
-  const r = await opencodeWait(t, { pid: child.pid, startedAt: new Date().toISOString(), logText: 'relay: kept the earlier result.json as result.attempt-1.json\n' });
-  assert.equal(r.code, 3, r.out + r.err);
-});
-
 test('R2-F4: audit --finish removes a CLI verifier worktree from any phase3 dispatch folder, registered or not [slow]', async (t) => {
   const s = await setup(t, { git: true, auditor: { transport: 'native' } });
   const wtFor = async (folderName, file, name) => {
@@ -1163,7 +1572,7 @@ test('R2-F16: a failed Phase 1 seat is dispatched again as a new session in the 
   assert.equal(start.argv.includes('--session'), false, 'a Phase 1 retry starts a new session');
   assert.equal(s.flag(start, '--worktree'), wt);
   const doc = await fs.readFile(path.join(SCRIPTS, '..', 'references', 'phase-1-independent-passes.md'), 'utf8');
-  assert.match(doc.replace(/\s+/g, ' '), /dispatches that seat again as a new session in the same worktree; it does not resume the failed session/);
+  assert.match(doc.replace(/\s+/g, ' '), /dispatches that seat again as a new session in the same worktree[^.]*it does not resume the failed session/);
 });
 
 // ---- Final review round (fix4) ----
@@ -1256,98 +1665,6 @@ test('final-F7: a CLI seat or auditor result that carries a touchedFilesNote rep
   assert.ok((await clean.rr('audit', '--run-dir', clean.run, '--finish')).lines.includes('auditor: completed'), 'a clean inventory prints no note');
 });
 
-async function opencodeSeat(t) {
-  const previous = process.env.REVIEW_RUN_SCRIPTS_DIR;
-  t.after(() => { if (previous === undefined) delete process.env.REVIEW_RUN_SCRIPTS_DIR; else process.env.REVIEW_RUN_SCRIPTS_DIR = previous; });
-  const s = await setup(t, { seatA: { transport: 'native' }, seatB: { provider: 'opencode', runtime: 'opencode', model: 'opencode/fake' } });
-  process.env.REVIEW_RUN_SCRIPTS_DIR = s.hook;
-  s.folder = path.join(s.run, 'phase1', 'B');
-  s.starts = async () => (await s.calls()).filter((c) => c.script === 'opencode-dispatch.mjs').length;
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  for (let i = 0; i < 100 && (await s.starts()) === 0; i++) await new Promise((resolve) => setTimeout(resolve, 100));
-  await new Promise((resolve) => setTimeout(resolve, 1500));
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
-  return s;
-}
-
-test('final-F5: re-dispatching a failed OpenCode seat archives its result.json and worker log first, so the first poll never reads the old failure [slow]', async (t) => {
-  const s = await opencodeSeat(t);
-  await fs.writeFile(path.join(s.folder, 'result.json'), JSON.stringify({ status: 'error', error: 'old failure' }));
-  const staleChild = JSON.stringify({ childPid: 999999, childStartToken: 'ticks:1', childStartedAt: '2026-01-01T00:00:00.000Z' });
-  await fs.writeFile(path.join(s.folder, 'child.json'), staleChild);
-  await s.ctl({ opencodeSleepMs: 1500 });
-  const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-done', 'A');
-  assert.equal(r.code, 0, r.out + r.err);
-  assert.equal(r.out.includes('old failure'), false, 'the stale failure is not reported');
-  assert.notEqual(await fs.readFile(path.join(s.folder, 'child.json'), 'utf8').catch(() => null), staleChild, "the earlier attempt's child record is not left for the new one");
-  assert.ok(r.lines.some((l) => /^seat B: previous attempt ended with status error; dispatched again/.test(l)), r.out);
-  assert.equal(JSON.parse(await fs.readFile(path.join(s.folder, 'result.attempt-1.json'), 'utf8')).error, 'old failure');
-  assert.match(await fs.readFile(path.join(s.folder, 'dispatch-worker.attempt-1.log'), 'utf8'), /refused to start/, 'the old worker log is kept under the attempt number');
-  assert.equal((await fs.readFile(path.join(s.folder, 'dispatch-worker.log'), 'utf8')).includes('refused to start'), false, 'the new worker log starts empty');
-});
-
-test('final-F5: a quick rerun while the re-dispatched OpenCode seat still starts does not start a second dispatcher [slow]', async (t) => {
-  const s = await opencodeSeat(t);
-  await fs.writeFile(path.join(s.folder, 'result.json'), JSON.stringify({ status: 'error', error: 'old failure' }));
-  // The fake seat must outlast two review-run starts on a loaded machine; the last wait below still allows 30 s.
-  await s.ctl({ opencodeSleepMs: 8000 });
-  const before = await s.starts();
-  const first = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A');
-  assert.equal(first.code, 3, first.out + first.err);
-  const second = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A');
-  assert.equal(second.code, 3, second.out + second.err);
-  for (let i = 0; i < 100 && (await s.starts()) === before; i++) await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal((await s.starts()) - before, 1, 'one dispatcher serves both waits');
-  const done = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-done', 'A');
-  assert.equal(done.code, 0, done.out + done.err);
-  assert.equal((await s.starts()) - before, 1);
-});
-
-test('final-F4: an OpenCode dispatcher that died before writing result.json is dispatched again by the next wait [slow]', async (t) => {
-  const s = await opencodeSeat(t);
-  await fs.rm(path.join(s.folder, 'result.json'), { force: true });
-  await fs.writeFile(path.join(s.folder, 'dispatch-pid.json'), JSON.stringify({ pid: deadPid(), startedAt: new Date().toISOString() }));
-  await s.ctl({ opencodeSleepMs: 300 });
-  const before = await s.starts();
-  const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-done', 'A');
-  assert.equal(r.code, 0, r.out + r.err);
-  assert.ok(r.lines.some((l) => /^seat B: the previous opencode dispatcher \(pid \d+\) ended without a result\.json; dispatched again/.test(l)), r.out);
-  assert.equal((await s.starts()) - before, 1);
-});
-
-test('final-F4: a dispatcher whose log ended, though its pid is still held, is also dispatched again; a live one with progress lines is not [slow]', async (t) => {
-  const s = await opencodeSeat(t);
-  await fs.rm(path.join(s.folder, 'result.json'), { force: true });
-  const child = liveChild(t);
-  await fs.writeFile(path.join(s.folder, 'dispatch-pid.json'), JSON.stringify({ pid: child.pid, startedAt: new Date().toISOString() }));
-  await fs.writeFile(path.join(s.folder, 'dispatch-worker.log'), 'relay: kept the earlier result.json as result.attempt-1.json\n');
-  const before = await s.starts();
-  const running = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
-  assert.equal(running.code, 3, running.out + running.err);
-  assert.equal(await s.starts(), before, 'a live dispatcher is not started again');
-  await fs.writeFile(path.join(s.folder, 'dispatch-worker.log'), 'relay: unexpected failure: boom\n');
-  await s.ctl({ opencodeSleepMs: 300 });
-  const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-done', 'A');
-  assert.equal(r.code, 0, r.out + r.err);
-  assert.equal((await s.starts()) - before, 1);
-});
-
-test('final-F10: the OpenCode dispatcher record carries a start token (null where the OS reports none), and a record with a matching token outlives a wall-clock start an hour off', async (t) => {
-  const s = await opencodeSeat(t);
-  const record = JSON.parse(await fs.readFile(path.join(s.folder, 'dispatch-pid.json'), 'utf8'));
-  assert.ok(Object.hasOwn(record, 'startToken'), 'startToken is always written');
-  if (process.platform === 'win32') assert.equal(record.startToken, null);
-  else assert.match(record.startToken, /^(ticks|lstart):/);
-  if (process.platform === 'win32') return;
-  const child = liveChild(t);
-  const { processStartToken } = await import('../detach-utils.mjs');
-  await fs.rm(path.join(s.folder, 'result.json'), { force: true });
-  await fs.writeFile(path.join(s.folder, 'dispatch-pid.json'), JSON.stringify({ pid: child.pid, startedAt: new Date(Date.now() - 3600000).toISOString(), startToken: processStartToken(child.pid) }));
-  await fs.writeFile(path.join(s.folder, 'dispatch-worker.log'), 'relay: kept the earlier result.json as result.attempt-1.json\n');
-  const running = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
-  assert.equal(running.code, 3, running.out + running.err);
-});
-
 test('final-F3: a failed Phase 1 seat with no worktree in run.json is retried in the worktree its failed attempt recorded, as a new session', async (t) => {
   const wt = path.join(os.tmpdir(), 'recorded-by-the-attempt');
   const s = await setup(t);
@@ -1363,7 +1680,7 @@ test('final-F3: a failed Phase 1 seat with no worktree in run.json is retried in
   assert.equal(s.flag(start, '--worktree'), wt, 'the retry reuses the failed attempt\'s worktree');
 });
 
-test('seats are started without a time limit: --timeout 0 for Claude and Codex seats, none for OpenCode, and flags.timeoutS when the user set one', async (t) => {
+test('seats are started without a time limit: --timeout 0 for Claude and Codex seats, and flags.timeoutS when the user set one', async (t) => {
   const starts = async (s) => (await s.calls()).filter((c) => c.argv.includes('--detach'));
   const zero = await setup(t);
   assert.equal((await zero.rr('phase1', '--run-dir', zero.run, '--start')).code, 0);
@@ -1438,12 +1755,6 @@ test('F1: a phase2 --start rerun does not resume a seat that already has an exch
   assert.equal(await starts(), first);
 });
 
-test('F2: an OpenCode seat is started with --timeout 0, not the dispatcher default of 1800 s', async (t) => {
-  const s = await opencodeSeat(t);
-  const call = (await s.calls()).find((c) => c.script === 'opencode-dispatch.mjs');
-  assert.equal(s.flag(call, '--timeout'), '0');
-});
-
 test('F3-F6: the saved source fingerprint is checked at phase1 start, phase1 wait, phase2 start and phase2 wait', async (t) => {
   const refused = (r) => {
     assert.equal(r.code, 1, r.out);
@@ -1489,6 +1800,49 @@ test('F8: a native auditor whose file exists is not done until --native-done aud
   assert.throws(() => parseArgs(['audit', '--run-dir', 'r', '--finish', '--native-done', 'C']), /--native-done takes seat letters/);
 });
 
+test('restructure round 3 F6: a deep verify after a finished native audit is scanned and staged for the resumed auditor', async (t) => {
+  const s = await prepared(t, { auditor: { transport: 'native' } });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 0);
+  await fs.mkdir(`${s.run}-audit-input`, { recursive: true });
+  await fs.writeFile(path.join(`${s.run}-audit-input`, 'findings.audit.json'), '{"done":true}\n');
+  const done = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(done.code, 0, done.out);
+  assert.ok(await fs.access(path.join(s.run, 'phase3', 'findings.json')).then(() => true, () => false), 'the audit finished');
+  await fs.writeFile(path.join(s.run, 'phase3', 'verification-X1.md'), 'verified after the audit\n');
+  // Linux round linux-r7 A3, Windows round win-r7 A4: the file is staged first and the step stops, so the auditor is resumed
+  // with it in its folder; the next --finish translates the auditor's new answer.
+  const again = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(again.code, 3, again.out);
+  assert.match(again.out, /verification-X1\.md staged for the auditor: resume the same auditor/);
+  assert.equal(await fs.readFile(path.join(`${s.run}-audit-input`, 'verification-X1.md'), 'utf8'), 'verified after the audit\n');
+  assert.ok((await s.calls()).some((c) => c.script === 'blind-relabel.mjs' && c.argv[0] === 'scan' && s.flag(c, '--in').endsWith('verification-X1.md')), 'the file was scanned');
+  await fs.writeFile(path.join(`${s.run}-audit-input`, 'findings.audit.json'), '{"done":true,"verified":true}\n');
+  const done2 = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(done2.code, 0, done2.out);
+  assert.doesNotMatch(done2.out, /staged for the auditor/, 'a file staged before counts once');
+});
+
+test('Linux round linux-r5 B3, Windows round win-r6 A3: a verification file that arrives after the auditor brief, before the audit finished, stops the step naming it', async (t) => {
+  const s = await prepared(t, { auditor: { transport: 'native' } });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 0, 'the brief is built; the native auditor has not answered');
+  await fs.writeFile(path.join(s.run, 'phase3', 'verification-X1.md'), 'verified late\n');
+  const again = await s.rr('audit', '--run-dir', s.run, '--finish');
+  assert.equal(again.code, 1, again.out);
+  assert.match(again.out, /FAILED stage verification: verification-X1\.md arrived after the auditor brief was built, so the auditor cannot cite it/);
+  await assert.rejects(fs.access(path.join(`${s.run}-audit-input`, 'verification-X1.md')), 'not staged');
+});
+
+test('Linux round linux-r7 B2: a verification file changed after it was staged stops audit --finish before translate', async (t) => {
+  const s = await prepared(t, { auditor: { transport: 'native' } });
+  await fs.writeFile(path.join(s.run, 'phase3', 'verification-X1.md'), 'original evidence\n');
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--finish')).code, 0, 'staged with the brief');
+  await fs.writeFile(path.join(s.run, 'phase3', 'verification-X1.md'), 'replacement evidence\n');
+  await fs.writeFile(path.join(`${s.run}-audit-input`, 'findings.audit.json'), '{"done":true}\n');
+  const r = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /FAILED stage verification: verification-X1\.md changed after it was staged for the auditor/);
+  assert.equal((await s.calls()).some((c) => c.argv[0] === 'translate'), false, 'nothing translated');
+});
 test('F7: falsification requested with fewer verification files than qualifying claims stops audit --finish; --accept-missing-verifiers goes on and says INCOMPLETE', async (t) => {
   const s = await setup(t, { flags: { falsification: true } });
   await s.ctl({ qualified: 2 });
@@ -1504,41 +1858,17 @@ test('F7: falsification requested with fewer verification files than qualifying 
   assert.throws(() => parseArgs(['phase1', '--run-dir', 'r', '--start', '--accept-missing-verifiers']), /only accepted by audit/);
 });
 
-test('F12: an exchange warning that every rebuttal conceded reaches the report, and next asks for the audit-depth decision', async (t) => {
-  const s = await setup(t);
-  await s.ctl({ concede: 8, dispute: 0, finishWarning: 'exchange: WARNING: all 8 rebuttals conceded and none disputed; a light audit would re-check none of these findings, so use --audit-depth full' });
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
-  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
-  const r = await s.rr('phase2', '--run-dir', s.run, '--wait');
-  assert.equal(r.code, 0, r.out);
-  assert.ok(r.lines.some((l) => l.startsWith('exchange: WARNING: all 8 rebuttals conceded')), r.out);
-  assert.match(r.lines.at(-1), /^next: decide the audit depth first: after a zero-dispute exchange a full audit is the safer choice; run: review-run audit .* --prepare --audit-depth full .or --audit-depth light to keep the light audit.$/);
-  const quiet = await setup(t, { flags: { auditDepth: 'full' } });
-  await quiet.ctl({ concede: 8, dispute: 0, finishWarning: 'exchange: WARNING: all 8 rebuttals conceded and none disputed; use --audit-depth full (nothing to do if it is already full)' });
-  assert.equal((await quiet.rr('phase1', '--run-dir', quiet.run, '--start')).code, 0);
-  assert.equal((await quiet.rr('phase1', '--run-dir', quiet.run, '--wait')).code, 0);
-  assert.equal((await quiet.rr('phase2', '--run-dir', quiet.run, '--start')).code, 0);
-  const full = await quiet.rr('phase2', '--run-dir', quiet.run, '--wait');
-  assert.match(full.lines.at(-1), /^next: run: review-run audit/, 'already full: no decision needed');
-});
-
-test('phase2 --wait: when only a few claims exist and all were conceded, next is the full-audit command, not a decision', async (t) => {
-  const s = await setup(t);
-  await s.ctl({ concede: 1, dispute: 0, finishWarning: 'exchange: WARNING: all 1 rebuttals conceded and none disputed; use --audit-depth full' });
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
-  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
-  const r = await s.rr('phase2', '--run-dir', s.run, '--wait');
-  assert.equal(r.code, 0, r.out);
-  assert.match(r.lines.at(-1), /^next: run: review-run audit .* --prepare --audit-depth full \(all 1 claim\(s\) were conceded.*--audit-depth light to keep the light audit\)$/);
-  assert.doesNotMatch(r.lines.at(-1), /decide the audit depth first/);
-  const many = await setup(t);
-  await many.ctl({ concede: 8, dispute: 0, finishWarning: 'exchange: WARNING: all 8 rebuttals conceded and none disputed; use --audit-depth full' });
-  assert.equal((await many.rr('phase1', '--run-dir', many.run, '--start')).code, 0);
-  assert.equal((await many.rr('phase1', '--run-dir', many.run, '--wait')).code, 0);
-  assert.equal((await many.rr('phase2', '--run-dir', many.run, '--start')).code, 0);
-  assert.match((await many.rr('phase2', '--run-dir', many.run, '--wait')).lines.at(-1), /decide the audit depth first/, 'a larger run still asks');
+test('Linux round linux-r6 A1: after --accept-missing-verifiers, the rerun its next: line names (no flag) finishes a native audit', async (t) => {
+  const s = await setup(t, { flags: { falsification: true }, auditor: { transport: 'native' } });
+  await s.ctl({ qualified: 2 });
+  assert.equal((await s.rr('audit', '--run-dir', s.run, '--prepare')).code, 0);
+  await fs.writeFile(path.join(s.run, 'phase3', 'verification-X1.md'), 'verified\n');
+  const accepted = await s.rr('audit', '--run-dir', s.run, '--finish', '--accept-missing-verifiers');
+  assert.equal(accepted.code, 0, accepted.out);
+  await fs.writeFile(path.join(`${s.run}-audit-input`, 'findings.audit.json'), '{"done":true}\n');
+  const again = await s.rr('audit', '--run-dir', s.run, '--finish', '--native-done', 'auditor');
+  assert.equal(again.code, 0, again.out);
+  assert.doesNotMatch(again.out, /FAILED verifiers/);
 });
 
 test('audit with no claims from either seat: no auditor brief, an empty findings.json, and next points at the manifest and report', async (t) => {
@@ -1547,12 +1877,12 @@ test('audit with no claims from either seat: no auditor brief, an empty findings
   const prep = await s.rr('audit', '--run-dir', s.run, '--prepare');
   assert.equal(prep.code, 0, prep.out + prep.err);
   assert.ok(prep.lines.some((l) => /no claims from either seat: the auditor and the scorecard are not needed/.test(l)), prep.out);
-  assert.match(prep.lines.at(-1), /^next: run: build-manifest\.mjs --run-dir .*, then build-report\.mjs --run-dir /);
+  assert.match(prep.lines.at(-1), /^next: run: review-run manifest --run-dir .*, then review-run report --run-dir /);
   const file = path.join(s.run, 'phase3', 'findings.json');
-  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { audit_depth: 'light', zero_claims: true, findings: [] });
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { audit_depth: 'full', zero_claims: true, findings: [] });
   const finish = await s.rr('audit', '--run-dir', s.run, '--finish');
   assert.equal(finish.code, 0, finish.out);
-  assert.match(finish.lines.at(-1), /^next: run: build-manifest\.mjs/);
+  assert.match(finish.lines.at(-1), /^next: run: review-run manifest --run-dir /);
   assert.equal((await s.calls()).some((c) => c.script === 'build-brief.mjs'), false, 'no auditor brief is built');
   assert.ok((await s.calls()).some((c) => c.script === 'blind-relabel.mjs' && c.argv[0] === 'clear-cache'), 'the cache is cleared as on the normal path');
   const claims = await setup(t);
@@ -1565,7 +1895,7 @@ test('F13: a seat or auditor that hit a usage limit is not dispatched again befo
   const clock = `${((later.getHours() + 11) % 12) + 1}:${String(later.getMinutes()).padStart(2, '0')} ${later.getHours() >= 12 ? 'PM' : 'AM'}`;
   const s = await setup(t);
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A', 'result.json'), JSON.stringify({ status: 'rate-limited', retryAfter: clock, touchedFiles: [] }));
+  await fs.writeFile(path.join(s.run, 'phase1', 'A', 'result.json'), JSON.stringify({ status: 'rate-limited', retryAfter: clock, finishedAt: new Date().toISOString(), touchedFiles: [] }));
   const before = (await s.calls()).length;
   const waiting = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
   assert.equal(waiting.code, 3, waiting.out);
@@ -1573,11 +1903,11 @@ test('F13: a seat or auditor that hit a usage limit is not dispatched again befo
   assert.equal((await s.calls()).slice(before).some((c) => c.argv.includes('--detach')), false, 'no new session while limited');
   const past = new Date(Date.now() - 60000);
   const pastClock = `${((past.getHours() + 11) % 12) + 1}:${String(past.getMinutes()).padStart(2, '0')} ${past.getHours() >= 12 ? 'PM' : 'AM'}`;
-  await fs.writeFile(path.join(s.run, 'phase1', 'A', 'result.json'), JSON.stringify({ status: 'rate-limited', retryAfter: pastClock, touchedFiles: [] }));
+  await fs.writeFile(path.join(s.run, 'phase1', 'A', 'result.json'), JSON.stringify({ status: 'rate-limited', retryAfter: pastClock, finishedAt: new Date(Date.now() - 90000).toISOString(), touchedFiles: [] }));
   const retry = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
   assert.equal(retry.code, 0, retry.out);
   assert.ok(retry.lines.some((l) => /previous attempt ended with status rate-limited; dispatched again/.test(l)), 'after the time, the usual retry runs');
-  const a = await auditorWithBrief(t, { status: 'rate-limited', retryAfter: clock, touchedFiles: [] }, { output: false });
+  const a = await auditorWithBrief(t, { status: 'rate-limited', retryAfter: clock, finishedAt: new Date().toISOString(), touchedFiles: [] }, { output: false });
   const limited = await a.rr('audit', '--run-dir', a.run, '--finish');
   assert.equal(limited.code, 3, limited.out);
   assert.match(limited.lines.at(-1), /the auditor hit a usage limit until/);
@@ -1595,7 +1925,7 @@ test('a native Codex pair on a Codex host: file-channel briefs for both seats, n
   assert.deepEqual(briefs.map((c) => s.flag(c, '--channel')), ['file', 'file'], 'a native Codex seat writes its own file');
   assert.deepEqual(briefs.map((c) => path.basename(s.flag(c, '--output-path'))), ['A-findings.md', 'B-findings.md']);
   assert.equal((await s.calls()).some((c) => c.argv.includes('--detach')), false, 'no CLI dispatcher runs');
-  for (const role of ['A', 'B']) await fs.writeFile(path.join(s.run, 'phase1', role + '-findings.md'), `## ${role}1\nclaim\n`);
+  for (const role of ['A', 'B']) await fs.writeFile(path.join(s.run, 'phase1', role + '-findings.md'), `## ${role}1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n`);
   const waiting = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
   assert.equal(waiting.code, 3, waiting.out);
   const wait = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A,B');
@@ -1618,12 +1948,13 @@ const turn = (type, extra = {}) => JSON.stringify({ type, ...(type === 'assistan
 test('--native-agent: a native seat is done when its transcript shows a final reply, no --native-done needed; the id is remembered for later runs', async (t) => {
   const s = await setup(t, { seatA: { transport: 'native' } });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   const transcript = path.join(s.base, 'agent-transcript.jsonl');
   await fs.writeFile(transcript, [turn('user'), turn('assistant', { stop: 'tool_use' })].join('\n') + '\n');
   const working = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-agent', `A=${transcript}`);
   assert.equal(working.code, 3, working.out);
   assert.match(working.lines.at(-1), /seat A's agent is still working \(its transcript has no final reply yet\)/);
+  assert.match(working.lines.at(-1), /review-run phase1 --run-dir .* --wait; do not start phase2 until this exits 0$/);
   assert.equal((await s.calls()).some((c) => c.script === 'blind-relabel.mjs'), false, 'no validate while the agent works');
   const saved = JSON.parse(await fs.readFile(path.join(s.run, 'native-agents.json'), 'utf8'));
   assert.equal(saved.A, transcript);
@@ -1637,7 +1968,7 @@ test('--native-agent: a native seat is done when its transcript shows a final re
 test('--native-agent: the transcript decides when the agent works again after a new prompt (Phase 2), and an unmatched agent id is a failure, not a wait', async (t) => {
   const s = await setup(t, { seatA: { transport: 'native' } });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   const transcript = path.join(s.base, 'agent-transcript.jsonl');
   await fs.writeFile(transcript, [turn('user'), turn('assistant', { stop: 'end_turn' })].join('\n') + '\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-agent', `A=${transcript}`)).code, 0);
@@ -1646,11 +1977,12 @@ test('--native-agent: the transcript decides when the agent works again after a 
   await fs.appendFile(transcript, turn('user') + '\n');
   const again = await s.rr('phase2', '--run-dir', s.run, '--wait', '--max-wait', '1');
   assert.equal(again.code, 3, again.out);
+  assert.match(again.lines.at(-1), /--wait; do not run audit --prepare until this exits 0$/);
   await fs.appendFile(transcript, turn('assistant', { stop: 'end_turn' }) + '\n');
   assert.equal((await s.rr('phase2', '--run-dir', s.run, '--wait', '--max-wait', '1')).code, 0);
   const missing = await setup(t, { seatA: { transport: 'native' } });
   assert.equal((await missing.rr('phase1', '--run-dir', missing.run, '--start')).code, 0);
-  await fs.writeFile(path.join(missing.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
+  await fs.writeFile(path.join(missing.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   const config = await fs.mkdtemp(path.join(os.tmpdir(), 'no-agents '));
   t.after(() => fs.rm(config, { recursive: true, force: true }));
   const before = process.env.CLAUDE_CONFIG_DIR;
@@ -1658,7 +1990,7 @@ test('--native-agent: the transcript decides when the agent works again after a 
   t.after(() => { if (before === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = before; });
   const none = await missing.rr('phase1', '--run-dir', missing.run, '--wait', '--max-wait', '1', '--native-agent', 'A=a0123456789abcdef');
   assert.equal(none.code, 1, none.out);
-  assert.match(none.lines.at(-2), /^FAILED native agent A: a0123456789abcdef matched 0 transcripts/);
+  assert.match(none.lines.at(-2), /^FAILED native agent A: no agent with id a0123456789abcdef under this host's Claude or Codex transcripts: check the id the Agent tool returned/);
 });
 
 test('--native-agent auditor=: the native auditor is done from its transcript', async (t) => {
@@ -1688,7 +2020,7 @@ test('mixed layout (a host with no support rules): Claude CLI seat A and auditor
   const claudeStarts = (await s.calls()).filter((c) => c.script === 'claude-dispatch.mjs' && c.argv.includes('--detach'));
   assert.equal(claudeStarts.length, 1, 'only the Claude seat is a CLI dispatch');
   assert.equal((await s.calls()).some((c) => c.script === 'codex-dispatch.mjs'), false, 'no nested Codex CLI start');
-  await fs.writeFile(path.join(s.run, 'phase1', 'B-findings.md'), '## B1\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'B-findings.md'), '## B1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   const waiting = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1');
   assert.equal(waiting.code, 3, waiting.out);
   const wait = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'B');
@@ -1702,25 +2034,6 @@ test('mixed layout (a host with no support rules): Claude CLI seat A and auditor
   const audit = await s.rr('audit', '--run-dir', s.run, '--finish');
   assert.equal(audit.code, 0, audit.out);
   assert.ok(audit.lines.includes('auditor: dispatched (cli claude)'), audit.out);
-});
-
-test('--audit-depth: set on audit --prepare it is written into run.json and the auditor brief and translate use it; it cannot change once the auditor brief exists', async (t) => {
-  const s = await setup(t);
-  assert.throws(() => parseArgs(['phase1', '--run-dir', 'r', '--start', '--audit-depth', 'full']), /only accepted by audit/);
-  assert.throws(() => parseArgs(['audit', '--run-dir', 'r', '--prepare', '--audit-depth', 'deep']), /must be light or full/);
-  const prepare = await s.rr('audit', '--run-dir', s.run, '--prepare', '--audit-depth', 'full');
-  assert.equal(prepare.code, 0, prepare.out);
-  assert.ok(prepare.lines.includes('audit depth: full (written to run.json)'), prepare.out);
-  assert.equal(JSON.parse(await fs.readFile(path.join(s.run, 'run.json'), 'utf8')).flags.auditDepth, 'full');
-  const finish = await s.rr('audit', '--run-dir', s.run, '--finish');
-  assert.equal(finish.code, 0, finish.out);
-  const brief = (await s.calls()).find((c) => c.script === 'build-brief.mjs' && s.flag(c, '--mode') === 'auditor');
-  assert.equal(s.flag(brief, '--audit-depth'), 'full');
-  const translate = (await s.calls()).find((c) => c.script === 'blind-relabel.mjs' && c.argv[0] === 'translate');
-  assert.equal(s.flag(translate, '--audit-depth'), 'full');
-  const late = await s.rr('audit', '--run-dir', s.run, '--finish', '--audit-depth', 'light');
-  assert.equal(late.code, 1, late.out);
-  assert.match(late.lines.at(-2), /^FAILED audit depth: the auditor brief was already built at depth full/);
 });
 
 test('a native auditor with --native-agent: no file yet and the agent still working is a wait, the agent done with no file is a failure, no agent id prints the spawn line with both ways to continue', async (t) => {
@@ -1758,13 +2071,16 @@ test('a native seat and a native auditor get a ready message file with the brief
   const text = await fs.readFile(p1, 'utf8');
   assert.ok(text.includes(path.join(s.run, 'phase1', 'brief-A.txt')), 'names the brief');
   assert.ok(text.includes(path.join(s.run, 'phase1', 'A-findings.md')), 'names the output file');
-  assert.match(text, /Do not read any other file in the run folder except the brief and the task packet it names/);
+  // Round 4 F3: the brief's own scratch folder is the one exception, for reading and for editing.
+  assert.match(text, /Do not read any other file in the run folder except the brief, the task packet it names, your own findings file and your own scratch folder\. Do not edit any file except your own findings file and the files you create in your own scratch folder\./);
   assert.match(text, /reply with only the word written/);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--native-done', 'A')).code, 0);
   const exchange = await s.rr('phase2', '--run-dir', s.run, '--start');
   assert.ok(exchange.out.includes('prompt to send it: ' + path.join(s.run, 'phase2', 'prompt-A.txt')), exchange.out);
   assert.match(await fs.readFile(path.join(s.run, 'phase2', 'prompt-A.txt'), 'utf8'), /Phase 2\. Read your delta brief from .*delta-brief-A\.txt/);
+  // Closing round 4 F10: the resume message allows what the delta brief allows (Phase 1 brief, task packet, scratch folder).
+  assert.match(await fs.readFile(path.join(s.run, 'phase2', 'prompt-A.txt'), 'utf8'), /except the delta brief, your Phase 1 brief, the task packet, your rebuttal file and your own scratch folder\. Do not edit any file except your rebuttal file and the files you create in your own scratch folder\./);
   assert.equal((await s.rr('audit', '--run-dir', s.run, '--prepare')).code, 0);
   const audit = await s.rr('audit', '--run-dir', s.run, '--finish');
   assert.ok(audit.out.includes('prompt to give it: ' + path.join(s.run, 'phase3', 'prompt-auditor.txt')), audit.out);
@@ -1807,7 +2123,9 @@ test('--native-agent: a seat whose agent ended without its file fails with the a
   const failed = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-agent', 'A=' + claude);
   assert.equal(failed.code, 1, failed.out);
   assert.match(failed.lines.at(-2), /^FAILED seat A: its agent finished without a usable .*A-findings\.md; last reply: "blocked: shell tool timed out"\. If that reports a tool, shell or permission failure it is a host failure/);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
+  // Seat A was resumed and finished this time (a file next to a "blocked:" reply would be an unfinished pass).
+  await fs.appendFile(claude, [turn('user'), reply('written, 1 claim')].join('\n') + '\n');
   const codex = path.join(s.base, 'codex-rollout.jsonl');
   await fs.writeFile(codex, rollout('Blocked: all file/process tools time out.'));
   const second = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-agent', 'B=' + codex);
@@ -1824,28 +2142,422 @@ test('--native-agent: the final write landing after the transcript shows the age
   await fs.writeFile(transcript, [turn('user'), reply('written, 1 finding')].join('\n') + '\n');
   const pending = s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-agent', 'A=' + transcript);
   await new Promise((resolve) => setTimeout(resolve, 1500));
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   const late = await pending;
   assert.equal(late.code, 0, late.out);
   assert.ok(late.lines.includes('seat A: output found (native, transcript shows the agent finished)'), late.out);
 });
 
-test('phase2 --wait: per-seat concede-all warnings are dropped when the all-conceded warning is present', async (t) => {
+test('--native-agent: a working agent with no file yet is "still working", never "spawn it"', async (t) => {
+  const s = await setup(t, { seatA: { transport: 'native' } });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  const transcript = path.join(s.base, 'working-agent.jsonl');
+  await fs.writeFile(transcript, `${turn('user')}\n`);
+  const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-agent', 'A=' + transcript);
+  assert.equal(r.code, 3, r.out);
+  assert.match(r.lines.at(-1), /seat A: its agent is still working and has not written .*A-findings\.md yet; rerun this command/);
+  assert.doesNotMatch(r.lines.at(-1), /spawn it/);
+});
+
+test('--native-agent: an agent whose transcript shows it finished, with no file yet, is not called "still working"', async (t) => {
+  const s = await setup(t, { seatA: { transport: 'native' } });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  const transcript = path.join(s.base, 'ended-agent.jsonl');
+  await fs.writeFile(transcript, [turn('user'), reply('blocked: shell tool timed out')].join('\n') + '\n');
+  const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-agent', 'A=' + transcript);
+  assert.equal(r.code, 3, r.out);
+  assert.match(r.lines.at(-1), /seat A: its agent's transcript shows it finished, but .*A-findings\.md is not there yet; rerun this command with --max-wait \d+ or more/);
+  assert.doesNotMatch(r.lines.at(-1), /still working/);
+});
+
+test('Linux round F4: phase1 --start warns about a path the packet names that does not exist', async (t) => {
+  const s = await setup(t, { seatA: { transport: 'native' } });
+  const gone = path.join(s.base, 'evidence gone', 'capture.log');
+  // A path with spaces is written in backticks (a bare path ends at the first space).
+  await fs.appendFile(path.join(s.run, 'task-packet.md'), `\nEvidence: \`${gone}\`\n`);
+  const r = await s.rr('phase1', '--run-dir', s.run, '--start');
+  assert.equal(r.code, 0, r.out);
+  assert.ok(r.lines.some((l) => l.startsWith('warning: the packet names 1 path(s) that do not exist here') && l.includes(gone)), r.out);
+});
+
+test('Linux round linux-r1 O1: phase2 --start moves a seat\'s leftover Phase 1 scratch folder out of the run folder before the exchange', async (t) => {
   const s = await setup(t);
-  await s.ctl({ finishWarning: 'exchange: WARNING: seat A conceded all 3 peer claims; the exchange added little for that side: consider --audit-depth full\nexchange: WARNING: seat B conceded all 3 peer claims; the exchange added little for that side: consider --audit-depth full\nexchange: WARNING: all 6 rebuttals conceded and none disputed; use --audit-depth full' });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  const seatDir = (await fs.stat(path.join(s.run, 'phase1', 'seat-A')).catch(() => null)) ? path.join(s.run, 'phase1', 'seat-A') : path.join(s.run, 'phase1');
+  const scratch = path.join(seatDir, 'scratch-0a1b2c3d');
+  await fs.mkdir(path.join(scratch, 'g', 'run', 'phase1'), { recursive: true });
+  await fs.writeFile(path.join(scratch, 'g', 'run', 'phase1', 'B-findings.md'), 'a mock peer file from a test\n');
+  if (process.platform !== 'win32') await fs.symlink(path.join(scratch, 'g', 'run'), path.join(scratch, 'g', 'link'));
+  const other = path.join(seatDir, 'notes');
+  await fs.mkdir(other);
+  const r = await s.rr('phase2', '--run-dir', s.run, '--start');
+  assert.equal(r.code, 0, r.out);
+  const kept = path.join(`${s.run}-scratch-kept`, 'scratch-0a1b2c3d');
+  t.after(() => fs.rm(`${s.run}-scratch-kept`, { recursive: true, force: true }));
+  assert.ok(r.lines.some((l) => l.includes(`${seatDir.endsWith('seat-A') ? "seat A's" : "a seat's"} scratch folder scratch-0a1b2c3d was moved out of the run folder to`) && l.includes(kept)), r.out);
+  assert.equal(await fs.readFile(path.join(kept, 'g', 'run', 'phase1', 'B-findings.md'), 'utf8'), 'a mock peer file from a test\n', 'kept, not deleted');
+  await assert.rejects(fs.access(scratch), { code: 'ENOENT' });
+  assert.ok((await fs.stat(other)).isDirectory(), 'only scratch-<hash> folders are moved');
+});
+
+test('field feedback S2: phase1 --start repeats the tools preflight found the Codex seat cannot start', async (t) => {
+  const s = await setup(t);
+  await fs.writeFile(path.join(s.run, 'seat-tools.json'), JSON.stringify({ python: { ok: false, why: 'x', host: null }, rg: { ok: false, why: 'y', host: null }, git: { ok: true } }));
+  const r = await s.rr('phase1', '--run-dir', s.run, '--start');
+  assert.equal(r.code, 0, r.out);
+  assert.ok(r.lines.some((l) => l === "warning: preflight found that the Codex seat's sandbox cannot run python, rg (seat-tools.json); it reviews those parts by reading only"), r.out);
+});
+
+test('field feedback S7: cleanup lists the seats\' scratch folders, deletes them only with --yes, and never follows a link out', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  const seatDir = (await fs.stat(path.join(s.run, 'phase1', 'seat-A')).catch(() => null)) ? path.join(s.run, 'phase1', 'seat-A') : path.join(s.run, 'phase1');
+  const scratch = path.join(seatDir, 'scratch-0a1b2c3d');
+  await fs.mkdir(scratch, { recursive: true });
+  await fs.writeFile(path.join(scratch, 'big.bin'), Buffer.alloc(2 * 1048576));
+  const outside = path.join(path.dirname(s.run), 'outside-cleanup');
+  await fs.mkdir(outside, { recursive: true });
+  t.after(() => fs.rm(outside, { recursive: true, force: true }));
+  await fs.writeFile(path.join(outside, 'keep.txt'), 'keep\n');
+  if (process.platform !== 'win32') await fs.symlink(outside, path.join(scratch, 'link'));
+  const kept = path.join(`${s.run}-scratch-kept`, 'scratch-99887766-2');
+  t.after(() => fs.rm(`${s.run}-scratch-kept`, { recursive: true, force: true }));
+  await fs.mkdir(kept, { recursive: true });
+  await fs.mkdir(path.join(seatDir, 'notes'), { recursive: true });
+  const dry = await s.rr('cleanup', '--run-dir', s.run);
+  assert.equal(dry.code, 0, dry.out);
+  assert.match(dry.out, /would delete .*scratch-0a1b2c3d \(2\.0 MB\)/);
+  assert.match(dry.out, /2 scratch folder\(s\), 2\.0 MB\s+next: rerun with --yes/);
+  assert.ok((await fs.stat(scratch)).isDirectory(), 'nothing deleted without --yes');
+  const done = await s.rr('cleanup', '--run-dir', s.run, '--yes');
+  assert.equal(done.code, 0, done.out);
+  await assert.rejects(fs.access(scratch), { code: 'ENOENT' });
+  await assert.rejects(fs.access(`${s.run}-scratch-kept`), { code: 'ENOENT' }, 'the emptied kept folder is removed too');
+  assert.equal(await fs.readFile(path.join(outside, 'keep.txt'), 'utf8'), 'keep\n', 'a link out of the scratch folder is not followed');
+  assert.ok((await fs.stat(path.join(seatDir, 'notes'))).isDirectory(), 'only scratch-<hash> folders are deleted');
+  // Windows round win-r3 A4: a folder in use is named, the others are still deleted, and the command fails with next:.
+  const busyDir = path.join(seatDir, 'scratch-55667788');
+  const freeDir = path.join(seatDir, 'scratch-99aabbcc');
+  await fs.mkdir(busyDir, { recursive: true });
+  await fs.mkdir(freeDir, { recursive: true });
+  const realRm = fs.rm;
+  fs.rm = async (p, o) => (path.resolve(p) === path.resolve(busyDir) ? Promise.reject(Object.assign(new Error('busy'), { code: 'EBUSY' })) : realRm(p, o));
+  let inUse;
+  try {
+    inUse = await s.rr('cleanup', '--run-dir', s.run, '--yes');
+  } finally {
+    fs.rm = realRm;
+  }
+  assert.equal(inUse.code, 1, inUse.out);
+  assert.match(inUse.out, /could not delete .*scratch-55667788: EBUSY/);
+  assert.match(inUse.out, /deleted .*scratch-99aabbcc/);
+  assert.match(inUse.out, /1 of 2 scratch folder\(s\) deleted/);
+  assert.match(inUse.out, /FAILED cleanup: 1 scratch folder\(s\) could not be deleted/);
+  await fs.rm(busyDir, { recursive: true, force: true });
+  // Windows round win-r3 B3: a folder that cannot be listed stops the command; it never reports "no scratch".
+  const realReaddir = fs.readdir;
+  fs.readdir = async (p, o) => (path.resolve(p) === path.resolve(seatDir) ? Promise.reject(Object.assign(new Error('denied'), { code: 'EACCES' })) : realReaddir(p, o));
+  let denied;
+  try {
+    denied = await s.rr('cleanup', '--run-dir', s.run);
+  } finally {
+    fs.readdir = realReaddir;
+  }
+  assert.equal(denied.code, 1, denied.out);
+  assert.match(denied.out, /FAILED cleanup: cannot list .*: EACCES/);
+  assert.doesNotMatch(denied.out, /no seat scratch folder/);
+  // Windows round win-r4 B2: a folder whose real path cannot be read is not "missing" either.
+  const realRealpath = fs.realpath;
+  fs.realpath = async (p, o) => (path.resolve(p) === path.resolve(seatDir) ? Promise.reject(Object.assign(new Error('denied'), { code: 'EACCES' })) : realRealpath(p, o));
+  let unreadable;
+  try {
+    unreadable = await s.rr('cleanup', '--run-dir', s.run);
+  } finally {
+    fs.realpath = realRealpath;
+  }
+  assert.equal(unreadable.code, 1, unreadable.out);
+  assert.match(unreadable.out, /FAILED cleanup: cannot read .*: EACCES/);
+  // A seat whose worker is still alive: nothing is listed or deleted.
+  const record = path.join(s.run, 'phase2', 'A', 'result.json');
+  await fs.mkdir(path.dirname(record), { recursive: true });
+  await fs.writeFile(record, JSON.stringify({ status: 'running', startedAt: new Date().toISOString(), workerPid: process.pid, workerStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString() }));
+  const busy = await s.rr('cleanup', '--run-dir', s.run, '--yes');
+  assert.equal(busy.code, 1, busy.out);
+  assert.match(busy.out, /FAILED cleanup: seat A \(phase2\) is still running/);
+});
+
+test('Linux round linux-r3 A5: an unreadable source folder at the Phase 1 format check stops the step with FAILED and next:, not a stack trace', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  const file = path.join(s.run, 'run.json');
+  const desc = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.writeFile(file, JSON.stringify({ ...desc, sourceDirs: [path.join(path.dirname(s.run), 'gone-src')] }, null, 2));
+  const r = await s.rr('phase1', '--run-dir', s.run, '--wait');
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /FAILED seat format: .*gone-src/);
+});
+
+// A folder link: a junction on Windows (no elevation needed), a symlink elsewhere.
+const linkDir = (target, at) => fs.symlink(target, at, process.platform === 'win32' ? 'junction' : 'dir');
+
+test('Linux round linux-r3 F4 (Windows round win-r4 A4: also a junction): cleanup never searches a folder that is a link, so a scratch-<hash> folder in its target stays', async (t) => {
+  const s = await setup(t);
+  const elsewhere = path.join(path.dirname(s.run), 'someone-else');
+  await fs.mkdir(path.join(elsewhere, 'scratch-aabbccdd'), { recursive: true });
+  await fs.writeFile(path.join(elsewhere, 'scratch-aabbccdd', 'precious.txt'), 'keep\n');
+  t.after(() => fs.rm(elsewhere, { recursive: true, force: true }));
+  await linkDir(elsewhere, `${s.run}-scratch-kept`);
+  t.after(() => fs.unlink(`${s.run}-scratch-kept`).catch(() => {}));
+  await fs.mkdir(path.join(elsewhere, 'p1', 'scratch-11223344'), { recursive: true });
+  // Linux round linux-r4 B1: a seat folder inside the linked phase folder is behind the link too.
+  await fs.mkdir(path.join(elsewhere, 'p1', 'seat-A', 'scratch-55554444'), { recursive: true });
+  await fs.rm(path.join(s.run, 'phase1'), { recursive: true, force: true });
+  await linkDir(path.join(elsewhere, 'p1'), path.join(s.run, 'phase1'));
+  t.after(() => fs.unlink(path.join(s.run, 'phase1')).catch(() => {}));
+  const r = await s.rr('cleanup', '--run-dir', s.run, '--yes');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /skipped .*-scratch-kept: it is a link/);
+  assert.match(r.out, /skipped .*phase1: it is a link/);
+  assert.equal(await fs.readFile(path.join(elsewhere, 'scratch-aabbccdd', 'precious.txt'), 'utf8'), 'keep\n');
+  assert.ok((await fs.stat(path.join(elsewhere, 'p1', 'scratch-11223344'))).isDirectory(), 'a scratch folder behind a linked phase folder stays');
+  assert.ok((await fs.stat(path.join(elsewhere, 'p1', 'seat-A', 'scratch-55554444'))).isDirectory(), 'linux-r4 B1: a seat folder behind the link stays');
+  assert.match(r.out, /skipped .*seat-A: it is a link or lies behind one/);
+});
+
+test('Linux round linux-r4 A1: phase2 --start moves nothing out of a linked seat folder', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  const seatDir = path.join(s.run, 'phase1', 'seat-A');
+  const elsewhere = path.join(path.dirname(s.run), 'other-seat-folder');
+  await fs.mkdir(path.join(elsewhere, 'scratch-deadbeef'), { recursive: true });
+  t.after(() => fs.rm(elsewhere, { recursive: true, force: true }));
+  for (const entry of await fs.readdir(seatDir)) await fs.cp(path.join(seatDir, entry), path.join(elsewhere, entry), { recursive: true });
+  await fs.rm(seatDir, { recursive: true, force: true });
+  await linkDir(elsewhere, seatDir);
+  t.after(() => fs.unlink(seatDir).catch(() => {}));
+  t.after(() => fs.rm(`${s.run}-scratch-kept`, { recursive: true, force: true }));
+  const r = await s.rr('phase2', '--run-dir', s.run, '--start');
+  assert.ok(r.lines.some((l) => /seat-A is a link or lies behind one; nothing under it was moved/.test(l)), r.out);
+  assert.ok((await fs.stat(path.join(elsewhere, 'scratch-deadbeef'))).isDirectory(), 'the link target\'s scratch folder stays where it is');
+});
+
+test('Linux round linux-r6 A4: a dangling <run-dir>-scratch-kept link is a link, not a missing folder', { skip: process.platform === 'win32' }, async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  await fs.mkdir(path.join(s.run, 'phase1', 'seat-A', 'scratch-0a1b2c3d'), { recursive: true });
+  await fs.symlink(path.join(path.dirname(s.run), 'gone-folder'), `${s.run}-scratch-kept`);
+  t.after(() => fs.unlink(`${s.run}-scratch-kept`).catch(() => {}));
+  const r = await s.rr('phase2', '--run-dir', s.run, '--start');
+  assert.ok(r.lines.some((l) => /-scratch-kept is a link or lies behind one; no scratch folder was moved there/.test(l)), r.out);
+});
+
+test('Windows round win-r5 B2: phase2 --start moves nothing into a linked <run-dir>-scratch-kept', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  const scratch = path.join(s.run, 'phase1', 'seat-A', 'scratch-0a1b2c3d');
+  await fs.mkdir(scratch, { recursive: true });
+  const elsewhere = path.join(path.dirname(s.run), 'someone-elses-folder');
+  await fs.mkdir(elsewhere, { recursive: true });
+  t.after(() => fs.rm(elsewhere, { recursive: true, force: true }));
+  await linkDir(elsewhere, `${s.run}-scratch-kept`);
+  t.after(() => fs.unlink(`${s.run}-scratch-kept`).catch(() => {}));
+  const r = await s.rr('phase2', '--run-dir', s.run, '--start');
+  assert.ok(r.lines.some((l) => /-scratch-kept is a link or lies behind one; no scratch folder was moved there/.test(l)), r.out);
+  assert.deepEqual(await fs.readdir(elsewhere), [], 'nothing was moved into the link target');
+  assert.ok((await fs.stat(scratch)).isDirectory(), 'the scratch folder stays');
+});
+
+test('Linux round linux-r1 F4: --incomplete-seat stops the seat worker that has not started its CLI yet', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
+  const { processStartMs, processStartToken, processExists } = await import('../detach-utils.mjs');
+  const { spawn } = await import('node:child_process');
+  // A detached worker leads its own process group on POSIX.
+  const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true, detached: process.platform !== 'win32' });
+  t.after(() => { try { worker.kill(); } catch { /* already gone */ } });
+  await new Promise((r) => worker.once('spawn', r));
+  // Linux round linux-r3 A3: what the worker's log says its CLI left is named too.
+  const workerLog = path.join(s.run, 'phase2', 'A', 'dispatch-worker.log');
+  await fs.writeFile(workerLog, "relay: WARNING: codex left 1 process(es) running in its tool commands' process groups (pid 4242); they were stopped\n");
+  await fs.writeFile(path.join(s.run, 'phase2', 'A', 'result.json'), JSON.stringify({ status: 'running', sessionId: 'sess-A', workerPid: worker.pid, workerStartedAt: new Date(processStartMs(worker.pid) ?? Date.now()).toISOString(), workerStartToken: processStartToken(worker.pid), startedAt: new Date().toISOString(), workerLog }));
+  const wait = await s.rr('phase2', '--run-dir', s.run, '--wait', '--incomplete-seat', 'A');
+  assert.equal(wait.code, 0, wait.out + wait.err);
+  assert.ok(wait.lines.some((l) => /seat A: its Phase 2 worker was still running and was stopped/.test(l)), wait.out);
+  assert.ok(wait.lines.some((l) => l === "warning: seat A: codex left 1 process(es) running in its tool commands' process groups (pid 4242); they were stopped"), wait.out);
+  for (let i = 0; i < 50 && processExists(worker.pid); i += 1) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(processExists(worker.pid), false, 'the worker is gone');
+});
+
+test('Linux round linux-r1 F5: phase1 --start names only the outside paths a reach probe of this run did not read', { skip: !['linux', 'win32'].includes(process.platform) }, async (t) => {
+  const run = async (probed) => {
+    const s = await setup(t, { seatA: { transport: 'native' } });
+    const evidence = path.join(s.base, 'evidence');
+    await fs.mkdir(evidence, { recursive: true });
+    const [read, unread] = [path.join(evidence, 'read.log'), path.join(evidence, 'unread.log')];
+    for (const f of [read, unread]) await fs.writeFile(f, 'x\n');
+    await fs.appendFile(path.join(s.run, 'task-packet.md'), `\nEvidence: \`${read}\` and \`${unread}\`\n`);
+    if (probed) await fs.writeFile(path.join(s.run, 'reach-probe.json'), JSON.stringify({ ran: true, results: [{ item: `READ ${read}`, ok: true }, { item: `READ ${unread}`, ok: false, detail: 'Permission denied' }] }));
+    const r = await s.rr('phase1', '--run-dir', s.run, '--start');
+    assert.equal(r.code, 0, r.out);
+    return { warning: r.lines.find((l) => /outside the target/.test(l)) ?? '', read, unread };
+  };
+  const plain = await run(false);
+  assert.match(plain.warning, /names 2 path\(s\) outside the target/);
+  const probed = await run(true);
+  assert.match(probed.warning, /names 1 path\(s\) outside the target .*\(no reach probe of this run read them\)/);
+  assert.ok(probed.warning.includes(probed.unread) && !probed.warning.includes(probed.read), probed.warning);
+});
+
+test('Linux round F2: phase1 --wait warns when one seat is far shallower than its peer; seats of similar depth pass quietly', async (t) => {
+  const d = (claims, web) => ({ claims, web });
+  assert.match(shallowSeatNote([d(15, 11), d(1, 0)]), /^seat B did far less than seat A \(1 claim\(s\) against seat A's 15; web use 0 against 11\)/);
+  assert.equal(shallowSeatNote([d(2, null), d(4, null)]), null);
+  assert.equal(shallowSeatNote([d(3, 2), d(3, 3)]), null, 'similar seats: no note');
+  // Linux round 2 F4: claims and web use are separate signals; either gap alone warns.
+  assert.match(shallowSeatNote([d(1, 10), d(10, 10)]), /^seat A did far less than seat B \(1 claim\(s\) against seat B's 10\)/);
+  assert.match(shallowSeatNote([d(0, 0), d(0, 20)]), /^seat A did far less than seat B \(web use 0 against 20\)/);
+  assert.deepEqual(seatDepth('# Seat A findings\n\n## A1 — x\n```\nSame shape elsewhere: none found\n## A9 in a fence\n```\nSame shape elsewhere: none found\n## A2 — y\nSame shape elsewhere: none found\n## Checks performed\nweb: 3 queries, 8 page fetches\n', 'A'), { claims: 2, web: 11 });
+  const s = await setup(t, { host: 'descriptor-host-name', seatA: { transport: 'native' }, seatB: { provider: 'openai', runtime: 'codex', model: 'gpt-5.6-luna', transport: 'native' } });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), ['# Seat A findings', ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => `\n## A${n} — claim ${n}\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nx\nSame shape elsewhere: none found`), '\n## Checks performed\nBlocked: none\n'].join('\n'));
+  await fs.writeFile(path.join(s.run, 'phase1', 'B-findings.md'), '# Seat B findings\n\n## B1 — one\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nx\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
+  const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '2', '--native-done', 'A,B');
+  assert.equal(r.code, 0, r.out);
+  assert.ok(r.lines.some((l) => l.startsWith("warning: seat B did far less than seat A (1 claim(s) against seat A's 8")), r.out);
+});
+
+const handback = (message) => JSON.stringify({ type: 'assistant', message: { id: String(Math.random()), stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'SubagentHandback', input: { message } }] } });
+
+test('Mac round 4 F7: a finished agent whose file has a claim but whose last reply (text or hand-back) is "blocked:" fails the wait; a reply that is not "written" warns', async (t) => {
+  for (const [label, last] of [['hand-back', handback('blocked: the Write tool failed with EACCES after the first finding')], ['text', reply('blocked: shell tool timed out')]]) {
+    const s = await setup(t, { seatA: { transport: 'native' } });
+    assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+    await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 — one\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
+    const transcript = path.join(s.base, 'blocked-agent.jsonl');
+    await fs.writeFile(transcript, [turn('user'), last].join('\n') + '\n');
+    const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '2', '--native-agent', 'A=' + transcript);
+    assert.equal(r.code, 1, `${label}: ${r.out}`);
+    assert.match(r.out, /its agent replied "blocked: .*", so .*A-findings\.md is from an unfinished pass/, label);
+  }
+  const ok = await setup(t, { seatA: { transport: 'native' } });
+  assert.equal((await ok.rr('phase1', '--run-dir', ok.run, '--start')).code, 0);
+  await fs.writeFile(path.join(ok.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 — one\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
+  const odd = path.join(ok.base, 'odd-agent.jsonl');
+  await fs.writeFile(odd, [turn('user'), handback('done, 1 claim')].join('\n') + '\n');
+  const r = await ok.rr('phase1', '--run-dir', ok.run, '--wait', '--max-wait', '2', '--native-agent', 'A=' + odd);
+  assert.match(r.out, /warning: seat A's agent finished with "done, 1 claim", not "written"/);
+  assert.match(r.out, /seat A: output found \(native, transcript shows the agent finished\)/);
+  // Closing round 2: a Codex agent whose last turn was aborted, after an earlier "written" turn, is refused.
+  const cut = await setup(t, { seatA: { transport: 'native' } });
+  assert.equal((await cut.rr('phase1', '--run-dir', cut.run, '--start')).code, 0);
+  await fs.writeFile(path.join(cut.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 — one\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
+  const rollout = path.join(cut.base, 'aborted-rollout.jsonl');
+  const ev = (payload) => JSON.stringify({ type: 'event_msg', payload });
+  await fs.writeFile(rollout, [JSON.stringify({ type: 'session_meta', payload: { id: 'x' } }), ev({ type: 'task_started' }), ev({ type: 'task_complete', last_agent_message: 'written' }), ev({ type: 'task_started' }), ev({ type: 'turn_aborted' })].join('\n') + '\n');
+  const a = await cut.rr('phase1', '--run-dir', cut.run, '--wait', '--max-wait', '2', '--native-agent', 'A=' + rollout);
+  assert.equal(a.code, 1, a.out);
+  assert.match(a.out, /its agent's last turn was aborted, so .*A-findings\.md may be partial; resume the same agent/);
+  // Closing round 3: a later turn that completed with no reply is not silent.
+  const quiet = await setup(t, { seatA: { transport: 'native' } });
+  assert.equal((await quiet.rr('phase1', '--run-dir', quiet.run, '--start')).code, 0);
+  await fs.writeFile(path.join(quiet.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## A1 — one\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
+  const silent = path.join(quiet.base, 'silent-rollout.jsonl');
+  await fs.writeFile(silent, [JSON.stringify({ type: 'session_meta', payload: { id: 'x' } }), ev({ type: 'task_started' }), ev({ type: 'task_complete', last_agent_message: 'written' }), ev({ type: 'task_started' }), ev({ type: 'task_complete' })].join('\n') + '\n');
+  const q = await quiet.rr('phase1', '--run-dir', quiet.run, '--wait', '--max-wait', '2', '--native-agent', 'A=' + silent);
+  assert.match(q.out, /seat A's agent finished its last turn with no reply, not "written"/);
+});
+
+test('Mac round 4 F3: --native-done for a seat or the auditor whose file is missing or has no claim fails after the file grace, naming the file', async (t) => {
+  process.env.REVIEW_FILE_GRACE_S = '1';
+  t.after(() => { delete process.env.REVIEW_FILE_GRACE_S; });
+  for (const content of [null, '# Seat A findings\n']) {
+    const s = await setup(t, { seatA: { transport: 'native' } });
+    assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+    if (content !== null) await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), content);
+    const started = Date.now();
+    const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '30', '--native-done', 'A');
+    assert.equal(r.code, 1, r.out);
+    assert.ok(Date.now() - started < 20000, 'the file grace, not the 30 s budget');
+    assert.match(r.out, new RegExp(`--native-done A says its agent finished, but .*A-findings\\.md ${content === null ? 'does not exist' : 'has no claim heading'}`));
+  }
+  const a = await prepared(t, { auditor: { transport: 'native' } });
+  assert.equal((await a.rr('audit', '--run-dir', a.run, '--finish')).code, 0, 'the first --finish builds the brief and prints the spawn line');
+  const r = await a.rr('audit', '--run-dir', a.run, '--finish', '--native-done', 'auditor');
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /--native-done auditor says its agent finished, but .*findings\.audit\.json does not exist/);
+});
+
+test('status: a run whose manifest.json is written is finished, not "next: review-run manifest"', async (t) => {
+  const s = await setup(t);
+  await fs.mkdir(path.join(s.run, 'phase3'), { recursive: true });
+  await fs.writeFile(path.join(s.run, 'phase3', 'findings.json'), '{"findings":[]}\n');
+  await fs.writeFile(path.join(s.run, 'manifest.json'), '{"status":"completed"}\n');
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: finished: manifest\.json is written/);
+});
+
+test('phase2 --wait: each exchange finish warning is shown, a long one cut', async (t) => {
+  const s = await setup(t);
+  await s.ctl({ finishWarning: `exchange: WARNING: first\nexchange: WARNING: ${'y'.repeat(300)}\nexchange: a note` });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
   assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
   const r = await s.rr('phase2', '--run-dir', s.run, '--wait');
-  assert.equal(r.lines.filter((l) => l.includes('WARNING')).length, 1, r.out);
-  assert.ok(r.lines.some((l) => l.includes('none disputed')), r.out);
+  const shown = r.lines.filter((l) => l.includes('WARNING'));
+  assert.deepEqual(shown.map((l) => l.length), ['exchange: WARNING: first'.length, 230], r.out);
+  assert.ok(shown[1].endsWith('...'), r.out);
+});
+
+test('status: one line per run folder, from not started through phase 1 to a finished audit; it runs nothing', async (t) => {
+  const a = await setup(t);
+  const b = await setup(t);
+  const missing = path.join(b.run, '..', 'no-such-run');
+  const first = await a.rr('status', '--run-dir', a.run, '--run-dir', b.run, '--run-dir', missing);
+  assert.equal(first.code, 0, first.out);
+  assert.match(first.lines[0], /: not started; next: phase1 --start$/);
+  // Linux round F11: the cause is kept, not cut off behind the repeated folder path.
+  assert.match(first.lines[2], /: run\.json not readable \(cannot read run descriptor run\.json: ENOENT\)$/);
+  assert.equal((await a.rr('phase1', '--run-dir', a.run, '--start')).code, 0);
+  const before = (await a.calls()).length;
+  const during = await a.rr('status', '--run-dir', a.run);
+  assert.match(during.lines[0], /: phase1: seat A: .*; seat B: /);
+  assert.equal((await a.calls()).length, before, 'status started nothing');
+  // audit --prepare staged the auditor's folder: the next step is --finish, not --prepare again.
+  await fs.mkdir(`${a.run}-audit-input`, { recursive: true });
+  await fs.writeFile(path.join(`${a.run}-audit-input`, 'X-findings.md'), '## X1\n');
+  assert.match((await a.rr('status', '--run-dir', a.run)).lines[0], /: audit prepared; next: audit --finish \(first brief \d{4}-[^)]+\)$/);
+  await fs.mkdir(path.join(b.run, 'phase3'), { recursive: true });
+  await fs.writeFile(path.join(b.run, 'phase3', 'findings.json'), '{"findings":[]}\n');
+  assert.match((await b.rr('status', '--run-dir', b.run)).lines[0], /: audit finished; next: review-run manifest, then review-run report$/, 'no brief was written, so no first brief time');
+  assert.equal((await a.rr('status')).code, 2, 'status needs a --run-dir');
+});
+
+test('next lines name --native-agent first, and phase2 --start says when the phase 1 agent id is remembered', async (t) => {
+  const s = await setup(t, { seatA: { transport: 'native' } });
+  const start1 = await s.rr('phase1', '--run-dir', s.run, '--start');
+  assert.match(start1.lines.at(-1), /--wait --native-agent <seat>=<agent id> \(it waits on the agent itself; or --native-done <seat>/);
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A')).code, 0);
+  // Linux round F10: status tells a validated Phase 1 from one still running, and names the next step.
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: phase1 finished; next: run: review-run phase2 --run-dir .* --start \(first brief \d{4}-[^)]+\)$/);
+  const without = await s.rr('phase2', '--run-dir', s.run, '--start');
+  assert.match(without.lines.at(-1), /--wait --native-agent A=<agent id> \(or --native-done/);
+  await fs.writeFile(path.join(s.run, 'native-agents.json'), JSON.stringify({ A: 'a0123456789abcdef' }));
+  const again = await s.rr('phase2', '--run-dir', s.run, '--start');
+  assert.match(again.lines.at(-1), /--wait \(the phase 1 agent id of seat A is remembered; no flag needed\)$/);
 });
 
 test('phase2 --start: next does not ask to resume a native seat that was skipped', async (t) => {
   const s = await setup(t, { seatA: { transport: 'native' } });
   await s.ctl({ skipped: { A: 'seat B has no findings' } });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A')).code, 0);
   const start = await s.rr('phase2', '--run-dir', s.run, '--start');
   assert.ok(start.lines.some((l) => l.startsWith('seat A: skipped')), start.out);
@@ -1853,23 +2565,225 @@ test('phase2 --start: next does not ask to resume a native seat that was skipped
   assert.match(start.lines.at(-1), /^next: run: review-run phase2 /);
 });
 
-test('seatRanNothing: a No-findings file that says the review was incomplete, or a stderr with a failed exec, is not a clean verdict', () => {
-  const none = '# Seat B findings\n\n## No findings\n\nReview incomplete. No target source or evidence files could be read.\n';
-  assert.match(seatRanNothing(none, ''), /its file says "Review incomplete"/);
-  assert.match(seatRanNothing('## No findings\n\nChecks performed: read a.py\n', 'ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: "x" }'), /its stderr shows "exec_command failed"/);
-  assert.equal(seatRanNothing('## No findings\n\nChecks performed: ran pytest, 12 passed\n', 'noisy but fine'), null);
-  assert.equal(seatRanNothing('## B1 - real claim\nSeverity: LOW\n\nmention of review incomplete in prose\n', 'exec_command failed'), null, 'a seat with claims is not judged here');
+test('a CLI seat whose job object stopped what it left running is noted; a refused job object is a warning', async (t) => {
+  const nl = String.fromCharCode(10);
+  const finalB = ['# Seat B findings', '', '## B1 — one claim', 'Severity: LOW', 'Basis: STATIC_TRACE', 'Evidence strength: DETERMINISTIC', 'Evidence:', 'x.js:1', 'Same shape elsewhere: none found', '', '## Checks performed', '- AC-1: ok. MET', 'Blocked: none', ''].join(nl);
+  for (const [recordB, pattern] of [
+    [{ leftoversStopped: [4242, 4243] }, /seat B: its CLI left 2 process\(es\) running; they were stopped/],
+    [{ jobRefused: 'AssignProcessToJobObject failed: 5' }, /warning: seat B could not run in a job object \(AssignProcessToJobObject failed: 5\); a process it started can outlive it/],
+  ]) {
+    const s = await setup(t);
+    await s.ctl({ finalB, recordB });
+    assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+    const r = await s.rr('phase1', '--run-dir', s.run, '--wait');
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, pattern);
+  }
+});
+
+test('closing round 2: a CLI seat stopped after its answer is noted, and one whose output stayed open is a warning carried to the manifest and report', async (t) => {
+  const nl = String.fromCharCode(10);
+  const finalB = ['# Seat B findings', '', '## B1 — one claim', 'Severity: LOW', 'Basis: STATIC_TRACE', 'Evidence strength: DETERMINISTIC', 'Evidence:', 'x.js:1', 'Same shape elsewhere: none found', '', '## Checks performed', '- AC-1: ok. MET', 'Blocked: none', ''].join(nl);
+  const s = await setup(t);
+  await s.ctl({ finalB, recordB: { stoppedAfterAnswer: true, stopIncomplete: true } });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  const r = await s.rr('phase1', '--run-dir', s.run, '--wait');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /seat B: ran on past its final answer; the answer was kept/);
+  assert.match(r.out, /warning: seat B's output stayed open after its answer: a process it started may still be running/);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(s.run, 'stop-incomplete.json'), 'utf8')), { 'seat B (phase1)': true });
+  // The Phase 2 resume runs through the same dispatcher and is recorded too.
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
+  const p2 = await s.rr('phase2', '--run-dir', s.run, '--wait');
+  assert.equal(p2.code, 0, p2.out);
+  assert.match(p2.out, /warning: seat B's output stayed open after its answer/);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(s.run, 'stop-incomplete.json'), 'utf8')), { 'seat B (phase1)': true, 'seat B (phase2)': true });
+  const quiet = await setup(t);
+  await quiet.ctl({ finalB, recordB: { stoppedAfterAnswer: true } });
+  assert.equal((await quiet.rr('phase1', '--run-dir', quiet.run, '--start')).code, 0);
+  const q = await quiet.rr('phase1', '--run-dir', quiet.run, '--wait');
+  assert.match(q.out, /seat B: ran on past its final answer/);
+  assert.doesNotMatch(q.out, /output stayed open/);
+  await assert.rejects(fs.access(path.join(quiet.run, 'stop-incomplete.json')));
+  // Closing round 5 F1: a failed attempt with no answer whose output stayed open is warned and recorded too.
+  const lost = await setup(t);
+  await lost.ctl({ finalB, recordB: { status: 'failed', stopIncomplete: true }, codexWait: 1 });
+  assert.equal((await lost.rr('phase1', '--run-dir', lost.run, '--start')).code, 0);
+  const l = await lost.rr('phase1', '--run-dir', lost.run, '--wait');
+  assert.notEqual(l.code, 0, l.out);
+  assert.match(l.out, /warning: seat B exited without an answer, but its output stayed open: a process it started may still be running/);
+  assert.doesNotMatch(l.out, /ran on past its final answer/);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(lost.run, 'stop-incomplete.json'), 'utf8')), { 'seat B (phase1)': true });
+});
+
+test('round 6: the seat\'s one "Blocked:" line decides the blind warning; a No findings seat that says it was blocked stops', async (t) => {
+  const nl = String.fromCharCode(10);
+  const file = (...lines) => ['# Seat B findings', '', ...lines, ''].join(nl);
+  // "Blocked: none": a line the wording guess would flag is not a warning.
+  const healthy = await setup(t);
+  await healthy.ctl({ finalB: file('## B1 — one claim', 'Severity: LOW', 'Basis: STATIC_TRACE', 'Evidence strength: DETERMINISTIC', 'Evidence:', 'x.js:1', 'Same shape elsewhere: none found', '', '## Checks performed', '- H2: pytest failed: No usable temporary directory found. PARTIAL', 'Blocked: none') });
+  assert.equal((await healthy.rr('phase1', '--run-dir', healthy.run, '--start')).code, 0);
+  const h = await healthy.rr('phase1', '--run-dir', healthy.run, '--wait');
+  assert.equal(h.code, 0, h.out);
+  assert.equal(h.lines.some((l) => /seat B .*(?:blind|blocked)/i.test(l)), false, h.out);
+  // A declared block is a warning, quoted for the report.
+  const blocked = await setup(t);
+  await blocked.ctl({ finalB: file('## B1 — one claim', 'Severity: LOW', 'Basis: STATIC_TRACE', 'Evidence strength: DETERMINISTIC', 'Evidence:', 'x.js:1', 'Same shape elsewhere: none found', '', '## Checks performed', '- AC-1: traced the code. MET', 'Blocked: node --test: the harness was refused by policy') });
+  assert.equal((await blocked.rr('phase1', '--run-dir', blocked.run, '--start')).code, 0);
+  const b = await blocked.rr('phase1', '--run-dir', blocked.run, '--wait');
+  assert.equal(b.code, 0, b.out);
+  assert.ok(b.lines.some((l) => /^warning: seat B says it was blocked: "Blocked: node --test: the harness was refused by policy"/.test(l)), b.out);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(blocked.run, 'seat-warnings-phase1.json'), 'utf8')).blind.B, ['Blocked: node --test: the harness was refused by policy']);
+  // No findings plus a declared block is an incomplete seat; a claim heading inside a fence does not make it a seat with claims.
+  for (const lines of [['## No findings', '', 'Nothing in scope looked wrong.', 'Blocked: every file in the target: EACCES'], ['## No findings', '', '```', '## Q1 — a fixture heading', '```', 'Blocked: every file in the target: EACCES']]) {
+    const empty = await setup(t);
+    await empty.ctl({ finalB: file(...lines) });
+    assert.equal((await empty.rr('phase1', '--run-dir', empty.run, '--start')).code, 0);
+    const e = await empty.rr('phase1', '--run-dir', empty.run, '--wait');
+    assert.equal(e.code, 1, e.out);
+    assert.match(e.out, /seat B: wrote "No findings" but says it was blocked \("Blocked: every file in the target: EACCES"\)/);
+  }
+});
+
+test('the strict format: a refused seat file goes back to its seat once (a CLI seat is resumed on its session); refused again, the review is INCOMPLETE', async (t) => {
+  const nl = String.fromCharCode(10);
+  const file = (...lines) => ['# Seat B findings', '', ...lines, ''].join(nl);
+  const s = await setup(t);
+  // A block behind a later "Blocked: none" (closing rounds 1-5): refused, never read as clean.
+  await s.ctl({ finalB: file('## No findings', 'Blocked: none', '**Blocked:** rg missing') });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  const first = await s.rr('phase1', '--run-dir', s.run, '--wait');
+  assert.equal(first.code, 3, first.out);
+  assert.match(first.out, /seat B: its file was refused \(1 reason\(s\), e\.g\. line 5: "\*\*Blocked:\*\* rg missing" says "blocked:"/);
+  assert.match(first.out, /seat B rewrites its refused findings file \(one rewrite/);
+  const rewrite = (await s.calls()).filter((c) => c.script === 'codex-dispatch.mjs' && c.argv.includes('--detach')).at(-1);
+  assert.equal(s.flag(rewrite, '--session'), 'thread-B', 'the seat is resumed on its Phase 1 session');
+  assert.equal(s.flag(rewrite, '--brief'), path.join(s.run, 'phase1', 'B', 'rewrite-brief.txt'));
+  assert.equal(s.flag(rewrite, '--previous-result'), path.join(s.run, 'phase1', 'B', 'result.before-rewrite.json'));
+  const brief = await fs.readFile(path.join(s.run, 'phase1', 'B', 'rewrite-brief.txt'), 'utf8');
+  assert.match(brief, /refused by the review's format check:\n- line 5: .*\n/);
+  assert.match(brief, /Reply with the whole file again as your final message/);
+  assert.match(brief, /Your final message is the whole file and nothing else\./);
+  assert.match(brief, /every claim has a "Same shape elsewhere:" line .*Add a missing required line; change nothing else/, 'the seat may add a required line it left out');
+  assert.doesNotMatch(brief, /word written/, 'a final-message seat is never told to reply "written"');
+  assert.equal(await fs.readFile(path.join(s.run, 'phase1', 'B-findings.refused.md'), 'utf8'), file('## No findings', 'Blocked: none', '**Blocked:** rg missing'), 'the refused file is kept');
+  assert.deepEqual(Object.keys(JSON.parse(await fs.readFile(path.join(s.run, 'phase1', 'rewrites.json'), 'utf8'))), ['B']);
+  // The fake seat answers the same wrong file again: refused after its one rewrite, the step fails and names INCOMPLETE.
+  const again = await s.rr('phase1', '--run-dir', s.run, '--wait');
+  assert.equal(again.code, 1, again.out);
+  assert.match(again.out, /FAILED seat format: seat B's file was refused again after its one rewrite .*: the review is INCOMPLETE/);
+  assert.match(again.lines.at(-1), /^next: report the review as INCOMPLETE/);
+  assert.deepEqual(Object.keys(JSON.parse(await fs.readFile(path.join(s.run, 'phase1', 'format-refused.json'), 'utf8'))), ['B']);
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: INCOMPLETE: seat B's findings file was refused again after its one rewrite/);
+  // Restructure round 1 F1: once the manifest is written, status still names the refusal; an incomplete manifest says so.
+  await fs.writeFile(path.join(s.run, 'manifest.json'), JSON.stringify({ run_id: 'r', status: 'incomplete' }));
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: INCOMPLETE: seat B's findings file was refused again after its one rewrite .*; manifest\.json is written/);
+  await fs.rm(path.join(s.run, 'phase1', 'format-refused.json'));
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: finished INCOMPLETE: manifest\.json status is "incomplete"/);
+  await fs.writeFile(path.join(s.run, 'manifest.json'), JSON.stringify({ run_id: 'r', status: 'completed' }));
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: finished: manifest\.json is written/);
+  // A corrected rewrite passes: the run goes on to validate.
+  const fixed = await setup(t);
+  await fixed.ctl({ finalB: file('## No findings', 'Blocked:none') });
+  assert.equal((await fixed.rr('phase1', '--run-dir', fixed.run, '--start')).code, 0);
+  // The fake seat answers the rewrite as soon as it is resumed, with this corrected file.
+  await fixed.ctl({ finalB: file('## No findings', 'Blocked: none') });
+  assert.equal((await fixed.rr('phase1', '--run-dir', fixed.run, '--wait')).code, 3);
+  const ok = await fixed.rr('phase1', '--run-dir', fixed.run, '--wait');
+  assert.equal(ok.code, 0, ok.out);
+  assert.ok(ok.lines.some((l) => /^validate Phase 1: clean/.test(l)), ok.out);
+  // A native seat gets a message file instead of a dispatch.
+  const native = await setup(t, { seatA: { transport: 'native' } });
+  assert.equal((await native.rr('phase1', '--run-dir', native.run, '--start')).code, 0);
+  await fs.writeFile(path.join(native.run, 'phase1', 'A-findings.md'), file('## A1 — x', 'Severity: LOW'));
+  const n = await native.rr('phase1', '--run-dir', native.run, '--wait', '--native-done', 'A');
+  assert.equal(n.code, 3, n.out);
+  assert.match(n.out, /seat A: its file was refused .*no "## Checks performed" heading after the claims.*send its agent the message in .*prompt-rewrite-A\.txt/);
+  assert.match(await fs.readFile(path.join(native.run, 'phase1', 'prompt-rewrite-A.txt'), 'utf8'), /Write it again to .*A-findings\.md in one write/);
+  // A rewrite that ends badly is dispatched again as the rewrite, on the same session, not as a new Phase 1 pass.
+  const failing = await setup(t);
+  await failing.ctl({ finalB: file('## No findings') });
+  assert.equal((await failing.rr('phase1', '--run-dir', failing.run, '--start')).code, 0);
+  await failing.ctl({ finalB: file('## No findings'), recordB: { status: 'failed' } });
+  assert.equal((await failing.rr('phase1', '--run-dir', failing.run, '--wait')).code, 3);
+  await failing.ctl({ finalB: file('## No findings', 'Blocked: none') });
+  const retried = await failing.rr('phase1', '--run-dir', failing.run, '--wait');
+  assert.match(retried.out, /seat B: previous attempt ended with status failed; dispatched again/, retried.out);
+  const redo = (await failing.calls()).filter((c) => c.script === 'codex-dispatch.mjs' && c.argv.includes('--detach')).at(-1);
+  assert.equal(failing.flag(redo, '--brief'), path.join(failing.run, 'phase1', 'B', 'rewrite-brief.txt'));
+  assert.equal(failing.flag(redo, '--session'), 'thread-B');
+  // Restructure round 1 F8: a rewrite that failed before its CLI reported a session id is still sent on the Phase 1 session.
+  const early = await setup(t);
+  await early.ctl({ finalB: file('## No findings') });
+  assert.equal((await early.rr('phase1', '--run-dir', early.run, '--start')).code, 0);
+  await early.ctl({ finalB: file('## No findings'), recordB: { status: 'failed', threadId: null } });
+  assert.equal((await early.rr('phase1', '--run-dir', early.run, '--wait')).code, 3);
+  await early.ctl({ finalB: file('## No findings', 'Blocked: none') });
+  const resent = await early.rr('phase1', '--run-dir', early.run, '--wait');
+  assert.doesNotMatch(resent.out, /no session id/, resent.out);
+  const resentCall = (await early.calls()).filter((c) => c.script === 'codex-dispatch.mjs' && c.argv.includes('--detach')).at(-1);
+  assert.equal(early.flag(resentCall, '--brief'), path.join(early.run, 'phase1', 'B', 'rewrite-brief.txt'));
+  assert.equal(early.flag(resentCall, '--session'), 'thread-B');
+  assert.equal(early.flag(resentCall, '--previous-result'), path.join(early.run, 'phase1', 'B', 'result.before-rewrite.json'));
+  // A rewrite that cannot be sent (no session to resume) leaves the run as it was: no rewrite is recorded, the file stays.
+  const nosession = await setup(t);
+  await nosession.ctl({ finalB: file('## No findings'), recordB: { threadId: null } });
+  assert.equal((await nosession.rr('phase1', '--run-dir', nosession.run, '--start')).code, 0);
+  const ns = await nosession.rr('phase1', '--run-dir', nosession.run, '--wait');
+  assert.equal(ns.code, 1, ns.out);
+  assert.match(ns.out, /FAILED resume seat B: no session id/);
+  assert.equal(await fs.readFile(path.join(nosession.run, 'phase1', 'B-findings.md'), 'utf8'), file('## No findings'), 'the refused file is back in place');
+  await assert.rejects(fs.access(path.join(nosession.run, 'phase1', 'rewrites.json')), 'no rewrite was used');
+  // A Claude file-channel seat: its rewrite lands in its private file and is published again over the refused one.
+  const claude = await setup(t);
+  const badA = ['# Seat A findings', '', '## A1 — x', 'Severity: LOW', 'Basis: STATIC_TRACE', 'Evidence strength: DETERMINISTIC', 'Evidence:', 'x.js:1', 'Same shape elsewhere: none found', ''].join(nl);
+  const goodA = ['# Seat A findings', '', '## A1 — x', 'Severity: LOW', 'Basis: STATIC_TRACE', 'Evidence strength: DETERMINISTIC', 'Evidence:', 'x.js:1', 'Same shape elsewhere: none found', '', '## Checks performed', '- AC-1: ok. MET', 'Blocked: none', ''].join(nl);
+  await claude.ctl({ finalA: badA });
+  assert.equal((await claude.rr('phase1', '--run-dir', claude.run, '--start')).code, 0);
+  await claude.ctl({ finalA: goodA });
+  const c1 = await claude.rr('phase1', '--run-dir', claude.run, '--wait');
+  assert.equal(c1.code, 3, c1.out);
+  assert.match(c1.out, /seat A: its file was refused .*resumed once to rewrite it/);
+  assert.match(await fs.readFile(path.join(claude.run, 'phase1', 'A', 'rewrite-brief.txt'), 'utf8'), /Write it again to .*seat-A[\\/]A-findings\.md in one write[\s\S]*Reply with only the word written/);
+  const c2 = await claude.rr('phase1', '--run-dir', claude.run, '--wait');
+  assert.equal(c2.code, 0, c2.out);
+  assert.equal(await fs.readFile(path.join(claude.run, 'phase1', 'A-findings.md'), 'utf8'), goodA, 'the rewrite is published');
+  assert.equal(await fs.readFile(path.join(claude.run, 'phase1', 'A-findings.refused.md'), 'utf8'), badA, 'the refused file is kept');
+});
+
+test('Linux round linux-r1 F6: a claim-level defect (a missing field, a bad value, an unclosed fence) gets the one rewrite too', async (t) => {
+  const nl = String.fromCharCode(10);
+  const good = ['# Seat A findings', '', '## A1 — x', 'Severity: LOW', 'Basis: STATIC_TRACE', 'Evidence strength: DETERMINISTIC', 'Evidence:', 'x.js:1', 'Same shape elsewhere: none found', '', '## Checks performed', '- AC-1: ok. MET', 'Blocked: none', ''].join(nl);
+  for (const [name, bad, reason] of [
+    ['missing Basis', good.replace(`Basis: STATIC_TRACE${nl}`, ''), /no recognized "Basis:" line/],
+    ['bad Severity', good.replace('Severity: LOW', 'Severity: SEVERE'), /Severity value "SEVERE" is not exactly one of/],
+    ['unclosed fence', good.replace(`Evidence:${nl}x.js:1`, `Evidence:${nl}\`\`\`${nl}x.js:1`), /unterminated fenced code block/],
+  ]) {
+    const s = await setup(t);
+    await s.ctl({ finalA: bad });
+    assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+    await s.ctl({ finalA: good });
+    const first = await s.rr('phase1', '--run-dir', s.run, '--wait');
+    assert.equal(first.code, 3, `${name}: ${first.out}`);
+    assert.match(first.out, /seat A: its file was refused .*resumed once to rewrite it/, name);
+    assert.match(JSON.parse(await fs.readFile(path.join(s.run, 'phase1', 'rewrites.json'), 'utf8')).A.problems.join(' | '), reason, name);
+    const second = await s.rr('phase1', '--run-dir', s.run, '--wait');
+    assert.equal(second.code, 0, `${name}: ${second.out}`);
+  }
 });
 
 test('phase1 --wait: a CLI seat B that wrote "No findings" after its commands failed fails the step instead of validating clean', async (t) => {
-  const s = await setup(t);
   const nl = String.fromCharCode(10);
-  await s.ctl({ finalB: ['# Seat B findings', '', '## No findings', '', 'Review incomplete. Command execution failed before startup.', ''].join(nl) });
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  const r = await s.rr('phase1', '--run-dir', s.run, '--wait');
-  assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /seat B: wrote "No findings" but did not review: its file says "Review incomplete"/);
-  assert.equal((await s.calls()).some((c) => c.script === 'blind-relabel.mjs'), false, 'validate must not run');
+  // "Blocked: none" with a stderr that shows no command could start is incomplete (a mechanical check, not wording).
+  const e = await setup(t);
+  await e.ctl({ finalB: ['# Seat B findings', '', '## No findings', '', 'Blocked: none', ''].join(nl) });
+  assert.equal((await e.rr('phase1', '--run-dir', e.run, '--start')).code, 0);
+  const record = JSON.parse(await fs.readFile(path.join(e.run, 'phase1', 'B', 'result.json'), 'utf8').catch(() => '{}'));
+  await fs.writeFile(record.stderrLog ?? path.join(e.run, 'phase1', 'B', 'result.stderr.log'), 'ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: "x" }\n');
+  const er = await e.rr('phase1', '--run-dir', e.run, '--wait');
+  assert.equal(er.code, 1, er.out);
+  assert.match(er.out, /seat B: wrote "No findings" but its stderr shows "exec_command failed"/);
+  assert.equal((await e.calls()).some((c) => c.script === 'blind-relabel.mjs'), false, 'validate must not run');
 });
 
 test('formatElapsed: seconds under a minute, minutes and seconds above, unknown for a bad value', () => {
@@ -1912,69 +2826,27 @@ test('parseArgs: --max-wait 0 is refused, because a dispatcher reads 0 as no lim
   assert.equal(parseArgs(['phase1', '--run-dir', 'r', '--wait', '--max-wait', '1']).maxWait, 1);
 });
 
-test('seatRanNothing: a three-backtick line inside a four-backtick excerpt does not close it, so the statement after it still counts', () => {
-  const nl = String.fromCharCode(10);
-  const tick3 = '`'.repeat(3);
-  const tick4 = '`'.repeat(4);
-  const text = ['# Seat B findings', '', '## No findings', '', tick4, 'quoted:', tick3, 'still quoted', tick4, '', 'Review incomplete: could not run node --test (spawn EPERM).', ''].join(nl);
-  assert.match(seatRanNothing(text, ''), /its file says "Review incomplete/);
-});
-
-test('seatRanNothing: only the seat\'s own opening statement counts, not the same words inside a sentence about the target', () => {
-  const nl = String.fromCharCode(10);
-  const file = (...body) => ['# Seat B findings', '', '## No findings', '', ...body, ''].join(nl);
-  assert.match(seatRanNothing(file('Review incomplete. No target source files could be read.'), ''), /its file says "Review incomplete"/);
-  assert.match(seatRanNothing(file('**Command execution failed before startup.**'), ''), /its file says "Command execution failed"/);
-  assert.equal(seatRanNothing(file('The branch that logs "could not read config" is guarded; all 4 files were read.'), ''), null);
-  assert.equal(seatRanNothing(file('The absent docs do not leave the review incomplete.'), ''), null);
-  const stderr = ['failed to create unified exec process', 'CreateProcess { error }', 'exec_command failed: x'].join(nl);
-  assert.match(seatRanNothing(file('Checked everything.'), stderr), /its stderr shows "failed to create unified exec process"/);
-  assert.equal(execFailureCount(stderr), 3, 'the same pattern counts every kind of failed command');
-});
-
-test('phase2 --wait: next names the real reason when a seat conceded all its claims but there were disputes', async (t) => {
-  const s = await setup(t);
-  await s.ctl({ concede: 4, dispute: 2, finishWarning: 'exchange: WARNING: seat A conceded all 4 peer claims; the exchange added little for that side: consider --audit-depth full' });
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
-  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
-  const r = await s.rr('phase2', '--run-dir', s.run, '--wait');
-  assert.match(r.lines.at(-1), /decide the audit depth first: when one seat conceded all its claims a full audit is the safer choice/);
-  assert.doesNotMatch(r.lines.at(-1), /zero-dispute/);
-});
-
-test('phase1 --wait: a NATIVE seat that wrote "No findings" and said its review was incomplete fails the step like a CLI seat', async (t) => {
+test('phase1 --wait: a NATIVE seat that wrote "No findings" with no Blocked: line is sent back to rewrite, never passed as clean', async (t) => {
   const s = await setup(t, { seatA: { transport: 'native' } });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
   const nl = String.fromCharCode(10);
   await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), ['# Seat A findings', '', '## No findings', '', 'Review incomplete. I could not read the target.', ''].join(nl));
   const r = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A');
-  assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /seat A: wrote "No findings" but did not review: its file says "Review incomplete"/);
+  assert.equal(r.code, 3, r.out);
+  assert.match(r.out, /seat A: its file was refused \(1 reason\(s\), e\.g\. "## No findings" has no line "Blocked: none"/);
   assert.equal((await s.calls()).some((c) => c.script === 'blind-relabel.mjs' && c.argv[0] === 'validate'), false, 'validate must not run');
 });
 
-test('audit --finish: verification files that run.json will not use are reported, not silently ignored', async (t) => {
+test('audit --finish: verification files of a run that started without falsification are staged and reported, never silently ignored', async (t) => {
   const s = await setup(t);
   assert.equal((await s.rr('audit', '--run-dir', s.run, '--prepare')).code, 0);
   await fs.mkdir(path.join(s.run, 'phase3'), { recursive: true });
   await fs.writeFile(path.join(s.run, 'phase3', 'verification-X1.md'), 'verified\n');
   const finish = await s.rr('audit', '--run-dir', s.run, '--finish');
-  assert.ok(finish.lines.some((l) => /warning: 1 verification file\(s\) in phase3 are ignored because run\.json flags\.falsification is false/.test(l)), finish.out);
+  assert.ok(finish.lines.some((l) => /auditor brief: built \(every claim is re-checked, 1 verification file\(s\) staged\)/.test(l)), finish.out);
   const on = await setup(t, { flags: { falsification: true } });
   assert.equal((await on.rr('audit', '--run-dir', on.run, '--prepare')).code, 0);
   assert.equal((await on.rr('audit', '--run-dir', on.run, '--finish')).lines.some((l) => /are ignored because/.test(l)), false);
-});
-
-test('seatRanNothing: the statement counts anywhere in the No findings section, not inside a fence, and never for a file that has claims', () => {
-  const nl = String.fromCharCode(10);
-  const fence = String.fromCharCode(96).repeat(3);
-  const text = (...l) => l.join(nl) + nl;
-  assert.match(seatRanNothing(text('## No findings', '', 'Checked read a.py.', '', 'Review incomplete. Could not run the tests.'), ''), /its file says "Review incomplete"/, 'a second paragraph counts');
-  assert.equal(seatRanNothing(text('## No findings', '', 'All files read.', '', '## Checks performed', '- Could not run pytest, ran node instead.'), ''), null, 'the next section is not part of the statement');
-  assert.equal(seatRanNothing(text('## B1 real claim', 'Severity: LOW', '', '## No findings', 'Review incomplete.'), ''), null, 'a file with claims goes to validate');
-  assert.equal(seatRanNothing(text('## A1 claim', 'Severity: LOW', '', fence, '## No findings', 'Review incomplete.', fence), ''), null, 'a quoted marker inside a fence is not the marker');
-  assert.equal(seatRanNothing(text(fence, '## No findings', fence, 'Review incomplete.'), ''), null, 'no marker outside a fence');
 });
 
 test('otherPendingSeats: the next line also names the seats the wait did not reach', () => {
@@ -2010,6 +2882,11 @@ test('failureDetail: the reason lines before the last one are kept, exchange pro
   assert.equal(failureDetail(text), ' | reasons: append-rebuttals: line 12: claim id P1 survives inside an Evidence fence | append-rebuttals: line 31: claim id P2 survives inside an Evidence fence');
   assert.equal(failureDetail('only one line'), '');
   assert.equal(failureDetail(['exchange: x', 'last'].join(String.fromCharCode(10))), '');
+  // Linux round O2: the exchange's own refusal line is a reason, not progress.
+  const leak = ['exchange: validate both seats', 'relabeled A -> P, wrote x', 'exchange: seat A\'s file still names the run folder (/r/run, which resolves into it); return it to the seat to cite the path another way', 'exchange: scan peer-view-for-A.md', 'scan clean: 0 identity matches', 'relabeled B -> P, wrote y', 'build-brief: wrote a', 'build-brief: wrote b', 'build-brief: wrote c', 'exchange.mjs: no brief was built'].join(String.fromCharCode(10));
+  const detail = failureDetail(leak);
+  assert.match(detail, /reasons: .*seat A's file still names the run folder \(\/r\/run/, 'kept also when more lines follow it');
+  assert.equal(detail.split(' | ').length - 1, 4, detail);
 });
 
 test('self-review fixes: a crash shows its error line, not stack frames; a long reason line is cut; the FAILED line survives the ten-line cap', () => {
@@ -2025,6 +2902,35 @@ test('self-review fixes: a crash shows its error line, not stack frames; a long 
   assert.equal(out.length, 11, 'ten lines plus next:');
   assert.equal(out.at(-2), 'FAILED exchange: boom');
   assert.equal(out.at(-3), '... 4 more line(s) omitted');
+  // Restructure round 2 F4: a warning in the middle survives the cap; routine progress lines go first, order is kept.
+  const capped = [];
+  print({ lines: [...Array.from({ length: 9 }, (_, i) => `progress ${i + 1}`), 'warning: seat B left a process running', ...Array.from({ length: 3 }, (_, i) => `later ${i + 1}`), 'FAILED exchange: boom'], next: 'fix it' }, { write: (t) => capped.push(t) });
+  const shown = capped.join('').split(nl).filter(Boolean);
+  assert.equal(shown.length, 11);
+  assert.ok(shown.includes('warning: seat B left a process running'), shown.join(' | '));
+  assert.ok(shown.indexOf('progress 1') < shown.indexOf('warning: seat B left a process running'), 'kept lines stay in order');
+  assert.equal(shown.at(-2), 'FAILED exchange: boom');
+  assert.equal(shown.at(-3), '... 5 more line(s) omitted');
+  // Restructure round 3 F1: more warnings than room: none is dropped, the overflow shares one line.
+  const many = [];
+  print({ lines: [...Array.from({ length: 12 }, (_, i) => `warning: number ${i + 1}`), 'progress x', 'FAILED exchange: boom'], next: 'fix it' }, { write: (t) => many.push(t) });
+  const manyShown = many.join('').split(nl).filter(Boolean);
+  assert.equal(manyShown.length, 11);
+  assert.equal(manyShown.at(-2), 'FAILED exchange: boom');
+  for (let i = 1; i <= 12; i += 1) assert.ok(manyShown.join('\n').includes(`warning: number ${i}`), `warning ${i} is shown`);
+  assert.match(manyShown.at(-3), /^4 more warning\(s\): warning: number 9 \| /);
+  // Pair review F3 and F11: every overflow warning keeps its start however long the others are, and the progress lines
+  // left out are counted.
+  for (const count of [9, 12, 30]) {
+    for (const length of [20, 250, 2000]) {
+      const got = [];
+      const warnings = Array.from({ length: count }, (_, i) => `warning: n${i + 1}#${'x'.repeat(length)}`);
+      print({ lines: [...warnings, 'progress a', 'progress b', 'FAILED exchange: boom'], next: 'fix it' }, { write: (t) => got.push(t) });
+      const text = got.join('');
+      for (let i = 1; i <= count; i += 1) assert.ok(text.includes(`warning: n${i}#`), `${count}x${length}: warning ${i} is shown`);
+      assert.match(text.split(nl).filter(Boolean).at(-3), /; 2 more line\(s\) omitted$/, `${count}x${length}`);
+    }
+  }
 });
 
 test('self-review fixes: a reader that closes stdout early does not turn a failure into exit 0', async (t) => {
@@ -2043,7 +2949,7 @@ test('self-review fixes: a reader that closes stdout early does not turn a failu
 test('a byte-order mark before the first heading of a native seat file does not hide its claims (a Windows editor writes one)', async (t) => {
   const s = await setup(t, { seatA: { transport: 'native' } });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1 - x\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1 - x\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A')).code, 0);
   assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
   const bom = String.fromCharCode(0xfeff);
@@ -2055,7 +2961,7 @@ test('a byte-order mark before the first heading of a native seat file does not 
 test('a native seat whose agent has finished but whose file has no claim heading is a failure that says why, not a wait', async (t) => {
   const s = await setup(t, { seatA: { transport: 'native' } });
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
-  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1 - x\nclaim\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '## A1 - x\nSeverity: LOW\nBasis: STATIC_TRACE\nEvidence strength: DETERMINISTIC\nEvidence:\nclaim\nSame shape elsewhere: none found\n\n## Checks performed\nBlocked: none\n');
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A')).code, 0);
   assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
   await fs.writeFile(path.join(s.run, 'phase2', 'A-rebuttals-raw.md'), '## Rebuttals (from A) of B claims\n\nno heading below\n');
@@ -2087,4 +2993,146 @@ test('audit --finish with falsification: a verification file for another claim d
   await fs.writeFile(path.join(s.run, 'phase3', 'verification-Y1.md'), 'verified\n');
   const right = await s.rr('audit', '--run-dir', s.run, '--finish');
   assert.equal(right.code, 0, right.out + right.err);
+});
+
+test('manifest, report, recheck, splice and scan hand their arguments to their step, in-process, with its output and exit code', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review-run-forward-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const call = async (...argv) => {
+    let out = '';
+    let err = '';
+    const code = await runInProcess(argv, { stdout: { write: (c) => { out += c; } }, stderr: { write: (c) => { err += c; } } });
+    return { code, out, err };
+  };
+  const missing = path.join(dir, 'missing');
+  const manifest = await call('manifest', '--run-dir', missing);
+  assert.equal(manifest.code, 1);
+  assert.match(manifest.err, /^build-manifest: /);
+  assert.equal((await call('manifest', '--bogus')).code, 2);
+  const help = await call('report', '--help');
+  assert.equal(help.code, 0);
+  assert.match(help.out, /^ {2}node review-run\.mjs report +--run-dir <dir> \[--format text\|chat/, 'a forwarded command answers --help with its usage line');
+  // Pair review F9 and F6: each phase command's synopsis names every option its parser takes, and the ten-line cap is
+  // stated for the phase commands only.
+  const usage = (await call('--help')).out;
+  for (const command of ['phase1', 'phase2', 'audit']) {
+    const line = usage.split('\n').find((l) => new RegExp(`^ {2}node review-run\\.mjs ${command} `).test(l)) ?? '';
+    for (const option of ['--max-wait', '--native-done', '--native-agent', '--accept-drift', '--local']) assert.ok(line.includes(`[${option}`), `${command} usage names ${option}`);
+  }
+  assert.match(usage, /phase1, phase2 and audit print at most 10 lines/);
+  const report = await call('report', '--run-dir', missing);
+  assert.notEqual(report.code, 0);
+  assert.match(report.err, /^build-report: /);
+  const recheck = await call('recheck', '--from-run', missing, '--out', path.join(dir, 'p.md'));
+  assert.equal(recheck.code, 1);
+  assert.match(recheck.err, /^build-recheck-packet: cannot read the previous task packet/);
+  const seat = path.join(dir, 'A-findings.md');
+  await fs.writeFile(seat, '# Seat A findings\n\n## A1 — t\nSeverity: LOW\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nold\n```\n');
+  const reply = path.join(dir, 'reply.md');
+  await fs.writeFile(reply, '## A1 — t\nSeverity: LOW\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nEvidence:\n```\nnew\n```\n');
+  const spliced = await call('splice', '--file', seat, '--match-heading', '## A1', '--with', reply);
+  assert.equal(spliced.code, 0, spliced.err);
+  assert.match(await fs.readFile(seat, 'utf8'), /new/);
+  const view = path.join(dir, 'peer-view.md');
+  await fs.writeFile(view, '# Peer findings\n\n## P1 — t\nnothing to see\n');
+  const scan = await call('scan', '--in', view);
+  assert.equal(scan.code, 0, scan.err);
+  assert.match(scan.out, /^scan clean/);
+  assert.equal((await call('scan', '--in', seat)).code, 1, 'a seat mention stops, as the scan always did');
+  const verifier = await call('verifier-brief', '--claim', missing, '--rebuttal', missing, '--target-dir', dir, '--out', path.join(dir, 'v.txt'));
+  assert.equal(verifier.code, 1);
+  assert.match(verifier.err, /^build-brief: /);
+  assert.equal((await call('verifier-brief', '--target-dir', dir, '--out', path.join(dir, 'v.txt'))).code, 1, 'the verifier mode still needs its claim');
+});
+
+test('Linux round linux-r2 F1: --incomplete-seat asks a live worker to stop first, so its own cleanup runs', { skip: process.platform === 'win32' }, async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
+  const { processStartMs, processStartToken, processExists } = await import('../detach-utils.mjs');
+  const { spawn } = await import('node:child_process');
+  const marker = path.join(s.base, 'cleanup-ran');
+  const worker = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => { require('fs').writeFileSync(${JSON.stringify(marker)}, 'yes'); process.exit(0); }); setInterval(() => {}, 1000);`], { stdio: 'ignore', detached: true });
+  t.after(() => { try { worker.kill('SIGKILL'); } catch { /* gone */ } });
+  await new Promise((r) => worker.once('spawn', r));
+  await new Promise((r) => setTimeout(r, 300));
+  await fs.writeFile(path.join(s.run, 'phase2', 'A', 'result.json'), JSON.stringify({ status: 'running', sessionId: 'sess-A', workerPid: worker.pid, workerStartedAt: new Date(processStartMs(worker.pid) ?? Date.now()).toISOString(), workerStartToken: processStartToken(worker.pid), startedAt: new Date().toISOString() }));
+  const wait = await s.rr('phase2', '--run-dir', s.run, '--wait', '--incomplete-seat', 'A');
+  assert.equal(wait.code, 0, wait.out + wait.err);
+  assert.ok(wait.lines.some((l) => /seat A: its Phase 2 worker was still running and was stopped/.test(l)), wait.out);
+  assert.equal(await fs.readFile(marker, 'utf8'), 'yes', 'the worker ran its SIGTERM cleanup');
+  assert.equal(processExists(worker.pid), false);
+});
+
+test('Linux round linux-r2 F7: an empty object is no finished audit, exchange or manifest', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait')).code, 0);
+  await fs.mkdir(path.join(s.run, 'phase3'), { recursive: true });
+  for (const file of [path.join(s.run, 'manifest.json'), path.join(s.run, 'phase3', 'findings.json'), path.join(s.run, 'phase2', 'exchange-result.json')]) {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, '{}\n');
+  }
+  const status = (await s.rr('status', '--run-dir', s.run)).lines[0];
+  assert.doesNotMatch(status, /audit finished|exchange finished|manifest\.json is written/, status);
+  const wait = await s.rr('phase1', '--run-dir', s.run, '--wait');
+  assert.doesNotMatch(wait.out, /already done/, wait.out);
+});
+test('field run: status and report call a manifest built before the finished audit stale, by the findings hash', async (t) => {
+  const { createHash } = await import('node:crypto');
+  const { loadRun } = await import('../build-report.mjs');
+  const s = await setup(t);
+  await fs.mkdir(path.join(s.run, 'phase3'), { recursive: true });
+  // The failed chain wrote an incomplete manifest before any findings existed; the audit finished later.
+  await fs.writeFile(path.join(s.run, 'manifest.json'), JSON.stringify({ status: 'incomplete', run_id: 'old', hashes: {} }));
+  const findings = '{"findings":[]}\n';
+  await fs.writeFile(path.join(s.run, 'phase3', 'findings.json'), findings);
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: audit finished after manifest\.json was built; next: review-run manifest \(rebuilds it\), then review-run report/);
+  const early = await loadRun(s.run);
+  assert.ok(early.caveats.some((c) => c.startsWith('manifest.json was built before the current phase3/findings.json')));
+  // A stale manifest leaves the report not final, like a missing one, with the stale caveat only.
+  assert.equal(early.status, 'NOT FINAL');
+  assert.ok(!early.caveats.some((c) => /is not built yet|The review is incomplete/.test(c)), early.caveats.join(' | '));
+  const sha = createHash('sha256').update(findings).digest('hex');
+  await fs.writeFile(path.join(s.run, 'manifest.json'), JSON.stringify({ status: 'completed', run_id: 'new', hashes: { findings_json: sha } }));
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: finished: manifest\.json is written/);
+  const current = await loadRun(s.run);
+  assert.ok(!current.caveats.some((c) => c.startsWith('manifest.json was built before')));
+  assert.equal(current.status, 'COMPLETE');
+  // A completed manifest whose findings hash is another file's is stale too, and never reported COMPLETE.
+  await fs.writeFile(path.join(s.run, 'manifest.json'), JSON.stringify({ status: 'completed', run_id: 'new', hashes: { findings_json: 'f'.repeat(64) } }));
+  assert.match((await s.rr('status', '--run-dir', s.run)).lines[0], /: audit finished after manifest\.json was built/);
+  const stale = await loadRun(s.run);
+  assert.ok(stale.caveats.some((c) => c.startsWith('manifest.json was built before the current phase3/findings.json')));
+  assert.equal(stale.status, 'NOT FINAL');
+  assert.ok(!stale.caveats.some((c) => /is not built yet/.test(c)), stale.caveats.join(' | '));
+  const { renderChat, renderHtml } = await import('../build-report.mjs');
+  assert.match(renderChat(stale), /^> \*\*REVIEW NOT FINAL /);
+  assert.match(renderHtml(stale), /<span class="status incomplete">NOT FINAL<\/span>/);
+});
+
+test('status: a re-audit after manifest.json was built is pending until audit --finish passes, not finished', async (t) => {
+  const { createHash } = await import('node:crypto');
+  const s = await setup(t);
+  const p3 = path.join(s.run, 'phase3');
+  await fs.mkdir(p3, { recursive: true });
+  const findings = '{"findings":[]}\n';
+  const sha = createHash('sha256').update(findings).digest('hex');
+  await fs.writeFile(path.join(s.run, 'manifest.json'), JSON.stringify({ status: 'completed', run_id: 'r', hashes: { findings_json: sha } }));
+  // audit --finish moved the findings aside for the resumed auditor's file, and translate refused that file.
+  await fs.writeFile(path.join(p3, 'findings.attempt-1.json'), findings);
+  await fs.writeFile(path.join(p3, 'prompt-auditor-fix.txt'), 'Your audit file was refused.\n');
+  const status = async () => (await s.rr('status', '--run-dir', s.run)).lines[0];
+  assert.match(await status(), /: audit: the auditor is working or its output waits for audit --finish \(a re-audit after manifest\.json was built\)/);
+  // A refused audit file with nothing moved aside is not a re-audit.
+  await fs.rename(path.join(p3, 'findings.attempt-1.json'), path.join(s.run, 'kept-attempt.json'));
+  assert.match(await status(), /: audit: the auditor is working or its output waits for audit --finish \(the auditor's file was refused after manifest\.json was built\)/);
+  await fs.rename(path.join(s.run, 'kept-attempt.json'), path.join(p3, 'findings.attempt-1.json'));
+  // translate crashed instead: no fix message, the findings still moved aside.
+  await fs.rm(path.join(p3, 'prompt-auditor-fix.txt'));
+  assert.match(await status(), /: audit: the auditor is working or its output waits for audit --finish \(a re-audit after manifest\.json was built\)/);
+  // audit --finish passed: fresh findings beside the kept attempt, and the manifest's hash is theirs.
+  await fs.writeFile(path.join(p3, 'findings.json'), findings);
+  assert.match(await status(), /: finished: manifest\.json is written/);
 });

@@ -1,0 +1,79 @@
+{
+  "threadId": null,
+  "sessionId": "df8f1a37-3242-4e8c-a500-c00c19b1cd09",
+  "finalMessage": "17 findings: 15 settled-agree, 1 unresolved-low-stakes, 1 settled-refuted. written",
+  "touchedFiles": [],
+  "modelRequested": "opus",
+  "effortRequested": null,
+  "modelResolved": "claude-opus-5-5",
+  "effortResolved": null,
+  "selectionNote": "modelResolved comes from system/init; the stream does not verify effective effort.",
+  "isolated": true,
+  "worktreePath": "C:\\Users\\dev\\AppData\\Local\\Temp\\rv-6601bf27",
+  "isolationNote": "snapshot worktree; reused=false; skipped nested repositories: none",
+  "readOnly": {
+    "fileTools": "enforced",
+    "shell": "prompt-only",
+    "cwd": "worktree"
+  },
+  "host": null,
+  "transport": "cli",
+  "webAccess": false,
+  "usageSemantics": "per-call",
+  "usage": {
+    "input_tokens": 24,
+    "cached_input_tokens": 715291,
+    "cache_write_input_tokens": 88957,
+    "output_tokens": 20615,
+    "reasoning_tokens": null,
+    "estimated_cost_usd": null,
+    "source": "provider",
+    "raw": {
+      "input_tokens": 24,
+      "cache_creation_input_tokens": 88957,
+      "cache_read_input_tokens": 715291,
+      "output_tokens": 20615,
+      "output_tokens_details": {
+        "thinking_tokens": 5534
+      },
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 88957,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "global",
+      "iterations": [
+        {
+          "input_tokens": 2,
+          "output_tokens": 41,
+          "cache_read_input_tokens": 93585,
+          "cache_creation_input_tokens": 511,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 511
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+    }
+  },
+  "costUsd": 1.2671102,
+  "permissionDenials": [],
+  "status": "completed",
+  "startedAt": "2026-10-20T13:49:41.669Z",
+  "finishedAt": "2026-10-20T13:56:01.397Z",
+  "durationMs": 379728,
+  "timeoutS": 0,
+  "envMode": "filtered",
+  "detached": true,
+  "workerPid": 22168,
+  "workerStartedAt": "2026-10-20T13:49:40.581Z",
+  "workerStartToken": null,
+  "workerLog": "@@RUN_JSON@@-audit-dispatch\\dispatch-worker.log"
+}

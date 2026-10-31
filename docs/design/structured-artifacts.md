@@ -10,7 +10,7 @@ Phase 1 (independent findings) and Phase 2 (rebuttals) are currently
 authored by reviewer models as Markdown, using a claim-heading convention
 (`## A3`, `## P1`) that `blind-relabel.mjs` parses with a hand-written
 CommonMark-subset parser (fence detection, inline code-span matching,
-backslash-escape handling). Every blinding bypass fixed in 1.3.0 was a bug in
+backslash-escape handling). Every blinding bypass fixed in 1.2.0 was a bug in
 that parser, not in the protocol's actual rules. `findings.json` (the final
 Phase 3 output) is already structured JSON, produced by `translate` — this
 document proposes extending that same principle one stage earlier, so
@@ -112,7 +112,7 @@ envelope moves to JSON.
 
 ## Which current parser functions this affects
 
-From `blind-relabel.mjs` (line numbers as of 1.3.0's final state):
+From `blind-relabel.mjs` (line numbers as of 1.2.0's final state):
 
 | Function | Fate under JSON Phase 1/2 |
 |---|---|
@@ -120,7 +120,7 @@ From `blind-relabel.mjs` (line numbers as of 1.3.0's final state):
 | `splitLineSpans` (320) | Retired for the JSON path (no inline code spans to split in a JSON string). Still needed for verifier files and legacy replay. |
 | `splitProseAndCode` (352) | Same as above. |
 | `relabelText` (362) | Rewritten for JSON: becomes a JSON-tree walk substituting `id`/`claim` field values, plus a recursive string-value pass for any embedded identity tokens in `evidence`/`title`/`counter_fact` text. Markedly simpler than the current regex-based line relabeling. |
-| `extractClaimHeadings` (604) | Retired for the JSON path — claim IDs are just `.map(f => f.id)`, no heading regex or fence-awareness needed at all. This eliminates the entire bug class the "no fence-awareness" and "code-span-stripped reconstruction" 1.3.0 fixes were patching. |
+| `extractClaimHeadings` (604) | Retired for the JSON path — claim IDs are just `.map(f => f.id)`, no heading regex or fence-awareness needed at all. This eliminates the entire bug class the "no fence-awareness" and "code-span-stripped reconstruction" 1.2.0 fixes were patching. |
 | `countRelabelTargets` (1091) | Same fate as `extractClaimHeadings` — becomes a straightforward field count. |
 | `scanText` (485) | Adapted, not retired: still walks every string value for identity tokens, but no longer needs fence/code-span awareness to know what to skip, since there is no prose/code distinction inside a JSON string value — every string value is scanned in full. |
 | `parseVerificationFile` (689) | Unaffected — verifier files stay Markdown (see Backwards compatibility above). |
@@ -128,7 +128,7 @@ From `blind-relabel.mjs` (line numbers as of 1.3.0's final state):
 
 ## Bug classes this eliminates
 
-Every 1.3.0 blinding-bypass fix was a variant of "the Markdown parser's model
+Every 1.2.0 blinding-bypass fix was a variant of "the Markdown parser's model
 of what counts as prose vs. code vs. a heading didn't match CommonMark's
 actual grammar, or didn't match what a hand-written regex assumed." A JSON
 artifact has no fence/code-span/backslash-escape ambiguity to get wrong:
@@ -171,7 +171,7 @@ artifact has no fence/code-span/backslash-escape ambiguity to get wrong:
 ## What this document is not
 
 This is not an approval to implement. The migration touches the parser
-surface backing every regression test added across the 1.3.0 hardening
+surface backing every regression test added across the 1.2.0 hardening
 rounds; per the production-readiness pass's Phase A (protocol freeze) and
 this repository's standing "verify before design, confirm before implement"
 rule, implementation requires a separate, explicit go-ahead after this

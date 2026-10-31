@@ -1,0 +1,79 @@
+{
+  "threadId": null,
+  "sessionId": "79a8cac1-1e7f-4ffa-8245-74ee70db7750",
+  "finalMessage": "8 CONCEDE, 0 DISPUTE. written",
+  "touchedFiles": [],
+  "modelRequested": "fable",
+  "effortRequested": "high",
+  "modelResolved": "claude-fable-5-1",
+  "effortResolved": null,
+  "selectionNote": "modelResolved comes from system/init; the stream does not verify effective effort.",
+  "isolated": true,
+  "worktreePath": "C:\\Users\\dev\\AppData\\Local\\Temp\\rv-3d741506",
+  "isolationNote": "snapshot worktree; reused=true; skipped nested repositories: none",
+  "readOnly": {
+    "fileTools": "enforced",
+    "shell": "prompt-only",
+    "cwd": "worktree"
+  },
+  "host": null,
+  "transport": "cli",
+  "webAccess": false,
+  "usageSemantics": "per-call",
+  "usage": {
+    "input_tokens": 66,
+    "cached_input_tokens": 561224,
+    "cache_write_input_tokens": 19949,
+    "output_tokens": 8268,
+    "reasoning_tokens": null,
+    "estimated_cost_usd": null,
+    "source": "provider",
+    "raw": {
+      "input_tokens": 66,
+      "cache_creation_input_tokens": 19949,
+      "cache_read_input_tokens": 561224,
+      "output_tokens": 8268,
+      "output_tokens_details": {
+        "thinking_tokens": 3402
+      },
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 19949,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "global",
+      "iterations": [
+        {
+          "input_tokens": 32,
+          "output_tokens": 22,
+          "cache_read_input_tokens": 194366,
+          "cache_creation_input_tokens": 4669,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 4669
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+    }
+  },
+  "costUsd": 8.808674499999999,
+  "permissionDenials": [],
+  "status": "completed",
+  "startedAt": "2026-10-20T13:43:54.006Z",
+  "finishedAt": "2026-10-20T13:47:03.801Z",
+  "durationMs": 189795,
+  "timeoutS": 0,
+  "envMode": "filtered",
+  "detached": true,
+  "workerPid": 35688,
+  "workerStartedAt": "2026-10-20T13:43:52.549Z",
+  "workerStartToken": null,
+  "workerLog": "@@RUN_JSON@@\\phase2\\A\\dispatch-worker.log"
+}

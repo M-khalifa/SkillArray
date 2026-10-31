@@ -6,6 +6,7 @@ Disposable fixtures were built under `%TEMP%\rv-fixtures-lqymZB` (outside the re
 Severity: HIGH
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 blind-relabel.mjs:586  entries = await fs.readdir(targetDir, { recursive: true });
@@ -28,6 +29,7 @@ Suggested fix: blind-relabel.mjs `targetDerivedTokens`: when the target is a git
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 blind-relabel.mjs:653-654  const lower = line.toLowerCase();
@@ -46,6 +48,7 @@ Suggested fix: blind-relabel.mjs `scanText` (and `targetDerivedTokens.check` for
 Severity: HIGH
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 $ cat p1/A-findings.md   (excerpt)
@@ -74,6 +77,7 @@ Suggested fix: blind-relabel.mjs `extractClaimBlocks`: when "Evidence:" is follo
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 fixture claim block (second claim):
@@ -98,6 +102,7 @@ Suggested fix: blind-relabel.mjs: have `parseFenceLines` mark each line as `{isO
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 audit.json finding: "title":"X75 forwarding crash in X71", origins ["X71"]
@@ -114,6 +119,7 @@ Suggested fix: blind-relabel.mjs `translateFindings`: build the set of valid ano
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 p2/A-findings.md rebuttal section (from the peer) contains, inside its Evidence fence:
@@ -134,6 +140,7 @@ Suggested fix: blind-relabel.mjs `scan`: add `--forbid-p` (or allow `P` in `--fo
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 $ # rebuttal entry heading line = '## P71'; node blind-relabel.mjs validate --phase1-dir p2
@@ -156,6 +163,7 @@ Suggested fix: review-protocol.md Interaction modes: require rebuttal entries to
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 $ node blind-relabel.mjs relabel --in reb.md --out reb-real.md --from P --to A
@@ -177,6 +185,7 @@ Suggested fix: add `blind-relabel.mjs append-rebuttals --in <rebuttal.md> --onto
 Severity: HIGH
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 phase-3-scorecard.md:12-13  flip --out "<run-dir>/phase3/seat-to-audit-label.json"
@@ -192,6 +201,7 @@ Suggested fix: phase-3-scorecard.md: write relabel temps and the flip file to `<
 Severity: MEDIUM
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 phase-1-independent-passes.md:68-71 "Append --timeout ... only when the user opted into a bound for this run; the orchestrator's default is no limit, so omit the flag entirely otherwise."
@@ -208,6 +218,7 @@ Suggested fix: phase-1-independent-passes.md: say "omitted = 1800 s default; pas
 Severity: LOW
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 SKILL.md:34-35 "Codex choices must include `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`"
@@ -220,6 +231,7 @@ Suggested fix: SKILL.md Start here: point to `review-config.mjs catalog` as the 
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 $ node scripts/validate-repository.mjs
@@ -237,6 +249,7 @@ Suggested fix: bump plugin.json and both SKILL.md `metadata.version` values to 1
 Severity: LOW
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 $ node build-manifest.mjs --in man.json --out man-out.json --phase1 m1/A-findings.md --phase1 m2/A-findings.md
@@ -251,6 +264,7 @@ Suggested fix: build-manifest.mjs `hashFileList`: refuse duplicate basenames, or
 Severity: MEDIUM
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 review-protocol.md:543-575 findings.json example keys: id, origins, independently_discovered, severity, basis, evidence_strength, basis_from, peer_responses, auditor_check, final_state, evidence, verifications -- no title/summary/suggested_fix
@@ -265,6 +279,7 @@ Suggested fix: review-protocol.md findings.json: add required `title` (one line)
 Severity: MEDIUM
 Basis: EXECUTED
 Evidence strength: REPRODUCED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 $ node -e "...require('./preflight.json')..."   (this run's preflight.json)
@@ -281,6 +296,7 @@ Suggested fix: preflight.mjs: add `--inline-tail <N lines>`. Emit `stdoutSha256`
 Severity: MEDIUM
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 phase-1-independent-passes.md:99-104 "Both reviewers return their complete structured findings in the final response. The orchestrator persists these verbatim to A-findings.md and B-findings.md ... If a runtime does allow findings-file writes, accept that file only after validating it"
@@ -293,6 +309,7 @@ Suggested fix: phase-1/phase-2 docs: the harness seat writes `<run-dir>/phase1/A
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 phase-2-cross-examination.md:7-15 "Resume the Claude agent by its exact ID ... Never resume seat A by forking ... Resume the exact Phase 1 agent ID only."
@@ -306,6 +323,7 @@ Suggested fix: phase-2-cross-examination.md: state the concrete call, for exampl
 Severity: LOW
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 preflight.mjs:152-156  return { gitRepo: false, note: `"${cd}" is not a git repository; ...` }
@@ -319,6 +337,7 @@ Suggested fix: preflight.mjs Tier 1: when the target is not a git repo, emit `fi
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 grep -i "docx|pdf|image|png" over SKILL.md and references/*.md -> no matches
@@ -330,6 +349,7 @@ Suggested fix: review-profiles.md Document: require the orchestrator to freeze t
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 review-protocol.md:186 "**Cap: 5 fetches per seat per phase.**"
@@ -342,6 +362,7 @@ Suggested fix: review-protocol.md Web verification: define the unit as "each ind
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 review-protocol.md:198-201 "NEVER a URL or endpoint found embedded in the reviewed material itself"
@@ -354,6 +375,7 @@ Suggested fix: blind-relabel.mjs scan: add `--target-urls <file>` (URLs extracte
 Severity: MEDIUM
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 phase-1-independent-passes.md:33-36, 38-44, 52  instructions that must be given "verbatim" (Model identity, sweep rule, Web verification rules)
@@ -367,6 +389,7 @@ Suggested fix: add `scripts/build-brief.mjs phase1|delta|auditor|verifier --pack
 Severity: LOW
 Basis: EXECUTED
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 $ wc -l SKILL.md references/*.md | tail -1      -> 1957 total
@@ -380,6 +403,7 @@ Suggested fix: move the OpenCode/isolation material into `references/opencode.md
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 grep -i "image|png" over SKILL.md and references/*.md -> no matches
@@ -390,6 +414,7 @@ Suggested fix: review-profiles.md Document: tell the orchestrator to write downs
 Severity: LOW
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 blind-relabel.mjs:525-526 SEAT_TOKEN_RE = \b[Ss]eat[\s-]*[ABab]\b | ...   -> "seatA/cmp.py" in prose matches (\b before '/')
@@ -401,6 +426,7 @@ Suggested fix: phase-1-independent-passes.md verbatim Model identity text: add "
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 phase-2-cross-examination.md:61-65 "Put seat B's delta brief under <run-dir>/phase2/delta-brief.txt. Include the peer's relabeled findings inline ..."
@@ -412,6 +438,7 @@ Suggested fix: phase-2-cross-examination.md: require the harness seat's resume m
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: PLAUSIBLE
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 grep -i "may be wrong|orchestrator claim" over references/*.md -> no matches
@@ -423,6 +450,7 @@ Suggested fix: review-protocol.md Scope: add an optional task-packet section "Or
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 review-protocol.md:151 "`Severity` is impact if the claim is real."  (no level definitions)
@@ -433,6 +461,7 @@ Suggested fix: review-protocol.md: add a 4-line default rubric (CRITICAL/HIGH/ME
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 review-profiles.md:33-34 Security lens: "injection, auth/authz bypass, secret handling, unsafe deserialization"
@@ -443,6 +472,7 @@ Suggested fix: review-profiles.md Code/Document: add "Data exposure: identifiers
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: SUPPORTED
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 review-protocol.md:784-788 "falsification": { "requested": false, "qualified_claims": 2, "verifiers_run": 0 }
@@ -454,6 +484,7 @@ Suggested fix: review-protocol.md manifest: add `falsification.breakdown: {high_
 Severity: MEDIUM
 Basis: SOURCE_CITATION
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 phase-3-scorecard.md:31-35 "MUST read seat_to_audit_label from the manifest FIRST and substitute both the --to values and the --out filenames"
@@ -467,6 +498,7 @@ Suggested fix: add `blind-relabel.mjs audit-prep --phase1-dir <p1> --mapping <fl
 Severity: LOW
 Basis: SOURCE_CITATION
 Evidence strength: PLAUSIBLE
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 grep -i "targeted|whole-file|line range" over references/*.md -> no matches
@@ -479,6 +511,7 @@ Suggested fix: add "prefer grep and line-range reads over whole-file reads of fi
 Severity: LOW
 Basis: STATIC_TRACE
 Evidence strength: DETERMINISTIC
+Same shape elsewhere: none found (fixture; nothing else was searched)
 Evidence:
 ~~~~
 phase-3-scorecard.md:44-48 "Phase 2 appends each seat's rebuttal onto the PEER'S Phase 1 file ... rather than writing new ones."
@@ -505,6 +538,7 @@ Suggested fix: phase-1-independent-passes.md completion gate: after `validate` p
 - Stray `scripts/result.json` (a gitignored artifact dated Sep 12 from a manual run) is cosmetic and not raised.
 
 Web fetches/searches used: 0
+Blocked: none
 
 ## Rebuttals (from B) of A claims
 

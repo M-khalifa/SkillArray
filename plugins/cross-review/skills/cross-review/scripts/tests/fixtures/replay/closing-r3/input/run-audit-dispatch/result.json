@@ -1,0 +1,79 @@
+{
+  "threadId": null,
+  "sessionId": "2fd65b40-8cd3-44f4-a32e-e7a91c5826e8",
+  "finalMessage": "11 findings: 11 settled-agree, 0 settled-refuted, 0 unresolved-low-stakes, 0 unresolved-high-stakes, 0 dropped-speculative. written",
+  "touchedFiles": [],
+  "modelRequested": "opus",
+  "effortRequested": null,
+  "modelResolved": "claude-opus-5-5",
+  "effortResolved": null,
+  "selectionNote": "modelResolved comes from system/init; the stream does not verify effective effort.",
+  "isolated": true,
+  "worktreePath": "C:\\Users\\dev\\AppData\\Local\\Temp\\rv-f6701714",
+  "isolationNote": "snapshot worktree; reused=false; skipped nested repositories: none",
+  "readOnly": {
+    "fileTools": "enforced",
+    "shell": "prompt-only",
+    "cwd": "worktree"
+  },
+  "host": null,
+  "transport": "cli",
+  "webAccess": false,
+  "usageSemantics": "per-call",
+  "usage": {
+    "input_tokens": 22,
+    "cached_input_tokens": 563656,
+    "cache_write_input_tokens": 71721,
+    "output_tokens": 13659,
+    "reasoning_tokens": null,
+    "estimated_cost_usd": null,
+    "source": "provider",
+    "raw": {
+      "input_tokens": 22,
+      "cache_creation_input_tokens": 71721,
+      "cache_read_input_tokens": 563656,
+      "output_tokens": 13659,
+      "output_tokens_details": {
+        "thinking_tokens": 2741
+      },
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 71721,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "global",
+      "iterations": [
+        {
+          "input_tokens": 2,
+          "output_tokens": 66,
+          "cache_read_input_tokens": 76934,
+          "cache_creation_input_tokens": 713,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 713
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+    }
+  },
+  "costUsd": 0.9597672,
+  "permissionDenials": [],
+  "status": "completed",
+  "startedAt": "2026-10-20T06:02:43.213Z",
+  "finishedAt": "2026-10-20T06:05:30.636Z",
+  "durationMs": 167423,
+  "timeoutS": 0,
+  "envMode": "filtered",
+  "detached": true,
+  "workerPid": 33184,
+  "workerStartedAt": "2026-10-20T06:02:43.061Z",
+  "workerStartToken": null,
+  "workerLog": "@@RUN_JSON@@-audit-dispatch\\dispatch-worker.log"
+}

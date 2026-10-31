@@ -119,10 +119,10 @@ extraction, so the orchestrator freezes it before dispatch:
    3200 px screenshot costs each seat far more tokens and adds nothing a reader
    can check at normal size.
 3. Record the extraction command and tool version in the task packet, and hash
-   the extracted files with the task packet (`build-manifest.mjs --task-packet`
+   the extracted files with the task packet (`review-run manifest` hashes the packet,
    plus the Phase 1 pre-flight inventory of the target folder), so a later
    reader can tell which bytes the seats reviewed.
-4. Give the hyperlink list to `scan --target-urls` (see phase-2-cross-examination.md,
+4. Give the hyperlink list to `review-run scan --target-urls` (see phase-2-cross-examination.md,
    Target URLs).
 
 ## Choosing and combining

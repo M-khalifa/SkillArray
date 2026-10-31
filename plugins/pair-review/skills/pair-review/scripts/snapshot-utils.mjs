@@ -7,8 +7,8 @@ import { entryKey, entrySha256, nameBytes } from './path-utils.mjs';
 
 const SKIP_DIRS = new Set(['.git', 'node_modules']);
 const GIT_ONLY = new Set(['.git']);
-// Python writes these when code runs; skipCaches leaves them out of a source snapshot's hash.
-const CACHE_DIRS = new Set(['__pycache__', '.pytest_cache']);
+// Python and Gradle write these when code runs or builds; skipCaches leaves them out of a source snapshot's hash.
+const CACHE_DIRS = new Set(['__pycache__', '.pytest_cache', '.gradle']);
 const CACHE_FILE_RE = /\.py[co]$/;
 export const DEFAULT_MAX_FILES = 20000;
 

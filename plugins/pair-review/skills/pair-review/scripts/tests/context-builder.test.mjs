@@ -235,6 +235,15 @@ test('buildPacket: a new UNTRACKED file (created since --base, never git-added) 
   assert.ok(result.packet.changedFiles.includes('brand-new.py'), 'a new untracked file must appear in changedFiles');
 });
 
+test('buildPacket: a file renamed since --base lists both its old and its new path in changedFiles [slow]', async (t) => {
+  const { dir, base } = await makeGitRepoWithDiff(t);
+  git(['mv', 'unrelated.py', 'moved.py'], dir);
+  git(['commit', '-q', '-m', 'rename'], dir);
+  const result = await buildPacket({ cd: dir, base, symbolFileCap: 10 });
+  assert.notEqual(result.packet, null, result.reason);
+  assert.ok(result.packet.changedFiles.includes('unrelated.py') && result.packet.changedFiles.includes('moved.py'), JSON.stringify(result.packet.changedFiles));
+});
+
 test('buildPacket: --cd as a SUBDIRECTORY produces cd-relative changedFiles/colocatedTests, not repo-root-relative paths [slow]', async (t) => {
   const { subdir, base } = await makeGitRepoWithSubdirDiff(t);
   const result = await buildPacket({ cd: subdir, base, symbolFileCap: 10 });

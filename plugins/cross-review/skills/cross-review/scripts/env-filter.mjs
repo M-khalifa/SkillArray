@@ -1,7 +1,4 @@
-// Shared child-process environment filtering, extracted from
-// codex-dispatch.mjs and opencode-dispatch.mjs (pure extraction, no behavior
-// change -- both dispatchers' own test suites pass unchanged against this
-// module). Base OS environment a child process needs to function at all --
+// Shared child-process environment filtering for the dispatchers and preflight. Base OS environment a child process needs to function at all --
 // not specific to either CLI's own auth. The threat this filter addresses is
 // the REVIEWED REPOSITORY's own code (running inside a review CLI's
 // sandbox, or via command execution the sandbox allows) reading unrelated
@@ -22,9 +19,7 @@ const POSIX_BASE_ENV_PREFIXES = ['LC_', 'XDG_'];
 // undefined (Node's spawn() default: full parent env). 'filtered' returns an
 // explicit object containing only the base OS allowlist, any
 // provider-specific credential-locator vars the caller names in
-// providerAllowlist (e.g. codex-dispatch.mjs passes ['CODEX_HOME'];
-// opencode-dispatch.mjs passes none, since OpenCode's own credentials are
-// located entirely via already-allowlisted vars), and anything the caller
+// providerAllowlist (e.g. codex-dispatch.mjs passes ['CODEX_HOME']), and anything the caller
 // named in envPassthrough -- everything else in the orchestrator's
 // environment (AWS_*, GITHUB_TOKEN, database passwords, etc.) is excluded.
 export function buildChildEnv({

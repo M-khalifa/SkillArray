@@ -9,12 +9,12 @@
 //
 //   Tier 2 (executable, requires --exec, off by default): runs commands the
 //   CALLER supplies (e.g. the target's own test/lint/build command) through
-//   the same filtered child environment codex-dispatch.mjs/
-//   opencode-dispatch.mjs already use (env-filter.mjs), and binds each
+//   the same filtered child environment the dispatchers already use
+//   (env-filter.mjs), and binds each
 //   result to a snapshot hash of the target's current git state (HEAD +
 //   `git diff HEAD --binary` + a content hash per untracked file, the same
-//   coverage opencode-dispatch.mjs's own computeSnapshotFingerprint already
-//   uses for its worktree-reuse check) so a later content change -- tracked
+//   coverage worktree-utils.mjs's computeSnapshotFingerprint uses for its
+//   worktree-reuse check) so a later content change -- tracked
 //   OR untracked -- makes that evidence detectably stale rather than
 //   silently reused.
 //
@@ -23,20 +23,23 @@
 // this script** -- enforced by construction, since there is no LLM call
 // anywhere in this file.
 
-import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { access, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { buildChildEnv } from './env-filter.mjs';
-import { diffInventories, hashInventory } from './snapshot-utils.mjs';
-import { killTree, spawnCli } from './spawn-utils.mjs';
-import { RunDescriptorError, writeRunDescriptor, seatOutputDir } from './run-descriptor.mjs';
+import { DEFAULT_MAX_FILES, diffInventories, hashInventory } from './snapshot-utils.mjs';
+import { hasExited, jobSpawn, killGroupOnExit, killTree as killTreeShared, readJobReport, spawnCli, stopMarkedProcesses } from './spawn-utils.mjs';
+
+// An exited child is not signalled again: its pid may belong to another process by now.
+const killTree = (child, options) => (hasExited(child) ? Promise.resolve() : killTreeShared(child, options));
+import { readRunDescriptor, RunDescriptorError, writeRunDescriptor, seatOutputDir } from './run-descriptor.mjs';
 import { evaluateSupport, hostStatusOf } from './host-support.mjs';
-import { comparablePath, DIFF_PLAIN, entryKey, entryPath, entrySha256, gitNames, GIT_PLAIN, isMainModule, nameBytes } from './path-utils.mjs';
+import { comparablePath, realPath, expandPathVars, expandWorkingFolderForms, probeFoldsCase, setFoldsCase, decodeFileUrls, DIFF_PLAIN, entryKey, entryPath, entrySha256, GIT_C_LOCALE, gitNames, GIT_PLAIN, gitRepoFromProbe, isInsidePath, isMainModule, nameBytes } from './path-utils.mjs';
 
 class RelayError extends Error {}
 
@@ -87,22 +90,22 @@ const SAMPLE_SEATS = [
   '  "seatA": {"provider": "anthropic", "runtime": "claude", "model": "opus", "effort": null, "transport": "native"},',
   `  "seatB": ${SAMPLE_SEAT_B},`,
   '  "auditor": {"provider": "anthropic", "runtime": "claude", "model": "opus", "effort": null, "transport": "native"},',
-  '  "flags": {"auditDepth": "light", "falsification": false, "mode": "adversarial"}',
+  '  "flags": {"falsification": false, "mode": "adversarial"}',
   '}',
 ].map((line) => `                     ${line}`).join('\n');
 
 const USAGE = `preflight.mjs — deterministic pre-flight evidence for a review target.
 
 Usage:
-  node preflight.mjs --cd <path> [--exec "<command>"]... [--timeout <seconds>]
+  node preflight.mjs --cd <path> [--exec "<command>"]... [--exec-file <file>]... [--timeout <seconds>]
                  [--env-mode filtered|inherit] [--env-passthrough NAME,NAME]
-                 [--exec-in <path> "<command>"]...
-                 [--out <path>] [--check-stale <snapshotHash>]
+                 [--exec-in <path> "<command>"]... [--exec-in-file <path> <file>]...
+                 [--out <path>] [--check-stale <snapshotHash>] [--base <commit>]
                  [--compact [--tail <lines>] [--log-dir <dir>]]
                  [--repo <path>]... [--fetch] [--watch-file <path>]...
                  [--source-snapshot <folder>=<repo>@<ref>]...
   node preflight.mjs --host claude-code|codex --cd <path> --run-dir <dir> --seats <seats.json>
-                 [--matched-tools "<text>"] [--allow-trial] [--skip-codex-doctor] [--probe-claude-session] [--probe-dispatch [--yes-paid]]
+                 [--matched-tools "<text>"] [--allow-trial] [--skip-codex-doctor] [--probe-claude-session] [--probe-reach] [--keep-target-copy] [--probe-dispatch [--yes-paid]]
 
 --cd <path>          Target directory. Required.
 --exec "<command>"   Opt in to Tier 2: run this shell command against --cd. May
@@ -111,9 +114,33 @@ Usage:
                      Without --exec, only Tier 1 (metadata-only) evidence is
                      produced -- this script NEVER executes anything the target
                      defines unless --exec explicitly names a command to run.
+                     Each command runs through the system shell: cmd.exe
+                     (%ComSpec% /d /s /c) on Windows, /bin/sh elsewhere.
+                     A command must not leave a detached background process (a
+                     server, a watcher): on Windows preflight stops what it finds
+                     (leftoversStopped in the result) and warns; on Linux and macOS
+                     it stops the command's process group and warns
+                     (leftoverGroupStopped). A child that left the group (setsid)
+                     is found by the run id it inherits and stopped too
+                     (leftoversStopped); on macOS only when it is not an Apple
+                     system program (/bin/sh, /bin/sleep, /usr/bin/perl), whose
+                     environment macOS hides. One that survives and holds the
+                     output open makes preflight warn, record outputHeldOpen and
+                     not wait for it.
                      Runs through a filtered environment when --env-mode is
                      "filtered" (the default); --env-mode inherit passes the
                      full, unfiltered parent environment instead.
+--base <commit>      Tier 1 lists the diff and changed files against <commit> (a sha,
+                     tag or branch) instead of HEAD, for a review of work already
+                     committed. snapshotHash and --check-stale are not affected.
+--exec-file <file>   The same as one --exec per line of <file> (UTF-8; blank lines and
+                     lines starting with # are skipped). Each line reaches the shell
+                     exactly as written, so a command with quotes or a path with spaces
+                     needs no quoting for the calling shell (Windows PowerShell 5.1
+                     drops the inner quotes of an --exec value).
+--exec-in-file <path> <file>
+                     The same as one --exec-in <path> per line of <file>, read like
+                     --exec-file (for PowerShell 5.1 and quoted paths with spaces).
 --exec-in <path> "<command>"
                      Tier 2 in another repository: run the command with <path> as the
                      working directory. May repeat; commands for the same path share one
@@ -124,8 +151,8 @@ Usage:
                      the command logs continue the command-N numbering after --exec's.
 --timeout <seconds>  Per --exec/--exec-in command timeout. 0 means unlimited.
                      Default: 1800 (matches the dispatchers' own default).
---env-mode <mode>    "filtered" (default) or "inherit", same semantics as
-                     codex-dispatch.mjs/opencode-dispatch.mjs.
+--env-mode <mode>    "filtered" (default) keeps only the OS basics (no proxy or CA
+                     variables: name them in --env-passthrough), or "inherit".
 --env-passthrough <names>  Comma-separated extra env var names to allow through
                      under --env-mode filtered.
 --out <path>         Write the JSON result here instead of stdout.
@@ -196,7 +223,7 @@ Usage:
 --run-dir <dir>      Run directory that receives run.json (--host only).
 --seats <file>       JSON: {seatA, seatB, auditor, verifiers?, sourceDirs?, flags?} using the
                      run descriptor's actor field names (--host only). flags defaults to
-                     {auditDepth: "light", falsification: false, mode: "adversarial"}.
+                     {falsification: false, mode: "adversarial"}.
                      Each actor needs provider, runtime, model and transport ("native" or
                      "cli"); effort may be null or omitted. role, sessionId, resultPath,
                      worktreePath and outputDir are filled in.
@@ -205,6 +232,20 @@ Usage:
                      Example seats file:
 ${SAMPLE_SEATS}
 --matched-tools <t>  Text naming the agent tools the orchestrator matched; recorded in run.json.
+--review-rules head|worktree  Where to read each repository's REVIEW.md (--cd, each folder above it up to its
+                     repository root when --cd is a subfolder, and each --repo). head (default): the copy at the merge-base with the default branch
+                     (origin/HEAD), so a branch cannot rewrite its own rules; HEAD, with a WARNING, when no default
+                     branch resolves; worktree: the file on disk. A plain folder is read from disk. The text goes to <run-dir>/review-rules.md and into the seat and auditor briefs;
+                     run.json records reviewRules. Above 8 KB in total it is refused. A WARNING names a REVIEW.md that
+                     the working tree or the branch changed (reviewRules.changedByTarget).
+--review-rules-only <dir>  Read REVIEW.md only from these of --cd and --repo (repeat it), for example when a --repo is
+                     only a read-only reference whose own rules do not apply to this change.
+--probe-reach        With --yes-paid and a Codex CLI seat: one small read-only "codex exec" in --cd tries each
+                     path outside --cd and each host:port the task packet names, and one temp-file write;
+                     the results go to <run-dir>/reach-probe.json and every FAIL is printed as a WARNING.
+--keep-target-copy   Copy the target's files as the seats will review them to <run-dir>-target-copy (git: tracked and
+                     untracked files git does not ignore; a plain folder: every file except .git, node_modules and
+                     caches), so the run can become a bench case later. Over 20000 files or 1 GB it is skipped.
 --probe-dispatch     Print the one paid probe dispatch this check would run (cheapest model,
                      lean flags). Nothing is run, and nothing is spent, without --yes-paid.
 --probe-claude-session  A Claude CLI seat on a Codex host is usable only if its session survives the call, which depends on how
@@ -215,12 +256,13 @@ ${SAMPLE_SEATS}
                      (about 13k to 23k tokens) to see whether Codex can still run commands. Without it nothing paid runs.
 --skip-codex-doctor  With a Codex seat: do not run "codex doctor". By default it runs (local, free); when its sandbox row is failed
                      the live probe needs --yes-paid, and the host preflight is refused when that probe fails, because every command a Codex seat starts is then rejected and the seat
-                     returns a "No findings" file without reviewing.
--h, --help           Print this message and exit 0.
+                     returns a "No findings" file without reviewing. It also skips the free check that python, rg and git
+                     start inside the Codex sandbox (a nested codex command is blocked on a Codex host).
+-h, --help          Print this message and exit 0.
 
 With --out the JSON goes to the file and one summary line (hash, exit codes, targetChanged) to stdout.
 Keys of tier2 (and of each tier2Repos entry): snapshotHash, snapshotHashAfter, targetChanged, results[] (command,
-startedAt, finishedAt, durationMs, exitCode, timedOut, touchedFiles, stdout, stderr; with --compact each stream is
+startedAt, finishedAt, durationMs, exitCode, timedOut, timeoutS (the limit it ran under), touchedFiles, stdout, stderr; with --compact each stream is
 {bytes, sha256, lineCount, tail, summary, matches, matchesTruncated, log}).
 
 Output (normal run, no --check-stale): { tier1: {...}, tier2: {...} | null,
@@ -263,6 +305,7 @@ function parseArgs(argv) {
     envPassthrough: [],
     out: null,
     checkStale: null,
+    base: null,
     compact: false,
     tail: DEFAULT_TAIL_LINES,
     logDir: null,
@@ -279,6 +322,10 @@ function parseArgs(argv) {
     allowTrial: false,
     skipCodexDoctor: false,
     probeClaudeSession: false,
+    probeReach: false,
+    keepTargetCopy: false,
+    reviewRules: null,
+    reviewRulesOnly: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -289,9 +336,14 @@ function parseArgs(argv) {
     };
     if (tok === '--cd') args.cd = takeValue();
     else if (tok === '--exec') args.exec.push(takeValue());
-    else if (tok === '--exec-in') {
+    else if (tok === '--exec-file') {
+      args.exec.push(...readCommandFile(takeValue(), tok));
+    } else if (tok === '--exec-in') {
       const dir = takeValue();
       args.execIn.push({ dir, command: takeValue() });
+    } else if (tok === '--exec-in-file') {
+      const dir = takeValue();
+      for (const command of readCommandFile(takeValue(), tok)) args.execIn.push({ dir, command });
     } else if (tok === '--timeout') {
       const v = takeValue();
       if (!/^[0-9]+$/.test(v)) throw new RelayError('--timeout must be a whole number of seconds, 0 for unlimited');
@@ -300,6 +352,7 @@ function parseArgs(argv) {
     else if (tok === '--env-passthrough') args.envPassthrough = takeValue().split(',').map((s) => s.trim()).filter(Boolean);
     else if (tok === '--out') args.out = takeValue();
     else if (tok === '--check-stale') args.checkStale = takeValue();
+    else if (tok === '--base') args.base = takeValue();
     else if (tok === '--compact') args.compact = true;
     else if (tok === '--fail-on-command-error') args.failOnCommandError = true;
     else if (tok === '--tail') {
@@ -324,6 +377,13 @@ function parseArgs(argv) {
     else if (tok === '--allow-trial') args.allowTrial = true;
     else if (tok === '--skip-codex-doctor') args.skipCodexDoctor = true;
     else if (tok === '--probe-claude-session') args.probeClaudeSession = true;
+    else if (tok === '--probe-reach') args.probeReach = true;
+    else if (tok === '--keep-target-copy') args.keepTargetCopy = true;
+    else if (tok === '--review-rules') {
+      args.reviewRules = takeValue();
+      if (!['head', 'worktree'].includes(args.reviewRules)) throw new RelayError(`--review-rules must be head or worktree, got "${args.reviewRules}"`);
+    }
+    else if (tok === '--review-rules-only') args.reviewRulesOnly.push(takeValue());
     else if (tok === '--fetch') args.fetch = true;
     else if (tok === '--watch-file') args.watchFiles.push(takeValue());
     else if (tok === '-h' || tok === '--help') printUsageAndExit(0);
@@ -331,12 +391,13 @@ function parseArgs(argv) {
   }
   if (!args.cd) throw new RelayError('--cd <path> is required');
   if (args.host === null) {
-    const stray = ['runDir', 'seats', 'matchedTools'].filter((k) => args[k] !== null).concat(args.probeDispatch ? ['probeDispatch'] : [], args.yesPaid ? ['yesPaid'] : [], args.allowTrial ? ['allowTrial'] : [], args.skipCodexDoctor ? ['skipCodexDoctor'] : [], args.probeClaudeSession ? ['probeClaudeSession'] : []);
-    if (stray.length > 0) throw new RelayError('--run-dir, --seats, --matched-tools, --probe-dispatch, --probe-claude-session, --yes-paid, --allow-trial and --skip-codex-doctor are only accepted with --host');
+    const stray = ['runDir', 'seats', 'matchedTools', 'reviewRules'].filter((k) => args[k] !== null).concat(args.reviewRulesOnly.length > 0 ? ['reviewRulesOnly'] : [],args.probeDispatch ? ['probeDispatch'] : [], args.yesPaid ? ['yesPaid'] : [], args.allowTrial ? ['allowTrial'] : [], args.skipCodexDoctor ? ['skipCodexDoctor'] : [], args.probeClaudeSession ? ['probeClaudeSession'] : [], args.probeReach ? ['probeReach'] : [], args.keepTargetCopy ? ['keepTargetCopy'] : []);
+    if (stray.length > 0) throw new RelayError('--run-dir, --seats, --matched-tools, --review-rules, --review-rules-only, --probe-dispatch, --probe-claude-session, --probe-reach, --keep-target-copy, --yes-paid, --allow-trial and --skip-codex-doctor are only accepted with --host');
   } else {
-    if (args.execIn.length > 0 || args.exec.length > 0) throw new RelayError('--exec and --exec-in are not used with --host; run them in a separate preflight call without --host');
+    if (args.execIn.length > 0 || args.exec.length > 0) throw new RelayError('--exec, --exec-file, --exec-in and --exec-in-file are not used with --host; run them in a separate preflight call without --host');
+    if (args.base) throw new RelayError('--base is not used with --host; give it to the evidence preflight (without --host)');
     if (!HOSTS.includes(args.host)) throw new RelayError(`--host must be one of ${HOSTS.join(', ')}, got "${args.host}"`);
-    if (!args.runDir || !args.seats) throw new RelayError('--host requires --run-dir and --seats');
+    if (!args.runDir || (!args.seats && !args.probeReach)) throw new RelayError('--host requires --run-dir and --seats');
   }
   if (args.compact && !args.logDir) {
     if (!args.out) throw new RelayError('--compact needs --log-dir (or --out, which defaults it to "<--out>.logs")');
@@ -357,9 +418,9 @@ function parseArgs(argv) {
 // risk from a repo path) -- this is NOT the Tier 2 --exec path, which needs
 // a real shell to interpret an arbitrary caller-supplied command string; see
 // runWithTimeout below for that.
-function runCapture(cmd, args, cwd) {
+function runCapture(cmd, args, cwd, env = process.env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, shell: false });
+    const child = spawn(cmd, args, { windowsHide: true, cwd, env, shell: false });
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     child.stdout.on('data', (d) => { stdout = Buffer.concat([stdout, d]); });
@@ -370,16 +431,23 @@ function runCapture(cmd, args, cwd) {
 }
 
 async function isGitRepo(cwd) {
-  const result = await runCapture('git', ['rev-parse', '--is-inside-work-tree'], cwd);
-  return result.code === 0 && result.stdout.toString('utf8').trim() === 'true';
+  const result = await runCapture('git', ['rev-parse', '--is-inside-work-tree'], cwd, { ...process.env, ...GIT_C_LOCALE }).catch((err) => {
+    throw new RelayError(err.code === 'ENOENT' ? 'git is required and was not found on PATH; install git (or put it on PATH) and run preflight again' : `git could not run: ${err.message}`);
+  });
+  try {
+    return gitRepoFromProbe({ code: result.code, stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8') }, cwd);
+  } catch (err) {
+    throw new RelayError(err.message);
+  }
 }
 
 // Tier 1: pure repository-state inspection, no execution of anything the
 // target repo defines. Runs unconditionally, no opt-in required.
 // inventory: an already computed hashInventory(cd) for a plain folder, so run() hashes it once.
-async function runTier1(cd, inventory = null) {
+async function runTier1(cd, inventory = null, base = null) {
   const gitTracked = await isGitRepo(cd);
   if (!gitTracked) {
+    if (base) throw new RelayError(`--base ${base} needs a git repository; "${cd}" is not one`);
     inventory ??= await hashInventory(cd);
     return {
       gitRepo: false,
@@ -397,12 +465,22 @@ async function runTier1(cd, inventory = null) {
   // without it, a cd pointed at a subdirectory would produce root-relative
   // diff paths that never match, silently dropping every tracked change
   // from fileStats.
-  const [diff, status, nameOnly, untrackedNames] = await Promise.all([
-    runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--relative', 'HEAD'], cd),
-    runCapture('git', [...GIT_PLAIN, 'status', '--porcelain'], cd),
-    runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--relative', 'HEAD', '--name-only', '-z'], cd),
-    runCapture('git', ['ls-files', '--others', '--exclude-standard', '-z'], cd),
-  ]);
+  // git status --porcelain is not cwd-relative: "-- ." keeps it to --cd, and its paths keep the repository-root prefix
+  // (gitPrefix, from rev-parse --show-prefix), which summaryLine strips to match changedFiles.
+  // --base: the diff runs from that commit, so work already committed is listed too.
+  let from = 'HEAD';
+  if (base) {
+    const r = await runCapture('git', ['rev-parse', '--verify', '--quiet', `${base}^{commit}`], cd);
+    if (r.code !== 0) throw new RelayError(`--base ${base} is not a commit in ${cd}`);
+    from = r.stdout.toString('utf8').trim();
+  }
+  const [diff, status, nameOnly, untrackedNames, prefix] = await gitOutAll([
+    [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--no-renames', '--relative', from],
+    [...GIT_PLAIN, 'status', '--porcelain', '--', '.'],
+    [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--no-renames', '--relative', from, '--name-only', '-z'],
+    ['ls-files', '--others', '--exclude-standard', '-z'],
+    ['rev-parse', '--show-prefix'],
+  ], cd);
   // -z: a file name with a non-ASCII character or a newline comes back as written, not quoted.
   const listed = new Map([...gitNames(nameOnly.stdout), ...gitNames(untrackedNames.stdout)].map((e) => [entryKey(e), e]));
   const changedFiles = [...listed.keys()];
@@ -419,8 +497,10 @@ async function runTier1(cd, inventory = null) {
   }
   return {
     gitRepo: true,
+    ...(base ? { base: from } : {}),
     diff: diff.stdout.toString('utf8'),
     status: status.stdout.toString('utf8'),
+    ...(prefix.stdout.toString('utf8').trim() ? { gitPrefix: prefix.stdout.toString('utf8').trim() } : {}),
     changedFiles,
     fileStats,
   };
@@ -428,6 +508,29 @@ async function runTier1(cd, inventory = null) {
 
 function sha256(buf) {
   return createHash('sha256').update(buf).digest('hex');
+}
+
+// A git call whose output feeds a snapshot hash, a fingerprint or the evidence: a failure (a bad diff setting in the
+// user's config, a broken index) must stop preflight, or an empty output would hash two different states the same.
+function gitChecked(res, args, cd) {
+  if (res.code !== 0) {
+    // git's reason is its "fatal:" line; usage text can follow it.
+    const lines = res.stderr.toString('utf8').trim().split(/\r?\n/);
+    const reason = lines.find((l) => /^fatal:/.test(l)) ?? lines.slice(-1)[0] ?? '';
+    const hint = /ambiguous argument 'HEAD'|unknown revision/.test(reason) ? ' (no commits yet?)' : '';
+    throw new RelayError(`git ${args.filter((a) => !a.startsWith('-c') && !a.includes('=')).join(' ')} failed in "${cd}" (exit ${res.code}): ${reason}${hint}`);
+  }
+  return res;
+}
+
+async function gitOut(args, cd) {
+  return gitChecked(await runCapture('git', args, cd), args, cd);
+}
+
+// Several git calls at once; every one is awaited before a failure is reported, so none is left running.
+async function gitOutAll(argsList, cd) {
+  const results = await Promise.all(argsList.map((args) => runCapture('git', args, cd)));
+  return results.map((res, i) => gitChecked(res, argsList[i], cd));
 }
 
 // Scoped to --cd: the committed tree of that folder, its binary diff against HEAD (so a binary
@@ -439,12 +542,12 @@ async function computeSnapshotHash(cd, inventory = null) {
   if (headRes.code !== 0) {
     throw new RelayError(`could not resolve HEAD in "${cd}" (not a git repo, or no commits yet)`);
   }
-  const prefix = (await runCapture('git', ['rev-parse', '--show-prefix'], cd)).stdout.toString('utf8').trim();
+  const prefix = (await gitOut(['rev-parse', '--show-prefix'], cd)).stdout.toString('utf8').replace(/\r?\n$/, '');
   const treeRes = await runCapture('git', ['rev-parse', `HEAD:${prefix}`], cd);
   // A folder that exists only in the working tree has no committed tree yet.
   const treeId = treeRes.code === 0 ? treeRes.stdout.toString('utf8').trim() : 'no-committed-tree';
-  const diffRes = await runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
-  const untrackedRes = await runCapture('git', ['ls-files', '--others', '--exclude-standard', '-z'], cd);
+  const diffRes = await gitOut([...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
+  const untrackedRes = await gitOut(['ls-files', '--others', '--exclude-standard', '-z'], cd);
   const untrackedEntries = gitNames(untrackedRes.stdout).filter((e) => !e.text.endsWith('/')).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
 
   const hash = createHash('sha256');
@@ -463,12 +566,12 @@ async function computeSnapshotHash(cd, inventory = null) {
 // Tier 2's --exec command is an arbitrary caller-supplied shell command
 // string (e.g. "npm test", "pytest -q && echo done"), so this genuinely
 // needs `shell: true` on both platforms to be interpreted at all -- unlike
-// codex-dispatch.mjs/opencode-dispatch.mjs's spawnCli, which only ever
-// invokes a known executable (codex/opencode) with structured argv and
+// the dispatchers' spawnCli, which only ever
+// invokes a known executable (claude/codex) with structured argv and
 // therefore uses shell:true JUST for win32's .cmd-shim resolution. killTree
 // (from spawn-utils.mjs) still applies for the timeout-kill path: on win32
 // it uses taskkill /T against the whole process tree (the same reason
-// codex-dispatch.mjs/opencode-dispatch.mjs need it -- a plain child.kill()
+// the dispatchers need it -- a plain child.kill()
 // only terminates cmd.exe, orphaning the real process underneath).
 // spawnFn/platform overridable so tests can assert detached:true on the POSIX branch without
 // needing to actually run on POSIX (same seam spawn-utils.mjs's spawnCli uses).
@@ -478,31 +581,103 @@ function stopOnSignal(child, { proc = process, exit = (code) => process.exit(cod
   const guard = { stopping: false };
   const handlers = {};
   for (const [sig, code] of Object.entries({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 })) {
+    // A second signal (Ctrl-C pressed again) must not reach Node's default handler, which would exit before the kill ends.
     handlers[sig] = () => {
+      if (guard.stopping) return;
       guard.stopping = true;
       killTree(child, { waitForGroup: true })
         .then(onStop)
         .catch((err) => process.stderr.write(`preflight: cleanup after ${sig} failed: ${err.message}\n`))
         .finally(() => exit(code));
     };
-    proc.once(sig, handlers[sig]);
+    proc.on(sig, handlers[sig]);
   }
   guard.uninstall = () => { for (const [sig, handler] of Object.entries(handlers)) proc.off(sig, handler); };
   return guard;
 }
 
-function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platform = process.platform, proc = process, exit = (code) => process.exit(code) } = {}) {
-  return new Promise((resolve, reject) => {
+// Windows has no process group to kill: a background process the command started (a server, a watcher) outlives the shell.
+// Processes whose parent chain starts at the shell's pid and that were created after it started are stopped with their trees;
+// the creation time keeps a reused pid from matching. Returns the pids stopped.
+export function stopLeftovers(rootPid, startMs, { run = spawnSync, log = (m) => process.stderr.write(m) } = {}) {
+  const sys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  // conhost.exe is the console Windows attaches to the shell; it ends with it and is not the command's.
+  const query = 'Get-CimInstance Win32_Process | Where-Object { $_.Name -ne "conhost.exe" } | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $([DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds())" }';
+  const listed = run(path.join(sys, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', query], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  if (listed.status !== 0) {
+    log(`preflight: WARNING: could not list processes to stop what the command left running: ${(listed.stderr || listed.error?.message || '').trim()}\n`);
+    return [];
+  }
+  const procs = String(listed.stdout).split(/\r?\n/).map((l) => l.trim().split(/\s+/).map(Number)).filter((p) => p.length === 3 && p.every(Number.isFinite));
+  const tree = new Set([rootPid]);
+  const top = [];
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [pid, ppid, created] of procs) {
+      if (!tree.has(pid) && tree.has(ppid) && created >= startMs - 1000) {
+        tree.add(pid);
+        if (ppid === rootPid) top.push(pid);
+        grew = true;
+      }
+    }
+  }
+  for (const pid of top) run(path.join(sys, 'taskkill.exe'), ['/pid', String(pid), '/T', '/F'], { windowsHide: true, timeout: 30000 });
+  if (top.length > 0) log(`preflight: WARNING: the command left ${top.length} process(es) running (pid ${top.join(', ')}); they were stopped. An --exec command must not leave a background process.\n`);
+  return top;
+}
+
+// How runWithTimeout starts the command: on Windows through the job wrapper (report file in a new temp folder).
+function execSpawn(command, { cd, env, platform, spawnFn }) {
+  if (platform !== 'win32' || spawnFn !== spawn) {
     // detached:true makes the shell the leader of its own POSIX process group, which is what
     // lets killTree's process.kill(-pid) below reach the whole tree instead of failing ESRCH
     // against a group the child was never actually the leader of.
-    const child = spawnFn(command, { cwd: cd, env, shell: true, detached: platform !== 'win32' });
+    return { child: spawnFn(command, { windowsHide: true, cwd: cd, env, shell: true, detached: platform !== 'win32' }), report: null };
+  }
+  return jobSpawn(command, { cwd: cd, env });
+}
+
+// The leftover pids the job wrapper stopped, or null when it could not use a job (then the parent-chain scan runs instead).
+export function jobLeftovers(report, { log = (m) => process.stderr.write(m) } = {}) {
+  const read = readJobReport(report);
+  if (read.unreadable) {
+    log(`preflight: WARNING: the job report ${report} could not be read (${read.unreadable}); scanning for leftover processes instead\n`);
+    return null;
+  }
+  if (read.refused !== undefined) {
+    log(`preflight: WARNING: the command could not run in a job object (${read.refused}); scanning for leftover processes instead\n`);
+    return null;
+  }
+  return read.left;
+}
+
+// A process that left the command's process group (setsid) or job can hold its output open after the command exits.
+function closeGraceMs(env = process.env) {
+  return Number(env.REVIEW_CLOSE_GRACE_MS) || 2000;
+}
+
+function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platform = process.platform, proc = process, exit = (code) => process.exit(code), kill: killFn = (pid, sig) => process.kill(pid, sig) } = {}) {
+  const startMs = Date.now();
+  return new Promise((resolve, reject) => {
+    // Linux and macOS: every process the command starts inherits this id, so one that left its process group is still found.
+    const runId = randomUUID();
+    const { child, report, dir } = execSpawn(command, { cd, env: { ...(env ?? process.env), REVIEW_SEAT_RUN_ID: runId }, platform, spawnFn });
+    // Linux and macOS: what the command left in its process group is killed when it exits; say so, as on Windows.
+    let groupStopped = false;
+    killGroupOnExit(child, { platform, kill: killFn, onKilled: () => { groupStopped = true; } });
     let stdout = '';
     let stderr = '';
     let settled = false;
     // Settled only after exit (which returns only in tests): the next --exec command must not start meanwhile.
+    // Linux and macOS: what the command left running outside its group, found by the run id, after a timeout or a stop signal too.
+    const sweepMarked = () => {
+      const marked = stopMarkedProcesses(runId, { platform, kill: killFn });
+      if (marked.length > 0) process.stderr.write(`preflight: WARNING: the command left ${marked.length} process(es) running outside its process group (pid ${marked.join(', ')}); they were stopped. An --exec command must not leave a background process.\n`);
+      return marked;
+    };
     const guard = stopOnSignal(child, {
       proc,
+      onStop: () => { sweepMarked(); },
       exit: (code) => {
         exit(code);
         guard.uninstall();
@@ -524,13 +699,54 @@ function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platfo
       timer = setTimeout(() => {
         timedOut = true;
         killTree(child, { waitForGroup: true }).finally(() => {
+          const marked = sweepMarked();
           uninstall();
           if (settled) return;
           settled = true;
-          resolve({ code: null, stdout, stderr, timedOut: true });
+          resolve({ code: null, stdout, stderr, timedOut: true, ...(marked.length > 0 ? { leftoversStopped: marked } : {}) });
         });
       }, timeout * 1000);
     }
+    // On the shell's exit, not on close: a leftover process holds the output pipes open, so close waits until it ends.
+    let leftovers = [];
+    let held = null;
+    child.once('exit', (code) => {
+      if (report && !timedOut && !guard.stopping) {
+        const stopped = jobLeftovers(report);
+        if (stopped === null) leftovers = child.pid ? stopLeftovers(child.pid, startMs) : [];
+        else if ((leftovers = stopped).length > 0) process.stderr.write(`preflight: WARNING: the command left ${stopped.length} process(es) running (pid ${stopped.join(', ')}); they were stopped. An --exec command must not leave a background process.\n`);
+      }
+      if (groupStopped && !timedOut && !guard.stopping) process.stderr.write('preflight: WARNING: the command left process(es) running in its process group; they were stopped. An --exec command must not leave a background process.\n');
+      if (!timedOut && !guard.stopping) {
+        const marked = stopMarkedProcesses(runId, { platform, kill: killFn }).filter((p) => !leftovers.includes(p));
+        if (marked.length > 0) {
+          leftovers = [...leftovers, ...marked];
+          process.stderr.write(`preflight: WARNING: the command left ${marked.length} process(es) running outside its process group (pid ${marked.join(', ')}); they were stopped. An --exec command must not leave a background process.\n`);
+        }
+      }
+      // After a timeout or a stop signal the wrapper is killed: closing its job stops what the command left, unless there
+      // was no job (the wrapper writes that when it starts), which is said here.
+      if (report && (timedOut || guard.stopping)) {
+        const read = readJobReport(report);
+        if (read.refused !== undefined) process.stderr.write(`preflight: WARNING: the command could not run in a job object (${read.refused}); a process it started may still be running\n`);
+      }
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      // Its output should close now; a process that left the group or job and still holds it would stall the run until the timeout.
+      if (!timedOut && !guard.stopping) {
+        // It exited in time: a timeout from here on would kill a pid that may belong to another process by now.
+        if (timer) clearTimeout(timer);
+        held = setTimeout(() => {
+          if (settled || timedOut || guard.stopping) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          uninstall();
+          child.stdout.destroy();
+          child.stderr.destroy();
+          process.stderr.write('preflight: WARNING: the command exited, but a process it started still holds its output open and was not stopped (it left the command\'s process group or job); stop it yourself. An --exec command must not leave a background process.\n');
+          resolve({ code, stdout, stderr, timedOut: false, outputHeldOpen: true, ...(groupStopped ? { leftoverGroupStopped: true } : {}), ...(leftovers.length > 0 ? { leftoversStopped: leftovers } : {}) });
+        }, closeGraceMs());
+      }
+    });
     child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
     child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
     child.on('error', (err) => {
@@ -542,12 +758,13 @@ function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platfo
     });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
+      if (held) clearTimeout(held);
       // After a timeout the timer's kill resolves this, once the whole group is gone; after a stop signal, exit does.
       if (timedOut || guard.stopping) return;
       uninstall();
       if (settled) return;
       settled = true;
-      resolve({ code: timedOut ? null : code, stdout, stderr, timedOut });
+      resolve({ code: timedOut ? null : code, stdout, stderr, timedOut, ...(groupStopped ? { leftoverGroupStopped: true } : {}), ...(leftovers.length > 0 ? { leftoversStopped: leftovers } : {}) });
     });
   });
 }
@@ -573,6 +790,10 @@ async function runTier2({ cd, commands, timeout, envMode, envPassthrough }, spaw
       durationMs: Date.now() - startedAtMs,
       exitCode: result.code,
       timedOut: result.timedOut,
+      timeoutS: timeout,
+      ...(result.leftoversStopped ? { leftoversStopped: result.leftoversStopped } : {}),
+      ...(result.leftoverGroupStopped ? { leftoverGroupStopped: true } : {}),
+      ...(result.outputHeldOpen ? { outputHeldOpen: true } : {}),
       touchedFiles: diffInventories(before, after),
       stdout: result.stdout,
       stderr: result.stderr,
@@ -587,10 +808,10 @@ async function runTier2({ cd, commands, timeout, envMode, envPassthrough }, spaw
 // an already-dirty file. Gitignored output is not covered.
 async function contentState(cd) {
   if (!(await isGitRepo(cd))) return (await hashInventory(cd)).files;
-  const [changed, untracked] = await Promise.all([
-    runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--name-only', '--relative', '-z', '--', '.'], cd),
-    runCapture('git', ['ls-files', '--others', '--exclude-standard', '-z'], cd),
-  ]);
+  const [changed, untracked] = await gitOutAll([
+    [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--no-renames', '--name-only', '--relative', '-z', '--', '.'],
+    ['ls-files', '--others', '--exclude-standard', '-z'],
+  ], cd);
   const listed = new Map([...gitNames(changed.stdout), ...gitNames(untracked.stdout)].filter((e) => !e.text.endsWith('/')).map((e) => [entryKey(e), e]));
   const state = {};
   for (const rel of [...listed.keys()].sort()) {
@@ -619,7 +840,7 @@ async function revCount(range, cwd) {
 function gitFetch(cwd) {
   return new Promise((resolve) => {
     const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
-    const child = spawn('git', ['fetch', '--quiet'], { cwd, env, shell: false, timeout: FETCH_TIMEOUT_MS });
+    const child = spawn('git', ['fetch', '--quiet'], { windowsHide: true, cwd, env, shell: false, timeout: FETCH_TIMEOUT_MS });
     let stderr = '';
     child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
     child.on('error', (err) => resolve({ ok: false, error: err.message }));
@@ -744,10 +965,11 @@ async function watchUpstreamChanges(records, watchFiles) {
   const outside = [];
   for (const file of watchFiles) {
     const abs = path.resolve(file);
+    // Compared through the real path (/tmp and /private/tmp, a linked checkout are one folder); the path given to git
+    // keeps its case, which comparablePath folds on Windows.
     const owner = records
-      .filter((r) => r.gitRepo && r.head)
-      .map((r) => ({ r, rel: path.relative(r.path, abs) }))
-      .filter(({ rel }) => rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel))
+      .filter((r) => r.gitRepo && r.head && isInsidePath(abs, r.path) && comparablePath(abs) !== comparablePath(r.path))
+      .map((r) => ({ r, rel: path.relative(realPath(r.path), realPath(abs)) }))
       .sort((a, b) => b.r.path.length - a.r.path.length)[0];
     if (!owner) {
       outside.push(abs);
@@ -808,7 +1030,7 @@ async function checkStale(cd, snapshotHash) {
 // One stdout line for a run written to --out, so the hash and exit codes can be read without opening the JSON.
 // "0 (152 passed)": the exit code, then the last summary line the command printed when the compact output kept one.
 function commandOutcome(r) {
-  const code = r.timedOut ? 'timeout' : r.exitCode;
+  const code = r.timedOut ? `timeout after ${r.timeoutS ?? '?'} s (raise with --timeout <seconds>, 0 = unlimited)` : r.exitCode;
   const line = Array.isArray(r.stdout?.summary) ? r.stdout.summary.at(-1) : null;
   return typeof line === 'string' && line.trim() !== '' ? `${code} (${line.trim().slice(0, 50)})` : String(code);
 }
@@ -818,14 +1040,18 @@ export function summaryLine(result, out) {
     .filter(([, t]) => t)
     .map(([label, t]) => `${label}: ${t.results.length} command(s), exit ${t.results.map(commandOutcome).join(', ')}, targetChanged ${t.targetChanged}`);
   const changed = Array.isArray(result.tier1?.changedFiles) ? result.tier1.changedFiles : null;
-  const untracked = String(result.tier1?.status ?? '').split(/\r?\n/).filter((l) => l.startsWith('?? ')).map((l) => l.slice(3).trim());
+  // A subfolder target's status paths start with its repository prefix ("sub/"); changedFiles are --cd relative.
+  const prefix = result.tier1?.gitPrefix ?? '';
+  const untracked = String(result.tier1?.status ?? '').split(/\r?\n/).filter((l) => l.startsWith('?? ')).map((l) => l.slice(3).trim())
+    .map((u) => (prefix && u.replace(/^"/, '').startsWith(prefix) ? u.replace(/^("?)/, '$1').replace(prefix, '') : u));
   // git status shows a new folder as one "?? dir/" entry; the count is of files, like the changed-file count.
   // A name git quotes ("sp ace.txt") is compared without its quotes; an entry that still matches no file counts as one.
   const bare = untracked.map((u) => u.replace(/^"(.*)"$/, '$1'));
   const untrackedFiles = changed === null ? untracked.length : bare.reduce((n, u) => n + Math.max(1, changed.filter((f) => (u.endsWith('/') ? f.startsWith(u) : f === u)).length), 0);
   const more = untracked.length > 5 ? ', +' + (untracked.length - 5) + ' more' : '';
   const untrackedText = untracked.length > 0 ? ' (' + untrackedFiles + ' untracked: ' + untracked.slice(0, 5).join(', ') + more + ')' : '';
-  const changedText = changed === null ? '' : '; ' + changed.length + ' changed file(s)' + untrackedText;
+  const since = result.tier1?.base ? ' since ' + result.tier1.base.slice(0, 12) : '';
+  const changedText = changed === null ? '' : '; ' + changed.length + ' changed file(s)' + since + untrackedText;
   return `preflight: wrote ${out}; snapshotHash ${result.snapshotHash}${changedText}${tiers.length > 0 ? `; ${tiers.join('; ')}` : '; no Tier 2 command'}`;
 }
 
@@ -848,9 +1074,11 @@ async function run(args) {
     if (!st.isDirectory()) throw new RelayError(`--exec-in "${abs}" is not a directory`);
   }
   const clearedLogs = args.compact ? await clearOwnLogs(args.logDir) : [];
+  // The earlier --out file cites the logs just deleted; a rerun that is stopped before it writes must not leave it behind.
+  if (clearedLogs.length > 0 && args.out) await rm(path.resolve(args.out), { force: true });
   // A plain folder is hashed file by file; do it once for Tier 1 and the snapshot hash.
   const inventory = (await isGitRepo(cdAbs)) ? null : await hashInventory(cdAbs);
-  const tier1 = await runTier1(cdAbs, inventory);
+  const tier1 = await runTier1(cdAbs, inventory, args.base ?? null);
 
   let snapshotHash = await computeSnapshotHash(cdAbs, inventory);
   let tier2 = null;
@@ -896,10 +1124,8 @@ async function run(args) {
   let execInChangedTarget = false;
   if (tier2Repos.length > 0) {
     const reviewedHash = tier2 ? tier2.snapshotHashAfter : snapshotHash;
+    // main() prints the warning with the other notes (on stdout with --out).
     execInChangedTarget = (await computeSnapshotHash(cdAbs)) !== reviewedHash;
-    if (execInChangedTarget) {
-      process.stderr.write(`preflight: WARNING: an --exec-in command changed files under --cd ${cdAbs}; its snapshotHash is stale (--check-stale will say so). Rerun, and keep --exec-in commands inside their own folder.${String.fromCharCode(10)}`);
-    }
   }
   const repos = [await repoFreshness(cdAbs, { role: 'cd', fetch: args.fetch })];
   for (const repo of args.repos ?? []) repos.push(await repoFreshness(repo, { role: 'repo', fetch: args.fetch }));
@@ -1029,7 +1255,7 @@ function resolveHost({ toolsClaudeCode = false, toolsCodex = false, hostFlag = n
   throw new RelayError(`the host is ambiguous (${why}); pass --host claude-code or --host codex${hints.length > 0 ? ` (hint only, never decisive: ${hints.join(', ')})` : ''}`);
 }
 
-const DISPATCHER_FOR_RUNTIME = { claude: 'claude-dispatch.mjs', codex: 'codex-dispatch.mjs', opencode: 'opencode-dispatch.mjs' };
+const DISPATCHER_FOR_RUNTIME = { claude: 'claude-dispatch.mjs', codex: 'codex-dispatch.mjs' };
 
 function seatRuntimes(seats) {
   return new Set([seats.seatA, seats.seatB, seats.auditor, ...(Array.isArray(seats.verifiers) ? seats.verifiers : [])].map((actor) => actor?.runtime));
@@ -1094,6 +1320,172 @@ function codexDoctor() {
   });
 }
 
+// The programs a review seat reaches for, run inside the Codex sandbox ("codex sandbox", free, no model call): one it
+// cannot start (missing, or on Windows a program under the user profile the sandbox account may not run) leaves the
+// seat reviewing by reading only.
+export const SEAT_TOOLS = process.platform === 'win32' ? ['python', 'rg', 'git'] : ['python3', 'rg', 'git'];
+const TOOL_PROBE_TIMEOUT_MS = 30000;
+
+// On Windows through PowerShell, the shell a seat runs its commands in: started directly, the sandbox fails on a program
+// it can start from PowerShell (CreateProcessAsUserW failed: 2).
+export function sandboxArgs(tool, platform = process.platform) {
+  return platform === 'win32' ? ['sandbox', '--', 'powershell', '-NoProfile', '-Command', `${tool} --version`] : ['sandbox', '--', tool, '--version'];
+}
+
+function sandboxRun(tool, cwd) {
+  return new Promise((resolve) => {
+    let text = '';
+    let child;
+    try {
+      // No -C: "codex sandbox -C" requires --permission-profile; the working folder is set on the process instead.
+      child = spawnCli('codex', sandboxArgs(tool), { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ code: null, text: err.message });
+      return;
+    }
+    const timer = setTimeout(() => { killTree(child, { waitForGroup: true }).finally(() => resolve({ code: null, text: `did not finish within ${TOOL_PROBE_TIMEOUT_MS / 1000} s` })); }, TOOL_PROBE_TIMEOUT_MS);
+    child.stdout.on('data', (d) => { text += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { text += d.toString('utf8'); });
+    child.on('error', (err) => { clearTimeout(timer); resolve({ code: null, text: err.message }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, text }); });
+  });
+}
+
+// Where a tool is on this host's PATH, or null.
+export function hostToolPath(tool, { env = process.env, platform = process.platform, exists = existsSync } = {}) {
+  const exts = platform === 'win32' ? (env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').filter(Boolean) : [''];
+  for (const dir of String(env.PATH ?? env.Path ?? '').split(path.delimiter).filter(Boolean)) {
+    for (const ext of exts) if (exists(path.join(dir, `${tool}${ext}`))) return path.join(dir, `${tool}${ext}`);
+  }
+  return null;
+}
+
+// Each tool: { ok } or { ok: false, why, host }: the line that says why it could not start, and where the host has it.
+export async function codexToolProbe(cwd, { tools = SEAT_TOOLS, run = sandboxRun, where = hostToolPath } = {}) {
+  const out = {};
+  for (const tool of tools) {
+    const r = await run(tool, cwd);
+    if (r.code === 0) {
+      out[tool] = { ok: true };
+      continue;
+    }
+    const lines = String(r.text ?? '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const why = (lines.find((l) => /sandbox failed|panicked|not found|not recognized|denied|No such file/i.test(l)) ?? lines[0] ?? `exit ${r.code}`).split(' | ')[0].slice(0, 160);
+    out[tool] = { ok: false, why, host: where(tool) };
+  }
+  return out;
+}
+
+export function toolProbeWarnings(results, { home = homedir(), platform = process.platform } = {}) {
+  const failed = Object.entries(results).filter(([, v]) => v?.ok === false);
+  const lines = failed.map(([tool, { why, host }]) => {
+    const inProfile = platform === 'win32' && host !== null && isInsidePath(host, home);
+    const fix = host === null ? `${tool} is not on this host's PATH either: install it, or run the tests`
+      : inProfile ? `This host has it under the user profile (${host}), which the Windows sandbox account cannot start: install it for all users, or put a copy under Program Files on PATH (the per-user one can stay first), or run the tests`
+        : 'Run the tests';
+    return `the Codex seat's sandbox cannot run ${tool} (${why}); a seat that needs it reviews by reading only. ${fix} in preflight --exec and paste the result lines into the packet (every seat's brief holds the packet; a log outside the target may not be readable).`;
+  });
+  // Field runs: a seat with neither python nor rg made fewer claims; say so once, before Phase 1 is paid for.
+  if (failed.length >= 2) lines.push(`the Codex seat can run none of ${failed.map(([t]) => t).join(', ')}: it will review by reading files only, so expect fewer claims from it. Give it executed evidence (preflight --exec result lines pasted into the packet), or move the seat to a host where these run, before phase1 --start.`);
+  return lines;
+}
+
+// --keep-target-copy: the target's files as the seats will review them, beside the run folder, so the run can later become a
+// bench case (bench/case-from-run.mjs --target). Git: tracked plus untracked files git does not ignore; a plain folder: the
+// drift check's own list. Only regular files are copied, and each copy is hashed against its source before it counts.
+export async function copyTarget(cd, dest, { maxFiles = DEFAULT_MAX_FILES, maxBytes = 1024 ** 3 } = {}) {
+  let entries;
+  if (await isGitRepo(cd)) {
+    const listed = gitNames((await gitOut(['ls-files', '-co', '--exclude-standard', '-z'], cd)).stdout).filter((e) => !e.text.endsWith('/'));
+    entries = listed.map((e) => ({ key: entryKey(e), from: entryPath(cd, e), to: entryPath(dest, e) }));
+  } else {
+    entries = Object.keys((await hashInventory(cd, { skipCaches: true })).files).map((rel) => ({ key: rel, from: path.join(cd, rel), to: path.join(dest, rel) }));
+  }
+  const files = [];
+  let bytes = 0;
+  let skipped = 0;
+  for (const e of entries) {
+    const s = await lstat(e.from).catch(() => null);
+    // A deleted file has nothing to copy; a link is not followed (it can point anywhere).
+    if (!s || !s.isFile()) { skipped += 1; continue; }
+    files.push(e);
+    bytes += s.size;
+  }
+  if (files.length > maxFiles || bytes > maxBytes) {
+    return { copied: false, reason: `the target has ${files.length} file(s), ${bytes} byte(s) to copy, over the ${maxFiles}-file or ${maxBytes}-byte limit; review it as several scoped runs` };
+  }
+  await mkdir(dest);
+  try {
+    for (const e of files) {
+      await mkdir(path.dirname(e.to), { recursive: true });
+      await copyFile(e.from, e.to);
+    }
+    const differ = [];
+    for (const e of files) if ((await entrySha256(e.from)) !== (await entrySha256(e.to))) differ.push(e.key);
+    if (differ.length > 0) throw new Error(`${differ.length} copied file(s) differ from the source (${differ.slice(0, 3).join(', ')})`);
+  } catch (err) {
+    await rm(dest, { recursive: true, force: true });
+    return { copied: false, reason: `the copy failed and was removed: ${err.message}` };
+  }
+  return { copied: true, path: dest, files: files.length, bytes, skipped, verified: true };
+}
+
+// A change this large is read in part by each seat; the thresholds are Anthropic's Ultrareview diff guard.
+export function changeSizeWarning(files, lines, { maxFiles = 500, maxLines = 8000 } = {}) {
+  if (files <= maxFiles && lines <= maxLines) return null;
+  return `the change under review is large (${files} changed file(s), ${lines} changed line(s) in tracked files); each seat reads only part of a change this size: consider several runs, each with a packet scoped to one area (SKILL.md, "A large target reviews better as several runs")`;
+}
+
+// A Codex CLI seat's read-only sandbox was seen refusing reads outside the target on Linux and on Windows (macOS was not).
+export function outsideReadWarning(outside, { platform = process.platform } = {}) {
+  if (outside.length === 0 || !['linux', 'win32'].includes(platform)) return null;
+  return `the packet names ${outside.length} path(s) outside the target (${outside.slice(0, 2).join(', ')}${outside.length > 2 ? ', ...' : ''}); a Codex seat's read-only sandbox may not read them on this host: copy what it needs under the target or paste the lines it needs into the packet (every seat's brief holds the packet), or check with preflight --host ... --probe-reach --yes-paid`;
+}
+
+// A Codex CLI seat lists the MCP servers ("codex mcp list --json") to start with each one off; a Codex that cannot list them
+// would refuse every dispatch, so preflight finds that first (free, no model call). Resolves to null or the failure text.
+function captureCodex(args, cwd, cli = 'codex') {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawnCli(cli, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ code: -1, stdout: '', stderr: err.message });
+      return;
+    }
+    const guard = stopOnSignal(child);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
+    child.on('error', (err) => { guard.uninstall(); resolve({ code: -1, stdout, stderr: err.message }); });
+    child.on('close', (code) => {
+      if (guard.stopping) return;
+      guard.uninstall();
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+// The same listing and parsing codex-dispatch uses, so preflight passes only what every seat dispatch accepts. A codex that does
+// not run at all ("codex --version" fails, in any language) is refused with its own message.
+async function codexMcpListFailure(cd) {
+  // Loaded here, not at the top: preflight first refuses a skill folder that lacks the dispatcher.
+  const { mcpOffOverrides, SEAT_CONFIG_OVERRIDES } = await import('./codex-dispatch.mjs');
+  const version = await captureCodex(['--version'], cd);
+  if (version.code !== 0) {
+    return { missing: true, detail: `"codex --version" exited ${version.code}: ${version.stderr.trim().split(/\r?\n/).slice(-1)[0] ?? ''}` };
+  }
+  const r = await captureCodex([...SEAT_CONFIG_OVERRIDES.flatMap((o) => ['-c', o]), 'mcp', 'list', '--json'], cd);
+  if (r.code !== 0) return `exited ${r.code}: ${r.stderr.trim().split(/\r?\n/).slice(-1)[0] ?? ''}`;
+  try {
+    mcpOffOverrides(r.stdout);
+    return null;
+  } catch (err) {
+    return err.message.replace(/^"codex mcp list --json" /, '');
+  }
+}
+
 const CODEX_PROBE_TIMEOUT_MS = 120000;
 const EXEC_FAILED_RE = /exec_command failed|failed to create unified exec process|CreateProcess \{/gi;
 
@@ -1124,12 +1516,282 @@ export async function codexSandboxProbe({ proc = process, exit = (code) => proce
   }
 }
 
+// A packet path starts like one: a drive, a POSIX root, "~", "./" or "../", a drive-less root on Windows, or a variable
+// ($HOME, %TEMP%, ...) or file:/// URL standing for one. A backticked item ("`C:\logs\a run\x.log`") is the path whole,
+// spaces included; a bare one ends at the first space or quote. Nothing is guessed about where a path continues: a path
+// with spaces goes in backticks (the task-packet template says so).
+const PACKET_PATH_START_RE = process.platform === 'win32'
+  ? /^(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/(?!\/)|\\(?!\\))/
+  : /^(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/+(?!\/))/;
+
+// A cited "file:40" or "file:40:7" is the file; "~/x" is in the home folder; "./x" and "../x" are in or next to the target.
+function packetCandidate(text, baseDir) {
+  const bare = text.replace(/[.,;:)\]]+$/, '').replace(/:\d+(?::\d+)?$/, '').replace(/[.,;)\]]+$/, '');
+  if (/^~[\\/]/.test(bare)) return path.join(homedir(), bare.slice(2));
+  return /^\.{1,2}[\\/]/.test(bare) ? path.resolve(baseDir, bare) : bare;
+}
+
+// The paths a packet names that exist (found) and those that do not (missing): backticked items, then bare words.
+async function packetPaths(text, baseDir) {
+  const found = new Set();
+  const missing = new Set();
+  const raw = String(text);
+  // A bare word loses the quotes, brackets and sentence punctuation around it.
+  // Quotes and brackets go at the start of a word; at its end, closing quotes and punctuation, then quotes just before a
+  // line number ("../a.log":40, '"../a.log":40'.). A quote inside a name ("fix'1") stays.
+  // Markdown emphasis and table bars ("**C:\x\a.log**", "|C:\x\a.log|") go the same way.
+  // "_" stays: names like "__pycache__" end in it.
+  const trimEnd = (w) => w.replace(/["'“”‘’»!.,;:)\]>*|]+$/, '').replace(/["'“”‘’»]+(:\d+(?::\d+)?)$/, '$1');
+  // Underscores that wrap the whole word ("_C:\x\a.log_") are emphasis.
+  const trimWord = (w) => {
+    const t = trimEnd(w.replace(/^["'“”‘’«(<\[*|]+/, ''));
+    const m = !t.includes('](') && /^(_{1,2})(.+)\1$/.exec(t);
+    return m ? trimEnd(m[2]) : t;
+  };
+  const wordsOf = (s) => s.split(/\s+/).map(trimWord);
+  const words = wordsOf(raw.replace(/`[^`\r\n]+`/g, ' ').replace(/<br\s*\/?>/gi, ' '));
+  // True when the word named a path that exists or (with missingToo) a missing file.
+  const look = async (word, quoted, missingToo = true) => {
+    const item = expandPathVars(decodeFileUrls(expandWorkingFolderForms(word, baseDir)));
+    if (!PACKET_PATH_START_RE.test(item)) return false;
+    const candidate = packetCandidate(item, baseDir);
+    if (candidate.length > 1 && await stat(candidate).catch(() => null)) { found.add(candidate); return true; }
+    // A backticked item with an option in it ("`<file> --out report.json`") that is not itself a path is a command.
+    if (quoted && /\s--?[A-Za-z]/.test(item)) return false;
+    if (missingToo && await looksLikeMissingFile(candidate, undefined)) { missing.add(candidate); return true; }
+    return false;
+  };
+  // A backticked item that is neither (a command, "`<file> --all`") is read word by word like the rest.
+  for (const m of raw.matchAll(/`([^`\r\n]+)`/g)) if (!(await look(m[1].trim(), true))) words.push(...wordsOf(m[1]));
+  // A bare word that is no existing path may hold one or more: "[a.log](C:\x\a.log)", "--log=C:\x\a.log",
+  // "a.log,C:\x\b.log", "C:\x\a.md|C:\x\b.md"; it is a missing file only when none of its parts is a path.
+  for (const word of words) {
+    if (word === '') continue;
+    const parts = word.split(/\]\(|<br\s*\/?>|[=,;&|]/i).map(trimWord).filter((p) => p !== '' && p !== word);
+    if (parts.length === 0) { await look(word, false); continue; }
+    if (await look(word, false, false)) continue;
+    let hit = false;
+    for (const part of parts) if (await look(part, false)) hit = true;
+    if (!hit) await look(word, false);
+  }
+  return { found: [...found], missing: [...missing] };
+}
+
+// A packet names many path-shaped strings that are not files here (API routes, "<run-dir>/since.diff", "/plugin update").
+// One counts as a missing file only with two or more parts, a file-like last part, no placeholder before it, and an
+// existing folder somewhere above it (not the root alone).
+async function looksLikeMissingFile(p, before) {
+  if (before !== undefined && /[>}\]\w]/.test(before)) return false;
+  const parts = p.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < (/^[A-Za-z]:/.test(p) ? 3 : 2) || !/\.[A-Za-z0-9]{1,8}$/.test(parts.at(-1))) return false;
+  // The loop stops before the root ("/", "C:\"), which always exists.
+  for (let dir = path.dirname(p); dir !== path.dirname(dir); dir = path.dirname(dir)) {
+    if (await stat(dir).then((s) => s.isDirectory(), () => false)) return true;
+  }
+  return false;
+}
+
+// The run folder (holding run.json and phase1/) that contains p, or the run of a <run>-audit-input folder; else null.
+function enclosingRun(p) {
+  let dir = p;
+  for (let i = 0; i < 8; i++) {
+    for (const candidate of [dir, dir.replace(/-audit-input$/, '')]) {
+      if (existsSync(path.join(candidate, 'run.json')) && existsSync(path.join(candidate, 'phase1'))) return candidate;
+    }
+    const up = path.dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  return null;
+}
+
+// The paths a packet names that exist and lie outside --cd and this run: those inside another review's run folder
+// (otherRuns, its findings sit next to them) and the rest (outside, which a sandboxed seat may not reach).
+async function packetReach(packetText, { cdAbs, runDir }) {
+  const otherRuns = [];
+  const outside = [];
+  const { found, missing } = await packetPaths(packetText, cdAbs);
+  for (const p of found) {
+    // Inside the target, inside this run, or a folder above the target (a path like /home) is not a reach question.
+    if (isInsidePath(p, cdAbs) || isInsidePath(cdAbs, p) || isInsidePath(p, runDir) || isInsidePath(p, `${runDir}-audit-input`)) continue;
+    const run = enclosingRun(p);
+    if (run && comparablePath(run) !== comparablePath(runDir)) otherRuns.push({ path: p, run });
+    else outside.push(p);
+  }
+  // A missing path inside the target or this run is the review's own business; one elsewhere is named so it is not silently dropped.
+  const notFound = missing.filter((p) => !(isInsidePath(p, cdAbs) || isInsidePath(cdAbs, p) || isInsidePath(p, runDir) || isInsidePath(p, `${runDir}-audit-input`)));
+  return { otherRuns, outside, notFound };
+}
+
+// One WARNING per item a Codex seat cannot reach, or one line saying the probe itself did not run.
+function reportReachProbe(probe, file) {
+  if (!probe.ran) {
+    process.stderr.write(`preflight: WARNING: the reach probe did not run (${probe.error || 'no output'}); nothing is known about what a Codex seat can reach${String.fromCharCode(10)}`);
+    return;
+  }
+  for (const r of probe.results.filter((x) => !x.ok)) process.stderr.write(`preflight: WARNING: a Codex seat cannot reach ${r.item}: ${r.detail}${String.fromCharCode(10)}`);
+  for (const p of probe.notFound ?? []) process.stderr.write(`preflight: WARNING: the task packet names ${p}, which does not exist here; no seat can read it${String.fromCharCode(10)}`);
+  const cut = probe.notProbed ?? [];
+  if (cut.length > 0) process.stderr.write(`preflight: WARNING: ${cut.length} more item(s) the packet names were not probed (the probe checks ${PROBE_MAX_PATHS} paths and ${PROBE_MAX_PORTS} host:port pairs): ${cut.slice(0, 5).join(', ')}${cut.length > 5 ? ', ...' : ''}; see notProbed in the record${String.fromCharCode(10)}`);
+  // One line with the whole result, so a run with no failure still says what was checked and where the record is.
+  const ok = probe.results.filter((x) => x.ok).length;
+  process.stderr.write(`preflight: reach probe: ${ok} of ${probe.results.length} check(s) OK, written to ${file}; https addresses are reached through the seat's web tool, not checked here${String.fromCharCode(10)}`);
+}
+
+// host:port pairs a packet names (a live endpoint a seat may be asked to query), only in forms that cannot be a code
+// location: a URL (scheme://host:port), an IPv4 address, an [IPv6] address or localhost. A bare "name.domain:port" is not
+// guessed at ("review-run.mjs:688" is code): the task-packet template asks for endpoints written as URLs.
+const PACKET_URL_PORT_RE = /\b[a-z][a-z0-9+.-]*:\/\/(?:[^\s/@]+@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+):(\d{1,5})\b/gi;
+// A bare [IPv6] has at least two colons inside the brackets ("{ [a]:40 }" in code is not one).
+const PACKET_BARE_PORT_RE = /(?<![\w./:-])((?:\d{1,3}\.){3}\d{1,3}|localhost|\[[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f.]{0,15}){2,8}\]):(\d{1,5})\b/gi;
+export function packetPorts(text) {
+  return [...new Set([...String(text).matchAll(PACKET_URL_PORT_RE), ...String(text).matchAll(PACKET_BARE_PORT_RE)]
+    .filter((m) => Number(m[2]) >= 1 && Number(m[2]) <= 65535)
+    .sort((a, b) => a.index - b.index).map((m) => `${m[1].toLowerCase()}:${m[2]}`))];
+}
+const PROBE_MAX_PATHS = 10;
+const PROBE_MAX_PORTS = 10;
+
+// One read-only "codex exec" in the target with the seat's own config overrides; resolves with its whole output.
+async function codexExecProbe(cwd, prompt, { proc = process, exit = (code) => process.exit(code) } = {}) {
+  const { SEAT_CONFIG_OVERRIDES, mcpOffOverrides } = await import('./codex-dispatch.mjs');
+  const base = SEAT_CONFIG_OVERRIDES.flatMap((o) => ['-c', o]);
+  // A seat runs with every MCP server off (a server such as node_repl runs code outside the sandbox), so the probe does too.
+  const listed = await captureCodex([...base, 'mcp', 'list', '--json'], cwd);
+  let mcpOff;
+  try {
+    if (listed.code !== 0) throw new Error(`exited ${listed.code}`);
+    mcpOff = mcpOffOverrides(listed.stdout).flatMap((o) => ['-c', o]);
+  } catch (err) {
+    return { ok: false, text: `"codex mcp list --json" could not be read (${err.message}), so the probe was not run` };
+  }
+  return new Promise((resolve) => {
+    let text = '';
+    const child = spawnCli('codex', [...base, ...mcpOff, 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', '-C', cwd, '-'], { env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const guard = stopOnSignal(child, { proc, exit });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; killTree(child, { waitForGroup: true }).finally(() => { guard.uninstall(); resolve({ ok: false, text: `did not finish within ${CODEX_PROBE_TIMEOUT_MS / 1000} s` }); }); }, CODEX_PROBE_TIMEOUT_MS);
+    child.stdout.on('data', (d) => { text += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { text += d.toString('utf8'); });
+    child.on('error', (err) => { clearTimeout(timer); guard.uninstall(); resolve({ ok: false, text: err.message }); });
+    child.on('close', (code) => { clearTimeout(timer); if (timedOut || guard.stopping) return; guard.uninstall(); resolve({ ok: code === 0, text }); });
+    child.stdin.on('error', () => {});
+    child.stdin.end(prompt);
+  });
+}
+
+// The paid reach probe: what a Codex seat can read, write and reach from the target. Each item gets an OK or FAIL line.
+async function codexReachProbe(cdAbs, packetText, runDir) {
+  const reach = await packetReach(packetText, { cdAbs, runDir });
+  // The probe is one paid call, so it is capped; what the cap leaves out is recorded and printed, never dropped silently.
+  const allPaths = [...reach.outside, ...reach.otherRuns.map((r) => r.path)];
+  const allPorts = packetPorts(packetText);
+  const paths = allPaths.slice(0, PROBE_MAX_PATHS);
+  const ports = allPorts.slice(0, PROBE_MAX_PORTS);
+  const notProbed = [...allPaths.slice(PROBE_MAX_PATHS).map((p) => `READ ${p}`), ...allPorts.slice(PROBE_MAX_PORTS).map((p) => `NET ${p}`)];
+  const items = [...paths.map((p) => `READ ${p}`), 'WRITE temp', ...ports.map((p) => `NET ${p}`)];
+  const prompt = [
+    'Check each item below with one short shell command, and change nothing outside a temporary file you delete again.',
+    // A method call such as [System.IO.File]::ReadAllText fails in the sandbox's Constrained Language Mode PowerShell for any path.
+    'READ <path>: read the first line of the file, or list the folder, with the shell\'s own command only: on Windows PowerShell Get-Content -TotalCount 1 or Get-ChildItem (no .NET method calls: the sandbox\'s PowerShell blocks them), elsewhere head -n 1 or ls.',
+    'WRITE temp: create and delete one file in the system temporary folder (PowerShell: New-TemporaryFile and Remove-Item).',
+    'NET <host:port>: one HTTPS (else HTTP) request with a 5 second timeout; any HTTP answer counts as reached.',
+    'Reply with exactly one line per item, in this form and nothing else: "OK <item>" or "FAIL <item>: <short error>".',
+    '', ...items,
+  ].join(String.fromCharCode(10));
+  const run = await codexExecProbe(cdAbs, prompt);
+  // A model may add a list marker or backticks, or change the case of OK/FAIL.
+  const answers = run.text.split(/\r?\n/).map((l) => l.replace(/^[\s>*-]+/, '').replace(/`/g, '').trim());
+  const results = items.map((item) => {
+    const line = answers.find((l) => l.toLowerCase() === `ok ${item}`.toLowerCase() || l.toLowerCase().startsWith(`fail ${item}`.toLowerCase()));
+    const ok = line !== undefined && line.toLowerCase() === `ok ${item}`.toLowerCase();
+    return { item, ok, detail: ok ? null : line ? line.slice(`fail ${item}`.length).replace(/^:\s*/, '') : 'no answer' };
+  });
+  const lastLine = run.text.trim().split(/\r?\n/).slice(-1)[0] ?? '';
+  return { at: new Date().toISOString(), ran: run.ok, ...(run.ok ? {} : { error: lastLine.slice(0, 300) }), results, notProbed, notFound: reach.notFound };
+}
+
+// A skill run from Claude Code's plugin cache (<plugins>/cache/<marketplace>/<plugin>/<version>/skills/<skill>) is compared with
+// the marketplace clone (<plugins>/marketplaces/<marketplace>/<plugin source>/skills/<skill>): a cache built under the same
+// version string is not refreshed, so different SKILL.md or script bytes mean an older build is running. Returns the
+// differing file names, or [] when the folders match or the layout does not apply.
+async function pluginCopyDrift(skillDir) {
+  const m = /^(.*[\\/]plugins)[\\/]cache[\\/]([^\\/]+)[\\/]([^\\/]+)[\\/][^\\/]+[\\/]skills[\\/]([^\\/]+)$/.exec(skillDir);
+  if (!m) return [];
+  const [, plugins, market, plugin, skill] = m;
+  const root = path.join(plugins, 'marketplaces', market);
+  let source = `plugins/${plugin}`;
+  try {
+    const listed = JSON.parse(await readFile(path.join(root, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins?.find((p) => p?.name === plugin)?.source;
+    if (typeof listed === 'string') source = listed;
+  } catch { /* no marketplace file: the default plugins/<plugin> source */ }
+  const other = path.join(root, ...source.split('/').filter((p) => p && p !== '.'), 'skills', skill);
+  if (!existsSync(other)) return [];
+  // SKILL.md, every references/ file (the phase procedures) and scripts/ outside tests/, listed from both copies, so a file
+  // only one copy has is a difference too.
+  const listFiles = async (base, rel) => {
+    const out = [];
+    for (const e of await readdir(path.join(base, rel), { withFileTypes: true }).catch(() => [])) {
+      const child = `${rel}/${e.name}`;
+      if (e.isDirectory() && child !== 'scripts/tests') out.push(...(await listFiles(base, child)));
+      else if (e.isFile()) out.push(child);
+    }
+    return out;
+  };
+  const names = [...new Set(['SKILL.md', ...(await Promise.all([skillDir, other].flatMap((base) => [listFiles(base, 'references'), listFiles(base, 'scripts')]))).flat()])].sort();
+  const differ = [];
+  for (const name of names) {
+    const [a, b] = await Promise.all([readFile(path.join(skillDir, name)).catch(() => null), readFile(path.join(other, name)).catch(() => null)]);
+    if (a === null || b === null || !a.equals(b)) differ.push(name);
+  }
+  return differ;
+}
+
+// The commands of an --exec-file or --exec-in-file, one per line exactly as written (blank and # lines skipped).
+function readCommandFile(file, flag) {
+  let bytes;
+  try {
+    bytes = readFileSync(path.resolve(file));
+  } catch (err) {
+    throw new RelayError(`${flag} "${file}" cannot be read: ${err.message}`);
+  }
+  // PowerShell 5.1 writes UTF-16 with "> file" and Out-File; read as UTF-8 that is a command full of NUL bytes.
+  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff) || bytes.includes(0)) {
+    throw new RelayError(`${flag} "${file}" is not UTF-8 text (UTF-16 or NUL bytes); save it as UTF-8, e.g. Set-Content -Encoding utf8 or Out-File -Encoding utf8`);
+  }
+  // Each line as written; the trimmed copy only finds blank and comment lines.
+  const commands = bytes.toString('utf8').replace(/^\uFEFF/, '').split(/\r?\n/).filter((l) => l.trim() !== '' && !l.trim().startsWith('#'));
+  if (commands.length === 0) throw new RelayError(`${flag} "${file}" holds no command`);
+  return commands;
+}
+
+// HEAD and a content hash per changed or untracked file of --cd (every file of a plain folder), so a later snapshot hash
+// mismatch can name what changed (diffInventories of two of these); a changed file that is gone is "deleted".
+async function fingerprintFiles(cd) {
+  // A build or test run in a plain folder writes caches; they are not a change to the code under review.
+  if (!(await isGitRepo(cd))) return { head: null, files: (await hashInventory(cd, { skipCaches: true })).files };
+  const head = (await gitOut(['rev-parse', 'HEAD'], cd)).stdout.toString('utf8').trim();
+  const [changed, untracked] = await gitOutAll([['diff', '--no-ext-diff', '--no-renames', '--name-only', '-z', '--relative', 'HEAD', '--', '.'], ['ls-files', '--others', '--exclude-standard', '-z']], cd);
+  const files = {};
+  for (const entry of [...gitNames(changed.stdout), ...gitNames(untracked.stdout)]) {
+    if (entry.text.endsWith('/')) continue;
+    files[entryKey(entry)] = await entrySha256(entryPath(cd, entry)).catch((err) => { if (err.code === 'ENOENT') return 'deleted'; throw err; });
+  }
+  return { head, files };
+}
+
+// The files that differ between two fingerprintFiles records; a moved HEAD is named first.
+function driftedFiles(before, after) {
+  const files = diffInventories(before?.files ?? {}, after.files);
+  return before?.head && after.head && before.head !== after.head ? [`HEAD (${before.head.slice(0, 7)} -> ${after.head.slice(0, 7)})`, ...files] : files;
+}
+
 async function computeFingerprint(cd) {
   const snapshotHash = await computeSnapshotHash(cd);
   if (!(await isGitRepo(cd))) return { head: null, diffSha256: null, untrackedSha256: null, snapshotHash };
-  const head = (await runCapture('git', ['rev-parse', 'HEAD'], cd)).stdout.toString('utf8').trim();
-  const diff = await runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
-  const untracked = await runCapture('git', ['ls-files', '--others', '--exclude-standard', '-z'], cd);
+  const head = (await gitOut(['rev-parse', 'HEAD'], cd)).stdout.toString('utf8').trim();
+  const diff = await gitOut([...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
+  const untracked = await gitOut(['ls-files', '--others', '--exclude-standard', '-z'], cd);
   const entries = gitNames(untracked.stdout).filter((e) => !e.text.endsWith('/')).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
   const lines = [];
   for (const entry of entries) lines.push(`${entry.text}:${await entrySha256(entryPath(cd, entry))}`);
@@ -1153,17 +1815,36 @@ async function readSeatsFile(file) {
   return data;
 }
 
-// A Claude CLI or OpenCode seat builds a worktree that fingerprints and copies the whole repository holding --cd, so a run
+// True when the folder holds files but git lists none of them (tracked, or untracked and not ignored).
+async function holdsOnlyUnlistedFiles(cdAbs) {
+  const listed = await runCapture('git', ['ls-files', '-co', '--exclude-standard', '-z', '--', '.'], cdAbs, { ...process.env, ...GIT_C_LOCALE });
+  if (listed.code !== 0) throw new RelayError(`git ls-files failed in "${cdAbs}": ${listed.stderr.toString('utf8').trim()}`);
+  if (listed.stdout.length > 0) return false;
+  return (await readdir(cdAbs)).some((name) => name !== '.git');
+}
+
+// One path for each kind of file a run, its audit input or its worktree folder holds, at each depth it is written.
+const RUN_FILE_PROBES = ['run.json', 'task-packet.md', 'report.html', 'transcript.jsonl', 'phase1/A-findings.md', 'phase1/brief-A.txt',
+  'phase1/original/A-findings.md', 'phase1/B/result.json', 'phase1/B/stderr.log', 'phase1/B/stdout.txt', 'phase3-private/seat-to-audit-label.json',
+  'Makefile', 'src/main.py', '.gitignore'];
+
+// A Claude CLI seat builds a worktree that fingerprints and copies the whole repository holding --cd, so a run
 // folder there (not git-ignored) breaks the Phase 2 reuse and is copied into the seat's snapshot. Returns that folder, or null.
 async function runFolderInRepo(cdAbs, runDir, seats) {
   const actors = [seats.seatA, seats.seatB, seats.auditor, ...(Array.isArray(seats.verifiers) ? seats.verifiers : [])];
-  const opencode = actors.some((a) => a?.runtime === 'opencode');
-  if (!opencode && !actors.some((a) => a?.runtime === 'claude' && a?.transport === 'cli')) return null;
+  if (!actors.some((a) => a?.runtime === 'claude' && a?.transport === 'cli')) return null;
   if (!(await isGitRepo(cdAbs))) return null;
-  for (const dir of [runDir, `${runDir}-audit-input`, ...(opencode ? [`${runDir}-worktree`] : [])]) {
-    // Exit 0: ignored; 1: inside the repository and not ignored; 128: outside it. A file path inside the folder is probed, not the folder
-    // (it need not exist): with CRLF line endings and a blank line in .gitignore, git reports every folder path as ignored.
-    if ((await runCapture('git', ['check-ignore', '-q', '--', path.join(dir, 'run.json')], cdAbs)).code === 1) return dir;
+  for (const dir of [runDir, `${runDir}-audit-input`]) {
+    // Exit 0: some are ignored; 1: none; 128: the folder is outside the repository. File paths inside the folder are probed, not the
+    // folder (they need not exist): with CRLF line endings and a blank line in .gitignore, git reports every folder path as ignored.
+    const probes = RUN_FILE_PROBES.map((p) => path.join(dir, ...p.split('/')));
+    const ignored = await runCapture('git', ['check-ignore', '--', ...probes], cdAbs);
+    if (ignored.code === 128) continue;
+    // Every kind of file a run writes must be ignored, not one name: a "*.json" rule ignores run.json but not the findings.
+    // git prints one line per ignored path (a quoted one stays on its line).
+    if (ignored.code !== 0 || ignored.stdout.toString('utf8').split(/\r?\n/).filter(Boolean).length < probes.length) return dir;
+    const listed = await runCapture('git', ['ls-files', '-co', '--exclude-standard', '-z', '--', dir], cdAbs);
+    if (listed.code !== 0 || listed.stdout.length > 0) return dir;
   }
   return null;
 }
@@ -1192,7 +1873,7 @@ async function runClaudeSessionProbe({ cdAbs, runDir }) {
     const argv = [path.join(SCRIPTS_DIR, 'claude-dispatch.mjs'), '--brief', path.join(folder, 'brief.txt'), '--cd', cdAbs, '--model', PROBE_MODEL, '--out-dir', path.join(folder, 'out'), '--no-isolate', '--timeout', '180', ...extra];
     const child = await new Promise((resolve) => {
       // Its own group on POSIX, so the terminal's Ctrl-C reaches only preflight, whose guard stops the dispatcher's tree once.
-      const proc = spawn(process.execPath, argv, { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+      const proc = spawn(process.execPath, argv, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
       const guard = stopOnSignal(proc);
       let err = '';
       proc.stderr.on('data', (d) => { err += d.toString('utf8'); });
@@ -1219,6 +1900,79 @@ async function runClaudeSessionProbe({ cdAbs, runDir }) {
   return { ok: true, sessionId: first.record.sessionId, at: new Date().toISOString() };
 }
 
+const REVIEW_RULES_CAP = 8192;
+
+// Lines with a claim-shaped label (P, A, B, X or Y plus digits) the review would rewrite or refuse: only "<declared
+// checklist>-P1" is exempt, as in blind-relabel.
+export function peerLabelLines(text, checklists = []) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const masked = checklists.length === 0 ? null : new RegExp(`\\b(?:${checklists.map(esc).join('|')})-P\\d+(?:-P\\d+)*\\b`, 'g');
+  // The seat (A, B), audit (X, Y) and peer (P) letters followed by digits are all claim labels the review rewrites or refuses.
+  return text.split('\n').filter((l) => /\b[ABPXY]\d+\b/.test(masked ? l.replace(masked, '') : l));
+}
+
+// Each repository's REVIEW.md. head: the copy at the merge-base with origin/HEAD (so a branch cannot rewrite its own rules), or
+// HEAD when no default branch resolves (baseUnknown); worktree: the file on disk; plain folders from disk. A file is "changed"
+// when the branch (since the merge-base) or the working tree changed it; a file only the change added is not used in head mode.
+export async function readReviewRules(dirs, mode = 'head') {
+  const files = [];
+  let baseUnknown = false;
+  const decode = (buf) => buf.toString('utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+  const line = async (args, dir) => {
+    const r = await runCapture('git', args, dir);
+    return r.code === 0 ? r.stdout.toString('utf8').trim() : null;
+  };
+  for (const dir of dirs) {
+    if (!(await isGitRepo(dir))) {
+      const bytes = await readFile(path.join(dir, 'REVIEW.md')).catch(() => null);
+      if (bytes) files.push({ dir, path: 'REVIEW.md', ref: 'not versioned', text: decode(bytes), changed: false, used: true });
+      continue;
+    }
+    const prefix = (await gitOut(['rev-parse', '--show-prefix'], dir)).stdout.toString('utf8').replace(/\r?\n$/, '');
+    const top = (await gitOut(['rev-parse', '--show-toplevel'], dir)).stdout.toString('utf8').trim();
+    const base = await line(['merge-base', 'HEAD', 'refs/remotes/origin/HEAD'], dir);
+    if (base === null) baseUnknown = true;
+    const ref = base ?? 'HEAD';
+    const short = await line(['rev-parse', '--short', ref], dir);
+    // The folder's own REVIEW.md, then each parent folder's up to the repository root: rules for a folder cover what is under it.
+    const parts = prefix.split('/').filter(Boolean);
+    const rels = [...parts.map((_, i) => `${parts.slice(0, parts.length - i).join('/')}/REVIEW.md`), 'REVIEW.md'];
+    for (const rel of [...new Set(rels)]) {
+      // Two folders of one repository share its root REVIEW.md: it is read once.
+      if (files.some((f) => f.dir === top && f.path === rel)) continue;
+      const spec = `:(top)${rel}`;
+      const atRef = await runCapture('git', ['show', `${ref}:${rel}`], dir);
+      const disk = await readFile(path.join(top, rel)).catch(() => null);
+      const bytes = mode === 'worktree' ? disk : atRef.code === 0 ? atRef.stdout : null;
+      const changed = (await runCapture('git', ['diff', '--quiet', ref, '--', spec], dir)).code !== 0 || (atRef.code !== 0 && disk !== null);
+      if (bytes === null) {
+        // A REVIEW.md that cannot be used is named in the warning with why: the change added it, the working tree deleted
+        // it, or the repository has no commit yet. It never becomes rules.
+        const why = disk === null && atRef.code === 0 ? 'deleted in the working tree' : short === null ? 'not committed yet' : 'added by the change';
+        if (changed && (disk !== null || (await runCapture('git', ['cat-file', '-e', `HEAD:${rel}`], dir)).code === 0)) files.push({ dir: top, path: rel, ref: why, text: '', changed: true, used: false });
+        continue;
+      }
+      files.push({ dir: top, path: rel, ref: mode === 'worktree' ? 'working tree' : `${base ? 'merge-base' : 'HEAD'} ${short}`, text: decode(bytes), changed, used: true });
+    }
+  }
+  if (files.length === 0) return null;
+  const read = files.filter((f) => f.used);
+  const size = read.reduce((n, f) => n + Buffer.byteLength(f.text), 0);
+  if (size > REVIEW_RULES_CAP) {
+    throw new RelayError(`REVIEW.md text is ${size} bytes (${read.map((f) => `${path.join(f.dir, f.path)} ${Buffer.byteLength(f.text)}`).join(', ')}); the limit is ${REVIEW_RULES_CAP}, because it goes into every seat and auditor brief. Shorten it, or read fewer repositories with --review-rules-only <dir>; nothing was written`);
+  }
+  // null when the only REVIEW.md is one the change added: nothing goes to the briefs, the warning still names it.
+  const text = read.length === 0 ? null : read.map((f) => `### ${path.basename(f.dir)}/${f.path} (${f.ref})\n\n${f.text.trim()}`).join('\n\n') + '\n';
+  return {
+    text,
+    record: {
+      mode, sha256: text === null ? null : sha256(Buffer.from(text, 'utf8')), changedByTarget: files.some((f) => f.changed),
+      ...(mode === 'head' && baseUnknown ? { baseUnknown: true } : {}),
+      files: files.map((f) => ({ dir: f.dir, path: f.path, ref: f.ref, changed: f.changed, used: f.used })),
+    },
+  };
+}
+
 async function hostPreflight(args) {
   const host = resolveHost({ hostFlag: args.host, interactive: false });
   const skill = path.basename(path.dirname(SCRIPTS_DIR));
@@ -1228,12 +1982,34 @@ async function hostPreflight(args) {
   if (!cdStat.isDirectory()) throw new RelayError(`--cd "${cdAbs}" is not a directory`);
   const runDir = path.resolve(args.runDir);
   const runFile = path.join(runDir, 'run.json');
+  if (args.probeReach && (await access(runFile).then(() => true, () => false))) {
+    // The run exists: probe what its Codex seat can reach and write reach-probe.json, nothing else.
+    const desc = await readRunDescriptor(runDir).catch((err) => { throw new RelayError(err.message); });
+    if (![desc.seatA, desc.seatB, desc.auditor, ...desc.verifiers].some((a) => a?.runtime === 'codex' && a?.transport !== 'native')) throw new RelayError('--probe-reach checks what a Codex CLI seat can reach, and no actor of this run runs on the Codex CLI; nothing was run');
+    if (!args.yesPaid) throw new RelayError('--probe-reach makes one small paid "codex exec" call; nothing was run. Add --yes-paid to run it.');
+    const probe = await codexReachProbe(desc.targetDir, await readFile(path.join(runDir, 'task-packet.md'), 'utf8').catch(() => ''), runDir);
+    await writeFile(path.join(runDir, 'reach-probe.json'), `${JSON.stringify(probe, null, 2)}\n`, 'utf8');
+    reportReachProbe(probe, path.join(runDir, 'reach-probe.json'));
+    return { host, reachProbe: path.join(runDir, 'reach-probe.json'), ran: probe.ran, unreachable: probe.results.filter((r) => !r.ok).map((r) => r.item) };
+  }
   if (await access(runFile).then(() => true, () => false)) throw new RelayError(`${runFile} already exists; refusing to overwrite a run descriptor`);
   const seats = await readSeatsFile(args.seats);
   const missing = missingDispatchers(seats, SCRIPTS_DIR);
   if (missing.length > 0) throw new RelayError(`host ${host} refused: ${skill}'s scripts folder lacks ${missing.join(', ')}`);
+  // A --cd whose files git neither tracks nor lists (its repository ignores them) has a snapshot hash that never changes, and a
+  // seat's snapshot of it would be empty. Asked of git's own listing: an ignore rule for some names (".*") must not refuse it.
+  if (await isGitRepo(cdAbs) && await holdsOnlyUnlistedFiles(cdAbs)) {
+    throw new RelayError(`host ${host} refused: --cd "${cdAbs}" is in a folder its git repository ignores, so a snapshot of it would hold none of its files and a change in it would never make the evidence stale. Review it from a folder git tracks, or a copy outside the repository; nothing was run`);
+  }
+  // Whether the run folder's file system folds letter case decides which spellings name it; run.json keeps the answer.
+  const runFoldsCase = probeFoldsCase(runDir);
+  setFoldsCase(runFoldsCase);
+  // Every dispatcher's write check hashes the whole target, so a run folder inside it, git-ignored or not, would count the run's
+  // own files as target writes.
+  const inTarget = [runDir, `${runDir}-audit-input`].find((dir) => isInsidePath(dir, cdAbs));
+  if (inTarget) throw new RelayError(`host ${host} refused: "${inTarget}" is inside the target --cd "${cdAbs}"; the dispatchers' write check would count the run's own files as target writes. Put the run folder (and the evidence and work folders) outside the target; nothing was run`);
   const inRepo = await runFolderInRepo(cdAbs, runDir, seats);
-  if (inRepo) throw new RelayError(`host ${host} refused: "${inRepo}" is inside the git repository that holds --cd and is not git-ignored; a Claude CLI or OpenCode seat snapshots that whole repository, so the run's own files would break the Phase 2 resume and be copied into the seat's snapshot. Put the run folder (and the evidence and work folders) outside the repository, or in a folder the repository ignores; nothing was run`);
+  if (inRepo) throw new RelayError(`host ${host} refused: "${inRepo}" is inside the git repository that holds --cd and is not git-ignored; a Claude CLI seat snapshots that whole repository, so the run's own files would break the Phase 2 resume and be copied into the seat's snapshot. Put the run folder (and the evidence and work folders) outside the repository, or in a folder the repository ignores; nothing was run`);
   const usesClaude = seatRuntimes(seats).has('claude');
   if (usesClaude) {
     const help = await claudeHelp();
@@ -1249,7 +2025,33 @@ async function hostPreflight(args) {
     codexDoctorStatus = doctor.ran ? 'ok' : `skipped (${doctor.text.trim().slice(0, 120)})`;
     doctorFailure = doctor.ran ? codexSandboxFailure(doctor.text) : null;
   }
+  const codexCli = [seats.seatA, seats.seatB, seats.auditor, ...(Array.isArray(seats.verifiers) ? seats.verifiers : [])]
+    .some((a) => a?.runtime === 'codex' && a?.transport !== 'native');
+  const mcpFailure = codexCli ? await codexMcpListFailure(cdAbs) : null;
+  if (mcpFailure?.missing) {
+    throw new RelayError(`host ${host} refused: a seat runs on the Codex CLI, but ${mcpFailure.detail}. Install the Codex CLI or put it on PATH; nothing was run`);
+  }
+  if (mcpFailure) {
+    throw new RelayError(`host ${host} refused: "codex mcp list --json" ${mcpFailure}; a Codex CLI seat lists the MCP servers to start with each one off, so every dispatch would refuse. Update the Codex CLI until that command works; nothing was run`);
+  }
+  // Skipped with --skip-codex-doctor: on a Codex host a nested codex command is blocked, as for doctor.
+  const seatTools = codexCli && !args.skipCodexDoctor ? await codexToolProbe(cdAbs) : null;
+  for (const w of toolProbeWarnings(seatTools ?? {})) process.stderr.write(`preflight: WARNING: ${w}${String.fromCharCode(10)}`);
+  const actorsAll = [seats.seatA, seats.seatB, seats.auditor, ...(Array.isArray(seats.verifiers) ? seats.verifiers : [])];
+  if (args.probeReach) {
+    if (!actorsAll.some((a) => a?.runtime === 'codex' && a?.transport !== 'native')) throw new RelayError('--probe-reach checks what a Codex CLI seat can reach, and no actor runs on the Codex CLI; nothing was run');
+    if (!existsSync(path.join(runDir, 'task-packet.md'))) throw new RelayError(`--probe-reach reads the paths and ports the task packet names: write ${path.join(runDir, 'task-packet.md')} first; nothing was run`);
+    if (!args.yesPaid) throw new RelayError('--probe-reach makes one small paid "codex exec" call; nothing was run. Add --yes-paid to run it.');
+  }
   const fingerprint = await computeFingerprint(cdAbs);
+  const fingerprintList = await fingerprintFiles(cdAbs);
+  // A plain folder has no change to measure: its whole tree is the target.
+  if (fingerprintList.head) {
+    const stat = (await gitOut([...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--shortstat', 'HEAD', '--', '.'], cdAbs)).stdout.toString('utf8');
+    const lines = [...stat.matchAll(/(\d+) (?:insertion|deletion)/g)].reduce((n, m) => n + Number(m[1]), 0);
+    const large = changeSizeWarning(Object.keys(fingerprintList.files).length, lines);
+    if (large) process.stderr.write(`preflight: WARNING: ${large}${String.fromCharCode(10)}`);
+  }
   const extraRepos = [];
   for (const repo of args.repos) {
     const abs = path.resolve(repo);
@@ -1259,15 +2061,23 @@ async function hostPreflight(args) {
     const same = comparablePath(abs) === comparablePath(cdAbs);
     if (!same) extraRepos.push({ dir: abs, snapshotHash: await computeSnapshotHash(abs) });
   }
+  const ruleDirs = [cdAbs, ...extraRepos.map((r) => r.dir)];
+  const onlyDirs = args.reviewRulesOnly.map((d) => comparablePath(path.resolve(d)));
+  const unknownOnly = args.reviewRulesOnly.filter((d, i) => !ruleDirs.some((dir) => comparablePath(dir) === onlyDirs[i]));
+  if (unknownOnly.length > 0) throw new RelayError(`--review-rules-only ${unknownOnly.join(', ')} is not --cd or a --repo of this run; nothing was written`);
+  const rules = await readReviewRules(onlyDirs.length === 0 ? ruleDirs : ruleDirs.filter((dir) => onlyDirs.includes(comparablePath(dir))), args.reviewRules ?? 'head');
+  // Every audit re-checks every claim: a seats file from an older review-config may still name a depth.
+  if (seats.flags && Object.hasOwn(seats.flags, 'auditDepth')) throw new RelayError(`${args.seats}: flags.auditDepth is not a setting; every audit re-checks every claim. Write the seats file again with review-config seats, or delete the key; nothing was written`);
   const descriptor = {
     skill,
     skillDir: path.dirname(SCRIPTS_DIR),
     targetDir: cdAbs,
     host,
-    flags: { auditDepth: 'light', falsification: false, mode: 'adversarial', ...(seats.flags ?? {}) },
+    flags: { falsification: false, mode: 'adversarial', ...(seats.flags ?? {}), ...(typeof runFoldsCase === 'boolean' ? { foldsCase: runFoldsCase } : {}) },
     fingerprint,
     ...(seats.sourceDirs ? { sourceDirs: seats.sourceDirs } : {}),
     ...(extraRepos.length > 0 ? { extraRepos } : {}),
+    ...(rules?.text ? { reviewRules: rules.record } : {}),
     ...(args.matchedTools !== null ? { matchedTools: args.matchedTools } : {}),
     seatA: actorWithDefaults(seats.seatA, 'A', path.join(runDir, 'phase1', 'seat-A')),
     seatB: actorWithDefaults(seats.seatB, 'B', path.join(runDir, 'phase1', 'seat-B')),
@@ -1322,10 +2132,50 @@ async function hostPreflight(args) {
     if (err instanceof RunDescriptorError) throw new RelayError(err.message);
     throw err;
   }
+  await writeFile(path.join(runDir, 'fingerprint-files.json'), `${JSON.stringify(fingerprintList)}\n`, 'utf8');
+  if (args.keepTargetCopy) {
+    const copy = await copyTarget(cdAbs, `${runDir}-target-copy`);
+    await writeFile(path.join(runDir, 'target-copy.json'), `${JSON.stringify(copy, null, 2)}${String.fromCharCode(10)}`, 'utf8');
+    process.stderr.write(copy.copied
+      ? `preflight: kept a copy of the target as reviewed: ${copy.path} (${copy.files} file(s), ${copy.bytes} byte(s), each checked against its source); it holds the target's code: delete it with the run folders${String.fromCharCode(10)}`
+      : `preflight: WARNING: no copy of the target was kept (${copy.reason}); the review is not affected${String.fromCharCode(10)}`);
+  }
+  if (seatTools) await writeFile(path.join(runDir, 'seat-tools.json'), `${JSON.stringify(seatTools, null, 2)}\n`, 'utf8');
+  if (rules) {
+    if (rules.text) await writeFile(path.join(runDir, 'review-rules.md'), rules.text, 'utf8');
+    const nl = String.fromCharCode(10);
+    for (const f of rules.record.files.filter((x) => x.changed)) {
+      const used = !f.used ? `it is not used (${f.ref}: ${{ 'deleted in the working tree': 'the working tree deleted it', 'not committed yet': 'the repository has no commit yet; --review-rules worktree reads the file on disk' }[f.ref] ?? 'the base of the branch has no REVIEW.md there'})` : rules.record.mode === 'head' ? `the seats get the copy at the ${rules.record.baseUnknown ? 'branch tip (HEAD)' : 'merge-base with the default branch'}` : 'the seats get the working-tree copy';
+      process.stderr.write(`preflight: WARNING: ${path.join(f.dir, f.path)} was changed by the working tree or the branch under review; ${used}${nl}`);
+    }
+    for (const l of peerLabelLines(rules.text ?? '', descriptor.flags.checklists ?? [])) process.stderr.write(`preflight: WARNING: REVIEW.md line "${l.slice(0, 120)}" holds a label like P1 or A2 (one of the letters P, A, B, X or Y followed by digits), which the review reads as a claim label and refuses when a seat or the auditor repeats it; write it as <name>-P1 and list <name> in the seats file's flags.checklists${nl}`);
+    if (rules.record.baseUnknown && rules.text) process.stderr.write(`preflight: WARNING: no default branch (origin/HEAD) to compare with, so REVIEW.md was read at HEAD and a branch commit that changed it cannot be detected; run "git remote set-head origin --auto" if the repository has a remote${nl}`);
+  }
+  // The seats copy the packet's own tags and names into their files; a P<n> among them stops the audit as a peer label.
+  const packetText = await readFile(path.join(runDir, 'task-packet.md'), 'utf8').catch(() => '');
+  // build-brief refuses such a packet at phase1 --start; imported here so a skill folder missing it reaches the refusal above.
+  const namesRun = packetText ? (await import('./build-brief.mjs')).runDirNamedIn(packetText, runDir, cdAbs) : null;
+  if (namesRun) process.stderr.write(`preflight: WARNING: the task packet names this run folder (${namesRun}); "review-run phase1 --start" will refuse it. Keep the evidence folder (preflight --out logs) outside the run folder and cite it from there${String.fromCharCode(10)}`);
+  if (codexCli && packetText && !args.probeReach) {
+    const outside = outsideReadWarning((await packetReach(packetText, { cdAbs, runDir })).outside);
+    if (outside) process.stderr.write(`preflight: WARNING: ${outside.replace('--host ...', `--host ${host} --cd ${cdAbs} --run-dir ${runDir}`)}${String.fromCharCode(10)}`);
+  }
+  const packetLabels = peerLabelLines(packetText, descriptor.flags.checklists ?? []);
+  for (const l of packetLabels.slice(0, 3)) process.stderr.write(`preflight: WARNING: task packet line "${l.trim().slice(0, 120)}" holds a label like P1 or A2 (one of the letters P, A, B, X or Y followed by digits), which the review reads as a claim label and refuses when a seat or the auditor repeats it; rename it (hypotheses are H<n>, criteria AC-<n>), or write it as <name>-P1 and list <name> in the seats file's flags.checklists${String.fromCharCode(10)}`);
+  if (packetLabels.length > 3) process.stderr.write(`preflight: WARNING: ${packetLabels.length - 3} more task packet line(s) hold a label like P1 or A2${String.fromCharCode(10)}`);
+  if (args.probeReach) {
+    const probe = await codexReachProbe(cdAbs, await readFile(path.join(runDir, 'task-packet.md'), 'utf8'), runDir);
+    await writeFile(path.join(runDir, 'reach-probe.json'), `${JSON.stringify(probe, null, 2)}\n`, 'utf8');
+    reportReachProbe(probe, path.join(runDir, 'reach-probe.json'));
+  }
+  const stale = await pluginCopyDrift(path.dirname(SCRIPTS_DIR));
+  if (stale.length > 0) {
+    process.stderr.write(`preflight: WARNING: this skill runs from Claude Code's plugin cache, and ${stale.length} file(s) differ from the marketplace copy (${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ', ...' : ''}): an older build under the same version may be running. Run /plugin update ${path.basename(path.dirname(SCRIPTS_DIR))}@<marketplace> (or uninstall and install it), restart, and run preflight again${String.fromCharCode(10)}`);
+  }
   if (!existsSync(path.join(runDir, 'task-packet.md'))) {
     process.stderr.write(`preflight: WARNING: ${path.join(runDir, 'task-packet.md')} not found; run.json is written, so write the packet there before "review-run phase1 --start" (no need to rerun this command)${String.fromCharCode(10)}`);
   }
-  const result = { host, skill, runJson: written, fingerprint, leanFlags: usesClaude ? 'ok' : 'not needed', codexDoctor: codexDoctorStatus, hostStatus: hostStatusOf(support), matchedTools: args.matchedTools };
+  const result = { host, skill, runJson: written, fingerprint, leanFlags: usesClaude ? 'ok' : 'not needed', codexDoctor: codexDoctorStatus, hostStatus: hostStatusOf(support), matchedTools: args.matchedTools, ...(args.probeReach ? { reachProbe: path.join(runDir, 'reach-probe.json') } : {}) };
   if (args.probeDispatch) {
     const probe = planProbe({ cdAbs, runDir });
     result.probe = { ran: false, wouldRun: probe.plan };
@@ -1338,7 +2188,7 @@ async function executeProbe({ argv, dir }) {
   await mkdir(path.join(dir, 'out'), { recursive: true });
   await writeFile(path.join(dir, 'brief.txt'), 'Reply with the single word ok.\n', 'utf8');
   const child = await new Promise((resolve) => {
-    const proc = spawn(process.execPath, [path.join(SCRIPTS_DIR, 'claude-dispatch.mjs'), ...argv], { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    const proc = spawn(process.execPath, [path.join(SCRIPTS_DIR, 'claude-dispatch.mjs'), ...argv], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     const guard = stopOnSignal(proc);
     let err = '';
     proc.stderr.on('data', (d) => { err += d.toString('utf8'); });
@@ -1386,20 +2236,23 @@ async function main() {
       process.exit(result.stale ? 1 : 0);
     }
     const result = await run(args);
-    for (const line of freshnessWarnings(result.repos)) process.stderr.write(`${line}\n`);
+    const notes = [...freshnessWarnings(result.repos)];
+    if (result.execInChangedTarget) notes.push(`preflight: WARNING: an --exec-in command changed files under --cd ${path.resolve(args.cd)}; its snapshotHash is stale (--check-stale will say so). Rerun, and keep --exec-in commands inside their own folder.`);
     for (const s of result.sourceSnapshots ?? []) {
       if (s.skippedCacheCount) {
-        process.stderr.write(
-          `preflight: WARNING: ${s.path} holds ${s.skippedCacheCount} Python cache item(s) (${s.skippedCaches.slice(0, 3).join(', ')}` +
-            `${s.skippedCacheCount > 3 ? ', ...' : ''}); left out of its snapshotHash. Something ran Python in the snapshot; use "python -B" there.\n`
+        notes.push(
+          `preflight: WARNING: ${s.path} holds ${s.skippedCacheCount} Python or Gradle cache item(s) (${s.skippedCaches.slice(0, 3).join(', ')}` +
+            `${s.skippedCacheCount > 3 ? ', ...' : ''}); left out of its snapshotHash. Something ran Python in the snapshot; use "python -B" there.`
         );
       }
     }
     const text = JSON.stringify(result, null, 2) + '\n';
     if (args.out) {
       await writeFile(args.out, text, 'utf8');
-      process.stdout.write(`${summaryLine(result, args.out)}\n`);
+      // With --out stdout is plain lines, so the notes go there: on stderr PowerShell 5.1 shows them as an error at exit 0.
+      process.stdout.write([summaryLine(result, args.out), ...notes].map((l) => `${l}\n`).join(''));
     } else {
+      for (const line of notes) process.stderr.write(`${line}\n`);
       process.stdout.write(text);
     }
     if (args.failOnCommandError) {
@@ -1432,4 +2285,4 @@ if (isDirectRun) {
   });
 }
 
-export { assertNodeVersion, resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, hostPreflight, parseArgs, runTier1, runTier2, runWithTimeout, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };
+export { stopOnSignal, assertNodeVersion, resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, fingerprintFiles, driftedFiles, pluginCopyDrift, packetReach, hostPreflight, parseArgs, runTier1, runTier2, runWithTimeout, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };

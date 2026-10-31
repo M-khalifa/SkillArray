@@ -51,12 +51,12 @@ async function dispatchOnce(t, dispatcher, { bulk = false } = {}) {
     await fs.writeFile(path.join(target, 'article.md'), 'original\n');
   }
   t.after(() => fs.rm(path.join(target, 'scratch.txt'), { force: true }));
-  const events = dispatcher === 'codex'
-    ? `console.log(JSON.stringify({type:'thread.started', thread_id:'t1'}));
-console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'done'}}));`
-    : `console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text:'done'}}));`;
+  const events = `console.log(JSON.stringify({type:'thread.started', thread_id:'t1'}));
+console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'done'}}));`;
   const fake = path.join(bin, 'fake.mjs');
   await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
+// codex-dispatch lists the MCP servers first ("codex mcp list --json"); this fake has none.
+if (process.argv.includes('mcp')) { process.stdout.write('[]\\n'); process.exit(0); }
 let input = '';
 if (!process.stdin.isTTY) { for await (const chunk of process.stdin) input += chunk; }
 writeFileSync(${JSON.stringify(path.join(target, 'scratch.txt'))}, 'new\\n');
@@ -77,7 +77,7 @@ ${events}
   return JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
 }
 
-for (const dispatcher of ['codex', 'opencode']) {
+for (const dispatcher of ['codex']) {
   test(`final-F8: ${dispatcher}-dispatch records the node_modules coverage gap in result.json, next to a clean touchedFiles list`, async (t) => {
     const output = await dispatchOnce(t, dispatcher, { bulk: true });
     assert.equal(output.status, 'completed');
@@ -91,11 +91,6 @@ for (const dispatcher of ['codex', 'opencode']) {
     assert.equal(Object.hasOwn(output, 'touchedFilesNote'), false);
   });
 }
-
-test('final-F6: every OpenCode result.json states its usage semantics as per-call', async (t) => {
-  const output = await dispatchOnce(t, 'opencode');
-  assert.equal(output.usageSemantics, 'per-call');
-});
 
 test('final-F9: the codex-dispatch help text no longer says the non-git inventory skips node_modules', () => {
   const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));

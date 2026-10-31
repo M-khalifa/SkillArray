@@ -1,0 +1,35 @@
+{
+  "source_write": null,
+  "falsification": {
+    "requested": false,
+    "verifiers_run": 0
+  },
+  "topology": "same-vendor",
+  "mode": "adversarial",
+  "status": "completed",
+  "protocol": "review-protocol-v1.3",
+  "reviewers": [
+    {
+      "role": "A",
+      "provider": "anthropic",
+      "model_requested": "sonnet",
+      "selection_source": "saved"
+    },
+    {
+      "role": "B",
+      "provider": "anthropic",
+      "model_requested": "opus",
+      "selection_source": "saved"
+    }
+  ],
+  "exchange": {
+    "blinded": true,
+    "seat_to_audit_label": {
+      "A": "Y",
+      "B": "X"
+    },
+    "auditor_model_family": "same-as-reviewer-A",
+    "auditor": "fresh-context",
+    "audit_depth": "full"
+  }
+}

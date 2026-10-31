@@ -1,0 +1,77 @@
+{
+  "skill": "cross-review",
+  "skillDir": "C:\\Users\\dev\\.claude\\skills\\cross-review",
+  "targetDir": "@@TARGET_JSON@@",
+  "host": "claude-code",
+  "flags": {
+    "auditDepth": "full",
+    "falsification": false,
+    "mode": "adversarial",
+    "repoOnly": true
+  },
+  "fingerprint": {
+    "head": "ea0b739e8bc727cbe052c89b9478f31d675aacef",
+    "diffSha256": "316b600c687a1215b1528b058c67fc2c677600f95c3842863fcb06a28c80b252",
+    "untrackedSha256": "9a92d58f1543156df9450c7437ba5be04b8e78be4f8dd1a14d24c6ad3dc18f34",
+    "snapshotHash": "4e20bd4fb2a0be193f4e75d37c642ab9ae5f6134d63eac33e9cd2434551eb790"
+  },
+  "seatA": {
+    "role": "A",
+    "effort": null,
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@\\phase1\\seat-A",
+    "provider": "anthropic",
+    "runtime": "claude",
+    "model": "opus",
+    "transport": "cli",
+    "selectionSource": "saved"
+  },
+  "seatB": {
+    "role": "B",
+    "effort": "high",
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@\\phase1\\seat-B",
+    "provider": "openai",
+    "runtime": "codex",
+    "model": "gpt-6.1-sol",
+    "transport": "cli",
+    "selectionSource": "saved"
+  },
+  "auditor": {
+    "role": "auditor",
+    "effort": null,
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@-audit-input",
+    "provider": "anthropic",
+    "runtime": "claude",
+    "model": "opus",
+    "transport": "cli"
+  },
+  "verifiers": [],
+  "support": [
+    {
+      "role": "A",
+      "runtime": "claude",
+      "transport": "cli",
+      "status": "supported"
+    },
+    {
+      "role": "B",
+      "runtime": "codex",
+      "transport": "cli",
+      "status": "supported"
+    },
+    {
+      "role": "auditor",
+      "runtime": "claude",
+      "transport": "cli",
+      "status": "supported"
+    }
+  ]
+}

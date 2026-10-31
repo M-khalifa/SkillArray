@@ -3,13 +3,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { platform as osPlatform } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
   assertNodeVersion, parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, repoFreshness, freshnessWarnings, findReviewArtifacts, summaryLine,
+  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs,
 } from '../preflight.mjs';
 
 function git(args, cwd) {
@@ -187,7 +188,12 @@ test('run(): --source-snapshot records a plain export\'s stated repo and ref wit
   assert.equal(withCaches.skippedCacheCount, 3);
   const cli = spawnSync(process.execPath, [fileURLToPath(new URL('../preflight.mjs', import.meta.url)), '--cd', target, '--source-snapshot', `${snap}=org/svc@1a2b3c4`], { encoding: 'utf8' });
   assert.equal(cli.status, 0, cli.stderr);
-  assert.match(cli.stderr, /WARNING: .* holds 3 Python cache item\(s\) \(\.pytest_cache\/, pkg\/__pycache__\/, stray\.pyc\); left out of its snapshotHash/);
+  assert.match(cli.stderr, /WARNING: .* holds 3 Python or Gradle cache item\(s\) \(\.pytest_cache\/, pkg\/__pycache__\/, stray\.pyc\); left out of its snapshotHash/);
+  // With --out stdout is plain lines, so the note goes there (PowerShell 5.1 shows any stderr line as an error).
+  const withOut = spawnSync(process.execPath, [fileURLToPath(new URL('../preflight.mjs', import.meta.url)), '--cd', target, '--source-snapshot', `${snap}=org/svc@1a2b3c4`, '--out', path.join(target, '..', 'pf-out.json')], { encoding: 'utf8' });
+  assert.equal(withOut.status, 0, withOut.stderr);
+  assert.match(withOut.stdout, /^preflight: wrote .*\npreflight: WARNING: .* holds 3 Python or Gradle cache item\(s\)/);
+  assert.equal(withOut.stderr, '');
   assert.throws(() => parseArgs(['--cd', target, '--source-snapshot', `${snap}=org/svc`]), /must look like <folder>=<repo>@<commit or tag>/);
   await assert.rejects(run(parseArgs(['--cd', target, '--source-snapshot', `${path.join(dir, 'nope')}=org/svc@abc`])), /does not exist or is not accessible/);
 });
@@ -316,12 +322,13 @@ test('runTier2 spawns the Tier-2 command with detached:true on a POSIX platform,
     calls.push({ command, opts });
     return spawn(process.execPath, ['-e', 'process.exit(0)']);
   };
-  await runTier2(
+  const tier2 = await runTier2(
     { cd: dir, commands: ['echo hi'], timeout: 0, envMode: 'filtered', envPassthrough: [] },
     { spawnFn: fakeSpawn, platform: 'linux' }
   );
   assert.equal(calls.length, 1);
   assert.equal(calls[0].opts.detached, true);
+  assert.equal(tier2.results[0].timeoutS, 0, 'each record keeps the limit it ran under, for the timeout line');
 
   const calls2 = [];
   const fakeSpawn2 = (command, opts) => {
@@ -440,20 +447,56 @@ test('run(): tier1.snapshotHash and tier2.snapshotHash agree in the same invocat
   assert.equal(result.snapshotHash, result.tier2.snapshotHash);
 });
 
+test('run(): --base lists committed work since that commit in Tier 1 and leaves snapshotHash alone; a bad commit or --host is refused [slow]', async (t) => {
+  const dir = await makeGitRepo(t);
+  const base = git(['rev-parse', 'HEAD'], dir).trim();
+  await writeFile(path.join(dir, 'b.txt'), 'committed', 'utf8');
+  git(['add', 'b.txt'], dir);
+  git(['commit', '-q', '-m', 'work'], dir);
+  await writeFile(path.join(dir, 'a.txt'), 'edited', 'utf8');
+  const plain = await run({ cd: dir, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [] });
+  const since = await run({ cd: dir, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [], base: base.slice(0, 7) });
+  assert.deepEqual(plain.tier1.changedFiles, ['a.txt']);
+  assert.deepEqual([...since.tier1.changedFiles].sort(), ['a.txt', 'b.txt']);
+  assert.equal(since.tier1.base, base);
+  assert.ok(since.tier1.diff.includes('+committed'), since.tier1.diff);
+  assert.equal(since.snapshotHash, plain.snapshotHash);
+  assert.ok(summaryLine(since, 'x.json').includes(`2 changed file(s) since ${base.slice(0, 12)}`), summaryLine(since, 'x.json'));
+  await assert.rejects(run({ cd: dir, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [], base: 'no-such-ref' }), /--base no-such-ref is not a commit/);
+  assert.throws(() => parseArgs(['--cd', dir, '--host', 'claude-code', '--run-dir', dir, '--seats', 's.json', '--base', base]), /--base is not used with --host/);
+});
+
+test('runTier1 and fingerprintFiles: a renamed file lists its old path too, staged or committed since --base [slow]', async (t) => {
+  const { fingerprintFiles } = await import('../preflight.mjs');
+  const dir = await makeGitRepo(t);
+  const base = git(['rev-parse', 'HEAD'], dir).trim();
+  git(['mv', 'a.txt', 'b.txt'], dir);
+  const staged = await runTier1(dir);
+  assert.deepEqual([...staged.changedFiles].sort(), ['a.txt', 'b.txt']);
+  assert.equal((await fingerprintFiles(dir)).files['a.txt'], 'deleted');
+  git(['commit', '-q', '-m', 'rename'], dir);
+  const since = await runTier1(dir, null, base);
+  assert.deepEqual([...since.changedFiles].sort(), ['a.txt', 'b.txt']);
+  // A command that renames a file touched both paths.
+  const moved = await run({ cd: dir, exec: ['git mv b.txt c.txt'], timeout: 30, envMode: 'filtered', envPassthrough: [] });
+  assert.equal(moved.tier2.results[0].exitCode, 0, moved.tier2.results[0].stderr);
+  assert.deepEqual([...moved.tier2.results[0].touchedFiles].sort(), ['b.txt', 'c.txt']);
+});
+
 test('run(): this is a thin executor, never an analyzer -- the output carries only the documented fact fields, no interpretive text [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const result = await run({ cd: dir, exec: ['echo hi'], timeout: 10, envMode: 'filtered', envPassthrough: [] });
   const tier1Keys = new Set(Object.keys(result.tier1));
   for (const k of tier1Keys) {
     assert.ok(
-      ['gitRepo', 'diff', 'status', 'changedFiles', 'fileStats', 'note'].includes(k),
+      ['gitRepo', 'base', 'diff', 'status', 'changedFiles', 'fileStats', 'note'].includes(k),
       `unexpected key on tier1 output: "${k}"`
     );
   }
   const tier2ResultKeys = new Set(Object.keys(result.tier2.results[0]));
   for (const k of tier2ResultKeys) {
     assert.ok(
-      ['command', 'startedAt', 'finishedAt', 'durationMs', 'exitCode', 'timedOut', 'touchedFiles', 'stdout', 'stderr'].includes(k),
+      ['command', 'startedAt', 'finishedAt', 'durationMs', 'exitCode', 'timedOut', 'timeoutS', 'touchedFiles', 'stdout', 'stderr'].includes(k),
       `unexpected key on a tier2 result: "${k}"`
     );
   }
@@ -583,6 +626,20 @@ test('run(): --watch-file names a packet file changed by upstream commits not in
   assert.ok(freshnessWarnings(result.repos).includes(`preflight: WARNING: a.txt in ${result.repos[0].path} changed in 2 commit(s) on origin/main not in HEAD and differs from HEAD`));
 });
 
+test('Mac round 5 F5: a --watch-file spelled through a link to --cd (macOS /tmp for /private/tmp) is inside it, not outside every repo [slow]', async (t) => {
+  const { root, clone } = await staleCloneSetup(t);
+  const linked = path.join(root, 'clone-link');
+  try {
+    await symlink(clone, linked, 'junction');
+  } catch (err) {
+    t.skip(`cannot create links here: ${err.code}`);
+    return;
+  }
+  const result = await run({ cd: clone, exec: [], timeout: 10, envMode: 'filtered', envPassthrough: [], fetch: true, watchFiles: [path.join(linked, 'a.txt')] });
+  assert.equal(result.watchFilesOutsideRepos, undefined);
+  assert.deepEqual(result.repos[0].watchedChangedUpstream, [{ file: 'a.txt', ref: 'origin/main', commits: 2, contentDiffers: true }]);
+});
+
 test('run(): --watch-file reports contentDiffers:false and only a note when the upstream change already reached HEAD another way [slow]', async (t) => {
   const { clone } = await staleCloneSetup(t);
   // The same final content, committed locally: upstream commits are still not in HEAD, the file is identical.
@@ -666,6 +723,33 @@ test('run() --compact: a rerun into the same --log-dir deletes only this script\
   assert.match(await readFile(path.join(logDir, 'command-1.stdout.log'), 'utf8'), /only/);
 });
 
+test('CLI: with no git on PATH preflight says git is required, not an ENOENT stack [slow]', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'preflight-nogit-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const empty = path.join(dir, 'empty-bin');
+  await mkdir(empty);
+  await writeFile(path.join(dir, 'a.md'), 'x\n');
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'path'));
+  env.PATH = empty;
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('../preflight.mjs', import.meta.url)), '--cd', dir], { encoding: 'utf8', env });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /git is required and was not found on PATH/);
+  assert.doesNotMatch(r.stderr, /unexpected failure|ENOENT/);
+});
+
+test('run() --compact: a rerun that clears earlier logs also removes the earlier --out file, which cites them, before any command runs [slow]', async (t) => {
+  const cd = await makeGitRepo(t);
+  const dir = await mkdtemp(path.join(tmpdir(), 'preflight-out-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const out = path.join(dir, 'preflight.json');
+  const base = { cd, timeout: 10, envMode: 'filtered', envPassthrough: [], compact: true, logDir: `${out}.logs`, tail: 5, out };
+  await run({ ...base, exec: ['echo first-run'] });
+  await writeFile(out, '{"command":"echo first-run"}');
+  // run() itself never writes --out (main does, at the end): what is left after it is what a stopped rerun leaves.
+  await run({ ...base, exec: ['echo second-run'] });
+  await assert.rejects(readFile(out, 'utf8'), { code: 'ENOENT' });
+});
+
 test('CLI: --fetch against a repo behind its remote prints a WARNING on stderr and keeps the JSON raw [slow]', async (t) => {
   const { clone } = await staleCloneSetup(t);
   const { fileURLToPath } = await import('node:url');
@@ -730,12 +814,13 @@ test('run(): --exec-in rejects a missing directory', async (t) => {
 });
 
 test('summaryLine: names the hash and each command exit code, with --exec-in entries and a timeout', () => {
-  const r = (exitCode, timedOut = false) => ({ exitCode, timedOut });
+  const r = (exitCode, timedOut = false) => ({ exitCode, timedOut, timeoutS: 1800 });
   const line = summaryLine({
     snapshotHash: 'abc', tier2: { targetChanged: false, results: [r(0), r(1)] },
     tier2Repos: [{ path: '/b', targetChanged: true, results: [r(null, true)] }],
   }, 'pf.json');
-  assert.equal(line, 'preflight: wrote pf.json; snapshotHash abc; tier2: 2 command(s), exit 0, 1, targetChanged false; tier2Repos /b: 1 command(s), exit timeout, targetChanged true');
+  // Field run: a timeout names its limit and the flag that raises it.
+  assert.equal(line, 'preflight: wrote pf.json; snapshotHash abc; tier2: 2 command(s), exit 0, 1, targetChanged false; tier2Repos /b: 1 command(s), exit timeout after 1800 s (raise with --timeout <seconds>, 0 = unlimited), targetChanged true');
   assert.equal(summaryLine({ snapshotHash: 'abc', tier2: null }, 'pf.json'), 'preflight: wrote pf.json; snapshotHash abc; no Tier 2 command');
 });
 
@@ -789,6 +874,39 @@ test('CLI: [slow] --fail-on-command-error exits 4 after writing the result when 
   assert.equal(ok.status, 0, ok.stderr);
 });
 
+test('CLI: [slow] --exec-file runs each line exactly as written: quotes and a path with spaces survive, # and blank lines are skipped', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'preflight exec file '));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'a.md'), 'x\n');
+  const out = path.join(dir, 'sub dir', 'seen - out.txt');
+  const file = path.join(dir, 'commands.txt');
+  await writeFile(file, `\uFEFF# checks\r\n\r\n"${process.execPath}" -e "require('fs').mkdirSync(require('path').dirname(process.argv[1]),{recursive:true});require('fs').writeFileSync(process.argv[1],'ok')" "${out}"\r\n"${process.execPath}" -e "process.exit(0)"   \r\n`);
+  const script = fileURLToPath(new URL('../preflight.mjs', import.meta.url));
+  const r = spawnSync(process.execPath, [script, '--cd', dir, '--exec-file', file, '--fail-on-command-error'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const results = JSON.parse(r.stdout).tier2.results;
+  assert.equal(results.length, 2);
+  assert.ok(results.every((x) => x.exitCode === 0), JSON.stringify(results));
+  assert.match(results[1].command, /process\.exit\(0\)" {3}$/, 'trailing spaces reach the shell too');
+  // --exec-in-file reads the same file form for another repository: one --exec-in per command line.
+  const other = path.join(dir, 'other repo - with dash');
+  const parsed = parseArgs(['--cd', dir, '--exec-in-file', other, file]);
+  assert.deepEqual(parsed.execIn.map((e) => e.dir), [other, other]);
+  assert.match(parsed.execIn[0].command, /writeFileSync\(process\.argv\[1\],'ok'\)" ".*seen - out\.txt"$/);
+  assert.equal(await readFile(out, 'utf8'), 'ok');
+  const empty = path.join(dir, 'empty.txt');
+  await writeFile(empty, '# nothing\n');
+  assert.match(spawnSync(process.execPath, [script, '--cd', dir, '--exec-file', empty], { encoding: 'utf8' }).stderr, /holds no command/);
+  assert.match(spawnSync(process.execPath, [script, '--cd', dir, '--exec-file', path.join(dir, 'missing.txt')], { encoding: 'utf8' }).stderr, /cannot be read/);
+  // What PowerShell 5.1's "> file" writes: UTF-16LE with a byte-order mark.
+  const utf16 = path.join(dir, 'utf16.txt');
+  await writeFile(utf16, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('node -e "0"\r\n', 'utf16le')]));
+  const refused = spawnSync(process.execPath, [script, '--cd', dir, '--exec-file', utf16], { encoding: 'utf8' });
+  assert.equal(refused.status, 2, refused.stderr);
+  assert.match(refused.stderr, /is not UTF-8 text \(UTF-16 or NUL bytes\)/);
+  assert.doesNotMatch(refused.stderr, /unexpected failure|at runWithTimeout/, 'a refusal, not a stack trace');
+});
+
 test('CLI: a reader that closes stdout early does not fail the script (EPIPE exits 0) [slow]', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'preflight-epipe-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -821,4 +939,230 @@ test('assertNodeVersion: Node 22 and newer pass, older Node stops preflight with
   assert.throws(() => assertNodeVersion('20.18.0'), (e) => e instanceof RelayError && /Node\.js 22 or newer.*20\.18\.0/.test(e.message));
   assert.throws(() => assertNodeVersion('not-a-version'), RelayError);
   assert.doesNotThrow(() => assertNodeVersion());
+});
+
+test('Mac round 4 F5: for a subfolder target, status and the summary line count and name only untracked files inside it', async (t) => {
+  const repo = await makeGitRepo(t);
+  await mkdir(path.join(repo, 'sub'));
+  await writeFile(path.join(repo, 'sub', 'a.txt'), 'x\n');
+  git(['add', 'sub/a.txt'], repo);
+  git(['commit', '-q', '-m', 'sub'], repo);
+  for (const f of ['other1.txt', 'other2.txt', path.join('sub', 'new.txt')]) await writeFile(path.join(repo, f), 'u\n');
+  const tier1 = await runTier1(path.join(repo, 'sub'));
+  assert.deepEqual(tier1.changedFiles, ['new.txt']);
+  assert.equal(tier1.status, '?? sub/new.txt\n');
+  assert.match(summaryLine({ snapshotHash: 'h', tier1 }, 'out.json'), /; 1 changed file\(s\) \(1 untracked: new\.txt\); no Tier 2 command$/);
+});
+
+test('round 5: the job report gives the leftover pids; without a usable job the parent-chain scan runs and stops only the command\'s tree', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'job-report-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const report = path.join(dir, 'job.txt');
+  const logged = [];
+  const log = (m) => logged.push(m);
+  await writeFile(report, 'left 41 42');
+  assert.deepEqual(jobLeftovers(report, { log }), [41, 42]);
+  await writeFile(report, 'left ');
+  assert.deepEqual(jobLeftovers(report, { log }), []);
+  assert.equal(logged.length, 0);
+  await writeFile(report, 'nojob AssignProcessToJobObject failed: 5');
+  assert.equal(jobLeftovers(report, { log }), null);
+  assert.match(logged.at(-1), /could not run in a job object \(AssignProcessToJobObject failed: 5\); scanning/);
+  assert.equal(jobLeftovers(path.join(dir, 'missing.txt'), { log }), null);
+  assert.match(logged.at(-1), /could not be read \(ENOENT\)/);
+  // The scan: a child and grandchild of the shell created after it started are stopped through the child; an older
+  // process with a reused parent pid, and an unrelated one, are not.
+  const start = 1_000_000;
+  const table = ['500 100 1000500', '600 500 1000600', '700 100 900000', '800 999 1000700'].join('\n');
+  const calls = [];
+  const fake = (file, args) => { calls.push([path.basename(file), ...args]); return /powershell/i.test(file) ? { status: 0, stdout: table, stderr: '' } : { status: 0 }; };
+  assert.deepEqual(stopLeftovers(100, start, { run: fake, log }), [500]);
+  assert.deepEqual(calls.filter((c) => c[0] === 'taskkill.exe').map((c) => c.slice(1)), [['/pid', '500', '/T', '/F']]);
+  assert.match(logged.at(-1), /left 1 process\(es\) running \(pid 500\); they were stopped/);
+});
+
+test('closing round 4: a stop signal never kills the tree of a command that already exited (its pid may now be another process), and still kills one that has not', async (t) => {
+  const { stopOnSignal } = await import('../preflight.mjs');
+  const { EventEmitter } = await import('node:events');
+  // An --exec command leads its own process group on POSIX (detached), which the stop signals.
+  const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore', detached: process.platform !== 'win32' });
+  t.after(() => { try { other.kill(); } catch { /* already gone */ } });
+  await new Promise((r) => other.once('spawn', r));
+  const alive = () => { try { process.kill(other.pid, 0); return true; } catch { return false; } };
+  const run = async (fields) => {
+    const proc = new EventEmitter();
+    const exited = [];
+    const guard = stopOnSignal(Object.assign(new EventEmitter(), { pid: other.pid }, fields), { proc, exit: (c) => exited.push(c) });
+    proc.emit('SIGINT');
+    for (let i = 0; i < 100 && exited.length === 0; i += 1) await new Promise((r) => setTimeout(r, 100));
+    guard.uninstall();
+    return exited;
+  };
+  assert.deepEqual(await run({ exitCode: 0 }), [130]);
+  assert.equal(alive(), true, 'the process now holding the exited command\'s pid was not stopped');
+  assert.deepEqual(await run({ exitCode: null, signalCode: null }), [130]);
+  for (let i = 0; i < 50 && alive(); i += 1) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(alive(), false, 'a running command is still stopped');
+});
+
+test('field run: on a plain folder the drift check ignores Python and Gradle caches a build wrote, but not a source change', async (t) => {
+  const { fingerprintFiles, driftedFiles } = await import('../preflight.mjs');
+  const dir = await mkdtemp(path.join(tmpdir(), 'drift-plain-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'main.py'), 'print(1)');
+  const before = await fingerprintFiles(dir);
+  await mkdir(path.join(dir, '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, '__pycache__', 'main.cpython-311.pyc'), 'x');
+  await mkdir(path.join(dir, 'app', '.gradle', '8.9'), { recursive: true });
+  await writeFile(path.join(dir, 'app', '.gradle', '8.9', 'file.lock'), 'x');
+  assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), []);
+  await writeFile(path.join(dir, 'new.py'), 'x');
+  assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), ['new.py']);
+});
+
+test('changeSizeWarning: a change over 500 files or 8,000 lines suggests scoped runs; at or under both, nothing', () => {
+  assert.equal(changeSizeWarning(500, 8000), null);
+  assert.match(changeSizeWarning(501, 0), /large \(501 changed file\(s\), 0 changed line\(s\) in tracked files\).*several runs/);
+  assert.match(changeSizeWarning(3, 8001), /3 changed file\(s\), 8001 changed line\(s\)/);
+  assert.equal(changeSizeWarning(20, 300, { maxFiles: 10 }) !== null, true, 'the limits can be set');
+});
+
+test('restructure round 2 F3: an --exec command that times out with no job object still says a process it started may be running [slow]', { skip: process.platform !== 'win32' }, async (t) => {
+  const temp = await realpath(await mkdtemp(path.join(tmpdir(), 'preflight-nojob-')));
+  const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP };
+  process.env.TEMP = temp;
+  process.env.TMP = temp;
+  t.after(async () => {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    await rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  });
+  const env = { ...process.env };
+  assert.equal((await runWithTimeout('exit 0', { cd: temp, env, timeout: 60 })).code, 0, 'a first run builds the job helper in the private TEMP');
+  const { readdir } = await import('node:fs/promises');
+  const dll = (await readdir(temp)).find((name) => /^review-preflight-job-.*\.dll$/.test(name));
+  assert.ok(dll, 'the job helper DLL was built');
+  await writeFile(path.join(temp, dll), 'not an assembly');
+  const written = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => { written.push(String(chunk)); return write(chunk, ...rest); };
+  try {
+    const r = await runWithTimeout('ping -n 30 127.0.0.1 >nul', { cd: temp, env, timeout: 3 });
+    assert.equal(r.timedOut, true);
+    // The killed wrapper's exit, which reads the job report, can come just after the timeout resolves the run.
+    for (let i = 0; i < 50 && !/could not run in a job object/.test(written.join('')); i += 1) await new Promise((done) => setTimeout(done, 100));
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.match(written.join(''), /could not run in a job object \(.+\); a process it started may still be running/);
+});
+
+test('Linux round linux-r2 F2 and F11: an --exec command stopped by its timeout or by a signal still stops what left its group, by run id', { skip: process.platform !== 'linux' }, async (t) => {
+  const { EventEmitter } = await import('node:events');
+  const temp = await mkdtemp(path.join(tmpdir(), 'preflight-escaped-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  // A double fork: its parent exits at once, so the tree walk cannot reach it and only the run id finds it.
+  const escaped = (file) => `(setsid sh -c 'echo $$ > ${file}; exec sleep 300' >/dev/null 2>&1 </dev/null &); sleep 60`;
+  const waitFor = async (file) => { for (let i = 0; i < 100; i += 1) { const v = Number((await readFile(file, 'utf8').catch(() => '')).trim()); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } throw new Error(`${file} was not written`); };
+  const timedOut = await runWithTimeout(escaped(path.join(temp, 'a.pid')), { cd: temp, env: process.env, timeout: 2 });
+  const a = await waitFor(path.join(temp, 'a.pid'));
+  t.after(() => { try { process.kill(a, 'SIGKILL'); } catch { /* gone */ } });
+  assert.equal(timedOut.timedOut, true);
+  assert.deepEqual(timedOut.leftoversStopped, [a], 'the timeout names what it stopped');
+  for (let i = 0; i < 40 && alive(a); i += 1) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(alive(a), false, 'stopped after the timeout');
+  const proc = new EventEmitter();
+  const exits = [];
+  const running = runWithTimeout(escaped(path.join(temp, 'b.pid')), { cd: temp, env: process.env, timeout: 0 }, { proc, exit: (c) => exits.push(c) });
+  const b = await waitFor(path.join(temp, 'b.pid'));
+  t.after(() => { try { process.kill(b, 'SIGKILL'); } catch { /* gone */ } });
+  proc.emit('SIGTERM');
+  await running;
+  assert.deepEqual(exits, [143]);
+  for (let i = 0; i < 40 && alive(b); i += 1) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(alive(b), false, 'stopped after a stop signal');
+});
+
+test('field feedback S2: the Codex seat tool probe names a tool the sandbox cannot start and why, with the host copy under the user profile', async () => {
+  const runs = { python: { code: 1, text: 'windows sandbox failed: runner failed during SpawnChild: CreateProcessAsUserW failed: 2 (The system cannot find the file specified.) | cwd=C:\\t | cmd=python --version' }, rg: { code: 101, text: "\nthread 'main' (2) panicked at linux-sandbox/src/linux_run_main.rs:1602:5:" }, git: { code: 0, text: 'git version 2.43.0' } };
+  // The profile check reads paths with this host's rules: a Windows path on Windows, a POSIX one elsewhere.
+  const home = process.platform === 'win32' ? 'C:\\Users\\me' : '/home/me';
+  const hosts = { python: path.join(home, 'AppData', 'Local', 'Programs', 'Python', 'Python311', 'python.EXE'), rg: null, git: 'C:\\Program Files\\Git\\cmd\\git.EXE' };
+  const result = await codexToolProbe('C:\\t', { tools: ['python', 'rg', 'git'], run: async (tool) => runs[tool], where: (tool) => hosts[tool] });
+  assert.deepEqual(result.git, { ok: true });
+  assert.equal(result.python.why, 'windows sandbox failed: runner failed during SpawnChild: CreateProcessAsUserW failed: 2 (The system cannot find the file specified.)', 'cut before the cwd/cmd tail');
+  assert.match(result.rg.why, /panicked at linux-sandbox/);
+  const warnings = toolProbeWarnings(result, { home, platform: 'win32' });
+  assert.equal(warnings.length, 3);
+  assert.match(warnings[2], /can run none of python, rg: it will review by reading files only, so expect fewer claims/);
+  assert.equal(toolProbeWarnings({ python: result.python, git: result.git }, { home, platform: 'win32' }).length, 1, 'one missing tool gets no summary line');
+  const outside = ['/x/a.log', '/x/b.log', '/x/c.log'];
+  assert.match(outsideReadWarning(outside, { platform: 'win32' }), /names 3 path\(s\) outside the target \(\/x\/a\.log, \/x\/b\.log, \.\.\.\)/);
+  assert.ok(outsideReadWarning(outside, { platform: 'linux' }));
+  assert.equal(outsideReadWarning(outside, { platform: 'darwin' }), null, 'not seen on macOS');
+  assert.equal(outsideReadWarning([], { platform: 'win32' }), null);
+  assert.match(warnings[0], /cannot run python .*under the user profile \(.*AppData.*python\.EXE\), which the Windows sandbox account cannot start: install it for all users, or put a copy under Program Files on PATH \(the per-user one can stay first\), or run the tests in preflight --exec/);
+  assert.match(warnings[1], /cannot run rg .*rg is not on this host's PATH either: install it, or run the tests in preflight --exec/);
+  // Windows probes through PowerShell, the seat's own shell: started directly the sandbox fails on a program PowerShell can start.
+  assert.deepEqual(sandboxArgs('python', 'win32'), ['sandbox', '--', 'powershell', '-NoProfile', '-Command', 'python --version']);
+  assert.deepEqual(sandboxArgs('python3', 'linux'), ['sandbox', '--', 'python3', '--version']);
+  assert.deepEqual(sandboxArgs('rg', 'darwin'), ['sandbox', '--', 'rg', '--version']);
+  // A tool PowerShell cannot find: its "is not recognized" line is the reason, not the first line of the output.
+  const missing = await codexToolProbe('C:\\t', { tools: ['rg'], run: async () => ({ code: 1, text: "At line:1 char:1\r\nrg : The term 'rg' is not recognized as the name of a cmdlet, function, script file, or operable program.\r\n+ rg --version" }), where: () => null });
+  assert.match(missing.rg.why, /^rg : The term 'rg' is not recognized as the name of a cmdlet/);
+  assert.equal(hostToolPath('tool', { env: { PATH: ['/a', '/b'].join(path.delimiter) }, platform: 'linux', exists: (p) => p === path.join('/b', 'tool') }), path.join('/b', 'tool'));
+  assert.equal(hostToolPath('tool', { env: { PATH: '/a' }, platform: 'linux', exists: () => false }), null);
+});
+
+test('field run: copyTarget keeps the reviewed files byte for byte, leaves out ignored files, caches and links, and refuses over its limits', async (t) => {
+  const { createHash } = await import('node:crypto');
+  const sha = async (p) => createHash('sha256').update(await readFile(p)).digest('hex');
+  const make = async (dir) => {
+    await mkdir(path.join(dir, 'src', 'deep'), { recursive: true });
+    await writeFile(path.join(dir, 'crlf.txt'), 'one\r\ntwo\r\n');
+    await writeFile(path.join(dir, 'src', 'deep', 'bytes.bin'), Buffer.from([0x00, 0x80, 0xff, 0x0a, 0x0d]));
+    await writeFile(path.join(dir, 'src', 'café.py'), 'print("é")\n');
+    await mkdir(path.join(dir, '__pycache__'));
+    await writeFile(path.join(dir, '__pycache__', 'x.cpython-311.pyc'), 'cache');
+  };
+  const kept = ['crlf.txt', 'src/deep/bytes.bin', 'src/café.py'];
+  const root = await mkdtemp(path.join(tmpdir(), 'copy-target-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // A plain folder: the drift check's list, so caches stay out.
+  const plain = path.join(root, 'plain');
+  await mkdir(plain);
+  await make(plain);
+  if (process.platform !== 'win32') await symlink(path.join(plain, 'crlf.txt'), path.join(plain, 'link.txt'));
+  const plainCopy = path.join(root, 'plain-copy');
+  const p = await copyTarget(plain, plainCopy);
+  assert.equal(p.copied, true, p.reason);
+  assert.equal(p.files, 3);
+  for (const rel of kept) assert.equal(await sha(path.join(plainCopy, rel)), await sha(path.join(plain, rel)), rel);
+  await assert.rejects(readFile(path.join(plainCopy, '__pycache__', 'x.cpython-311.pyc')), { code: 'ENOENT' });
+  await assert.rejects(readFile(path.join(plainCopy, 'link.txt')), { code: 'ENOENT' }, 'a link is never followed');
+  // A git repository: tracked plus untracked files git does not ignore.
+  const repo = path.join(root, 'repo');
+  await mkdir(repo);
+  await make(repo);
+  await writeFile(path.join(repo, '.gitignore'), '__pycache__/\n.venv/\n');
+  await mkdir(path.join(repo, '.venv'));
+  await writeFile(path.join(repo, '.venv', 'python.exe'), 'not source');
+  const git = (...a) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.autocrlf=false', '-c', 'core.quotepath=false', ...a], { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git('init', '-q');
+  git('add', 'crlf.txt', '.gitignore');
+  git('commit', '-q', '-m', 'base');
+  const repoCopy = path.join(root, 'repo-copy');
+  const g = await copyTarget(repo, repoCopy);
+  assert.equal(g.copied, true, g.reason);
+  for (const rel of [...kept, '.gitignore']) assert.equal(await sha(path.join(repoCopy, rel)), await sha(path.join(repo, rel)), rel);
+  await assert.rejects(readFile(path.join(repoCopy, '.venv', 'python.exe')), { code: 'ENOENT' }, 'an ignored file is not copied');
+  await assert.rejects(readFile(path.join(repoCopy, '__pycache__', 'x.cpython-311.pyc')), { code: 'ENOENT' });
+  // Over a limit nothing is created.
+  const big = await copyTarget(plain, path.join(root, 'too-big'), { maxFiles: 2 });
+  assert.equal(big.copied, false);
+  assert.match(big.reason, /3 file\(s\).*over the 2-file/);
+  await assert.rejects(readFile(path.join(root, 'too-big', 'crlf.txt')), { code: 'ENOENT' });
 });

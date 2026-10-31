@@ -95,11 +95,11 @@ function codexState(events) {
   const marks = events.filter((e) => e.type === 'event_msg' && ['task_started', 'task_complete', 'turn_aborted'].includes(e.payload?.type));
   const last = marks.at(-1);
   if (!last) return 'running';
-  return last.payload.type === 'task_started' ? 'running' : 'done';
+  return { task_started: 'running', turn_aborted: 'aborted' }[last.payload.type] ?? 'done';
 }
 
-// 'done' when the agent's last turn ended (a Claude end_turn or hand-back, a Codex task_complete),
-// 'running' when it is still working or a new prompt arrived after its last reply, 'unreadable' otherwise.
+// 'done' when the agent's last turn ended (a Claude end_turn or hand-back, a Codex task_complete), 'aborted' when a Codex
+// turn was cut off, 'running' when it is still working or a new prompt arrived after its last reply, 'unreadable' otherwise.
 export async function agentState(file) {
   let text;
   try {
@@ -123,10 +123,16 @@ export async function agentLastReply(file, maxChars = 200) {
   const events = parseLines(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   let reply = null;
   for (const entry of events) {
-    if (entry.type === 'event_msg' && entry.payload?.type === 'task_complete') {
+    // A new Codex turn: an earlier turn's reply is not this turn's.
+    if (entry.type === 'event_msg' && entry.payload?.type === 'task_started') reply = null;
+    // A new prompt to a resumed Claude agent, the same way.
+    else if (entry.type === 'user' && isNewPrompt(entry)) reply = null;
+    else if (entry.type === 'event_msg' && entry.payload?.type === 'task_complete') {
       reply = typeof entry.payload.last_agent_message === 'string' ? entry.payload.last_agent_message : reply;
     } else if (entry.type === 'assistant' && Array.isArray(entry.message?.content)) {
-      const words = entry.message.content.filter((c) => c?.type === 'text' && typeof c.text === 'string').map((c) => c.text).join(' ');
+      // A subagent's final reply arrives as its SubagentHandback tool call's message, not as text.
+      const words = entry.message.content.map((c) => (c?.type === 'text' && typeof c.text === 'string' ? c.text
+        : c?.type === 'tool_use' && c.name === 'SubagentHandback' && typeof c.input?.message === 'string' ? c.input.message : '')).filter(Boolean).join(' ');
       if (words.trim() !== '') reply = words;
     }
   }

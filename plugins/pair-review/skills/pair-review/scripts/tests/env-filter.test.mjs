@@ -30,7 +30,7 @@ test('buildChildEnv: providerAllowlist keeps a caller-named credential-locator v
   assert.equal(env.CODEX_HOME, '/custom/.codex');
 });
 
-test('buildChildEnv: a variable not named in providerAllowlist (and not otherwise allowed) is stripped -- opencode-dispatch.mjs passes no providerAllowlist', () => {
+test('buildChildEnv: a variable not named in providerAllowlist (and not otherwise allowed) is stripped, with no providerAllowlist', () => {
   const env = buildChildEnv({
     envMode: 'filtered',
     platform: 'linux',

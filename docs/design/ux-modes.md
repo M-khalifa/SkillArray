@@ -45,7 +45,7 @@ opinions with no evidence cross-check, no identity blinding, and no
 canonical-finding deduplication. It should be labeled and reported as such,
 not as a lighter version of the full protocol's guarantees.
 
-**STANDARD** — the current, full three-phase protocol as shipped in 1.3.0:
+**STANDARD** — the current, full three-phase protocol as shipped in 1.2.0:
 independent Phase 1, blind Phase 2 exchange, Phase 3 fresh-context
 adjudication and canonical findings. No behavior change from today.
 
@@ -107,7 +107,7 @@ This is not an approval to implement. FAST mode in particular is a real
 semantic change to what "a SkillArray review" means — it skips peer exchange
 and adjudication entirely, which are load-bearing guarantees of the current
 protocol, not implementation detail. Per the production-readiness pass's
-Phase A (the current three-phase protocol is feature-frozen for 1.3.x; no
+Phase A (the current three-phase protocol is feature-frozen for 1.2.x; no
 change to independence-before-influence, identity-blinded exchange, evidence
 over consensus, or fresh-context adjudication without written justification
 and regression coverage), FAST/DEEP mode semantics need explicit user

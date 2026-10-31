@@ -1,0 +1,11 @@
+{
+  "A": [
+    "line 142: \"## A6 [H2] [AC-1] — After an earlier \"Blocked: none\", a block written \" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 146: \"Trigger: a No findings seat writes \"Blocked: none\" and later, in the s\" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 162: \"The shapes the hypothesis names (heading, task box, bullet dot, parent\" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 163: \"Suggested fix: in seatBlockedLine, read a line as a block when, after \" says \"blocked:\" outside the Blocked: line; quote other Blocked text in inline code or a code fence",
+    "line 194: \"- AC-8: checked linux-3-selfreview items 1-14 and macos-3-selfreview i\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 195: \"- AC-9: for each narrowed or changed line in the diff: scrubDir lookbe\" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence"
+  ],
+  "B": []
+}

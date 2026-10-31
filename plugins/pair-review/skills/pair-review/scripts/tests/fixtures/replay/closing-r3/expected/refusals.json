@@ -1,0 +1,7 @@
+{
+  "A": [
+    "line 217: \"- AC-9: old and new loose Blocked: patterns compared: every shape the \" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence",
+    "line 228: \"- H10: ran 21 line shapes and 4 heading shapes; missed shapes and the \" says \"blocked:\" in \"## Checks performed\" besides its one Blocked: line; quote other Blocked text there only inside a code fence"
+  ],
+  "B": []
+}

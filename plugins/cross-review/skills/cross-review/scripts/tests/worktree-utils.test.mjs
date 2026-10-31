@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { setupIsolatedWorktree } from '../worktree-utils.mjs';
+import { seatCwd, setupIsolatedWorktree } from '../worktree-utils.mjs';
 
 function git(args, cwd) {
   return execFileSync('git', args, {cwd, encoding:'utf8', stdio:['ignore','pipe','pipe']});
@@ -49,10 +49,10 @@ test('default path directly matches the root snapshot, marker and reuse behavior
   assert.deepEqual(marker,{
     toplevel:process.platform === 'win32' ? root.toLowerCase() : root,
     head:git(['rev-parse','HEAD'],r.target).trim(), diffSha:hash(diff),
-    untracked:[{path:'new.bin',sha:hash(Buffer.from([0,255,128,10]))}], skippedDirs:[],
+    untracked:[{path:'new.bin',sha:hash(Buffer.from([0,255,128,10]))}], changed:[{path:'root.txt',sha:hash('dirty\n')}], skippedDirs:[],
     worktree:{
       toplevel:process.platform === 'win32' ? worktreeRoot.toLowerCase() : worktreeRoot,
-      head:marker.head,diffSha:marker.diffSha,untracked:marker.untracked,skippedDirs:[],
+      head:marker.head,diffSha:marker.diffSha,untracked:marker.untracked,changed:marker.changed,skippedDirs:[],
     },
   });
   assert.deepEqual(await setupIsolatedWorktree(r.target,r.worktree,{allowSubdir:false}),{ok:true,reused:true,skippedDirs:[]});
@@ -61,6 +61,79 @@ test('default path directly matches the root snapshot, marker and reuse behavior
   assert.equal(refused.ok,false);
   assert.match(refused.reason,/worktree snapshot mismatch/);
   assert.equal(await fs.readFile(path.join(r.worktree,'root.txt'),'utf8'),'contaminated\n');
+});
+
+test('the snapshot keeps the target\'s exact bytes when the user\'s git config would fix whitespace on apply [slow]', async (t) => {
+  const r = await repository(t);
+  git(['config', 'apply.whitespace', 'fix'], r.target);
+  const dirty = 'line with trailing spaces   \n\ttab line\t\n';
+  await fs.writeFile(path.join(r.target, 'root.txt'), dirty);
+  const result = await setupIsolatedWorktree(r.target, r.worktree);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(await fs.readFile(path.join(r.worktree, 'root.txt'), 'utf8'), dirty);
+});
+
+test('allowSubdir: a --cd subfolder whose name starts with a space is the same folder in the snapshot, not a new empty one [slow]', async (t) => {
+  const r = await repository(t);
+  const spaced = path.join(r.target, ' leading');
+  await fs.mkdir(spaced);
+  await fs.writeFile(path.join(spaced, 'required.txt'), 'x\n');
+  git(['add', '.'], r.target);
+  git(['commit', '-q', '-m', 'spaced'], r.target);
+  const result = await setupIsolatedWorktree(spaced, r.worktree, { allowSubdir: true });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(path.basename(result.cwd), ' leading');
+  assert.deepEqual(await fs.readdir(result.cwd), ['required.txt']);
+});
+
+test('a post-checkout hook in the target does not run while the snapshot is built, so the seat reviews the target\'s bytes [slow]', async (t) => {
+  const r = await repository(t);
+  const hook = path.join(r.target, '.git', 'hooks', 'post-checkout');
+  await fs.writeFile(hook, '#!/bin/sh\nprintf "replaced by checkout hook\\n" > root.txt\n', { mode: 0o755 });
+  const result = await setupIsolatedWorktree(r.target, r.worktree);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(await fs.readFile(path.join(r.worktree, 'root.txt'), 'utf8'), 'original\n');
+});
+
+test('a staged addition, a staged rename and a staged file edited again are built into the snapshot, not refused as different bytes [slow]', async (t) => {
+  const r = await repository(t);
+  await fs.writeFile(path.join(r.target, 'added.txt'), 'added\n');
+  git(['add', 'added.txt'], r.target);
+  git(['mv', 'root.txt', 'renamed.txt'], r.target);
+  await fs.writeFile(path.join(r.target, 'edited.txt'), 'v1\n');
+  git(['add', 'edited.txt'], r.target);
+  await fs.writeFile(path.join(r.target, 'edited.txt'), 'v2\n');
+  const result = await setupIsolatedWorktree(r.target, r.worktree);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(await fs.readFile(path.join(r.worktree, 'added.txt'), 'utf8'), 'added\n');
+  assert.equal(await fs.readFile(path.join(r.worktree, 'renamed.txt'), 'utf8'), 'original\n');
+  assert.equal(await fs.readFile(path.join(r.worktree, 'edited.txt'), 'utf8'), 'v2\n');
+  await assert.rejects(fs.access(path.join(r.worktree, 'root.txt')));
+});
+
+test('under core.autocrlf=true a changed, renamed or added file keeps the target\'s own line endings in the snapshot [slow]', async (t) => {
+  const r = await repository(t);
+  git(['config', 'core.autocrlf', 'true'], r.target);
+  await fs.writeFile(path.join(r.target, 'root.txt'), 'lf\nchanged\n');
+  await fs.writeFile(path.join(r.target, 'nested', 'seat', 'tracked.txt'), 'crlf\r\nchanged\r\n');
+  git(['mv', path.join('nested', 'seat', 'tracked.txt'), 'moved.txt'], r.target);
+  await fs.writeFile(path.join(r.target, 'staged.txt'), 's\n');
+  git(['add', 'staged.txt'], r.target);
+  const result = await setupIsolatedWorktree(r.target, r.worktree);
+  assert.equal(result.ok, true, result.reason);
+  for (const file of ['root.txt', 'moved.txt', 'staged.txt']) {
+    assert.deepEqual(await fs.readFile(path.join(r.worktree, file)), await fs.readFile(path.join(r.target, file)), file);
+  }
+});
+
+test('seatCwd: a repository-relative seat folder stays inside the snapshot; one that walks out of it is refused', () => {
+  const wt = path.join(os.tmpdir(), 'wt-root');
+  assert.equal(seatCwd(wt, 'nested/seat/'), path.join(wt, 'nested', 'seat'));
+  assert.equal(seatCwd(wt, ''), wt, 'the repository root itself');
+  assert.equal(seatCwd(wt, '../TARGET/nested/seat'), null, 'the shape a case-folded --cd gave on Linux');
+  assert.equal(seatCwd(wt, 'a/../../b'), null);
+  assert.equal(seatCwd(wt, '..cache/x'), path.join(wt, '..cache', 'x'), 'a folder name that starts with ".." is inside');
+  assert.equal(seatCwd(wt, 'a/..b'), path.join(wt, 'a', '..b'));
 });
 
 test('repository subdirectory remains refused by default without creating a worktree [slow]', async (t) => {
@@ -113,6 +186,9 @@ test('submodules refuse both isolation modes and name --no-isolate without silen
     assert.equal(result.ok,false);
     assert.match(result.reason,/submodules/);
     assert.match(result.reason,/--no-isolate/);
+    // Restructure rounds 2-3 (F6, F4): the route a review-run user has comes first, and where it does not exist.
+    assert.match(result.reason,/on Claude Code, review it with native seats and auditor \(review-config seats --transport native\)/);
+    assert.match(result.reason,/a Claude seat on a Codex host is always a CLI seat, so such a target cannot be reviewed there/);
     await assert.rejects(fs.access(r.worktree),{code:'ENOENT'});
     await assert.rejects(fs.access(r.worktree+'.snapshot-complete'),{code:'ENOENT'});
   }

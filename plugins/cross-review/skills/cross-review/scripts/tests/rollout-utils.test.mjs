@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { parseRollout, rolloutUsage, readRolloutUsage, findOrchestratorRollout, findChildThreads, findThreadRollout, rolloutModel, rolloutCommands } from '../rollout-utils.mjs';
+import { parseRollout, rolloutUsage, findChildThreads, findThreadRollout, rolloutModel, rolloutEffort, rolloutCommands } from '../rollout-utils.mjs';
 
 const fixture = new URL('./fixtures/rollout/orchestrator.jsonl', import.meta.url);
 const emptyFixture = new URL('./fixtures/rollout/no-usage.jsonl', import.meta.url);
+// The rollout file read into rolloutUsage, the way build-manifest reads one.
+const fileUsage = async (file, window) => rolloutUsage(await fs.readFile(file, 'utf8'), window);
 const time = seconds => '2026-10-04T12:00:' + String(seconds).padStart(2,'0') + 'Z';
 
 test('parseRollout uses the final total, ignores last usage and tolerates a partial final line', async () => {
@@ -17,7 +19,7 @@ test('parseRollout uses the final total, ignores last usage and tolerates a part
     input_tokens:300,cached_input_tokens:100,cache_write_input_tokens:0,
     output_tokens:50,reasoning_output_tokens:15,total_tokens:350,
   });
-  const usage = await readRolloutUsage(fixture);
+  const usage = await fileUsage(fixture);
   assert.equal(usage.source,'codex-rollout');
   assert.equal(usage.input_tokens,300);
   assert.equal(usage.reasoning_tokens,15);
@@ -25,13 +27,13 @@ test('parseRollout uses the final total, ignores last usage and tolerates a part
 });
 
 test('window usage subtracts the last total at or before each inclusive boundary', async () => {
-  const usage = await readRolloutUsage(fixture,{start:time(10),end:time(30)});
+  const usage = await fileUsage(fixture,{start:time(10),end:time(30)});
   assert.deepEqual(usage,{
     input_tokens:60,cached_input_tokens:20,cache_write_input_tokens:0,
     output_tokens:15,reasoning_tokens:4,total_tokens:75,estimated_cost_usd:null,source:'codex-rollout',
     raw:{input_tokens:60,cached_input_tokens:20,cache_write_input_tokens:0,output_tokens:15,reasoning_output_tokens:4,total_tokens:75},
   });
-  const between = await readRolloutUsage(fixture,{start:time(15),end:time(35)});
+  const between = await fileUsage(fixture,{start:time(15),end:time(35)});
   assert.deepEqual(between,usage);
 });
 
@@ -48,7 +50,7 @@ test('repeated token_count events never double count, including a window with no
 });
 
 test('a window starting before the session uses a known zero baseline at session creation', async () => {
-  const usage = await readRolloutUsage(fixture,{start:'2026-10-04T11:59:00Z',end:time(30)});
+  const usage = await fileUsage(fixture,{start:'2026-10-04T11:59:00Z',end:time(30)});
   assert.equal(usage.input_tokens,160);
   assert.equal(usage.output_tokens,25);
   assert.equal(usage.source,'codex-rollout');
@@ -57,7 +59,7 @@ test('a window starting before the session uses a known zero baseline at session
 test('missing token events or window baselines are unavailable with a reason', async () => {
   const text = await fs.readFile(fixture,'utf8');
   for (const usage of [
-    await readRolloutUsage(emptyFixture),
+    await fileUsage(emptyFixture),
     rolloutUsage(text,{start:time(1),end:time(30)}),
     rolloutUsage(text,{start:'2026-10-04T11:00:00Z',end:'2026-10-04T11:30:00Z'}),
   ]) {
@@ -98,7 +100,7 @@ test('only token_count event_msg totals are usage, never last_token_usage or ano
   assert.equal(parseRollout(text).usage,null);
 });
 
-test('findOrchestratorRollout verifies filename suffix and first-line session_meta.id from CODEX_THREAD_ID', async (t) => {
+test('findThreadRollout verifies filename suffix and first-line session_meta.id', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(),'rollout lookup '));
   t.after(()=>fs.rm(dir,{recursive:true,force:true}));
   const day = path.join(dir,'2026','10','04');
@@ -109,23 +111,22 @@ test('findOrchestratorRollout verifies filename suffix and first-line session_me
   await fs.writeFile(path.join(day,'rollout-2026-10-04T03-00-00-fixture-thread-extra.jsonl'),text);
   const correct = path.join(day,'rollout-2026-10-04T07-00-00-fixture-thread.jsonl');
   await fs.writeFile(correct,text);
-  const env = {CODEX_THREAD_ID:'fixture-thread',CODEX_SESSION_ID:'wrong-session'};
-  assert.equal(await findOrchestratorRollout({env,sessionsDir:dir}),correct);
-  const usage = await readRolloutUsage(await findOrchestratorRollout({env,sessionsDir:dir}),{start:time(10),end:time(30)});
+  assert.equal(await findThreadRollout('fixture-thread',dir),correct);
+  const usage = await fileUsage(await findThreadRollout('fixture-thread',dir),{start:time(10),end:time(30)});
   assert.equal(usage.input_tokens,60);
 });
 
-test('findOrchestratorRollout honors CODEX_HOME and returns null for missing id or sessions', async (t) => {
+test('findThreadRollout returns null for a missing id, a missing sessions folder or a mismatched thread', async (t) => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(),'rollout home '));
   t.after(()=>fs.rm(home,{recursive:true,force:true}));
   const day = path.join(home,'sessions','2025','01','02');
   await fs.mkdir(day,{recursive:true});
   const correct = path.join(day,'rollout-2025-01-02T00-00-00-fixture-thread.jsonl');
   await fs.writeFile(correct,await fs.readFile(fixture,'utf8'));
-  assert.equal(await findOrchestratorRollout({env:{CODEX_HOME:home,CODEX_THREAD_ID:'fixture-thread'}}),correct);
-  assert.equal(await findOrchestratorRollout({env:{CODEX_HOME:home}}),null);
-  assert.equal(await findOrchestratorRollout({env:{CODEX_THREAD_ID:'unknown'},sessionsDir:path.join(home,'missing')}),null);
-  assert.equal(await findOrchestratorRollout({env:{CODEX_THREAD_ID:'wrong-thread'},sessionsDir:path.join(home,'sessions')}),null);
+  assert.equal(await findThreadRollout('fixture-thread',path.join(home,'sessions')),correct);
+  assert.equal(await findThreadRollout(undefined,path.join(home,'sessions')),null);
+  assert.equal(await findThreadRollout('unknown',path.join(home,'missing')),null);
+  assert.equal(await findThreadRollout('wrong-thread',path.join(home,'sessions')),null);
 });
 
 test('descendant scan preserves its final cumulative total when an event is repeated', async (t) => {
@@ -151,6 +152,13 @@ test('rolloutModel takes the last turn_context model and is null without one', (
   assert.equal(rolloutModel(text), 'gpt-5.6-sol');
   assert.equal(rolloutModel(line({ type: 'session_meta', payload: { id: 't', model: 'x' } })), null);
   assert.equal(rolloutModel(line({ type: 'turn_context', payload: {} })), null);
+});
+
+test('rolloutEffort takes the effort the last turn ran with (turn_context.effort) and is null without one', () => {
+  const line = (o) => JSON.stringify(o);
+  const text = [line({ type: 'turn_context', payload: { model: 'gpt-6.1-sol', effort: 'medium' } }), line({ type: 'turn_context', payload: { model: 'gpt-6.1-sol', effort: 'high' } })].join(String.fromCharCode(10));
+  assert.equal(rolloutEffort(text), 'high');
+  assert.equal(rolloutEffort(line({ type: 'turn_context', payload: { model: 'm' } })), null);
 });
 
 test('findThreadRollout matches the file suffix and session_meta.id, and returns null for an unknown thread', async (t) => {
@@ -180,4 +188,6 @@ test('rolloutCommands: real seat rollouts count CommandExecution items; a non-ze
   const meta = seat.split('\n')[0];
   assert.deepEqual(rolloutCommands(`${meta}\n`), { tried: 0, failed: 0 }, 'no command call at all is a true 0');
   assert.deepEqual(rolloutCommands(`${meta}\n{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"text(await tools.web__run({}))"}}\n`), { tried: 0, failed: 0 }, 'a script that only searched the web ran no command');
+  // codex-cli 0.162: a seat that runs its checks through the node_repl tool server records McpToolCall items, not commands.
+  assert.deepEqual(rolloutCommands(await fixture('codex-mcp-rollout.jsonl')), { tried: 1, failed: 1, scripts: 3, scriptsFailed: 1 });
 });

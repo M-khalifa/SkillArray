@@ -10,6 +10,8 @@ permissions:
 jobs:
   review-skills:
     strategy:
+      # One failing job must not cancel the others: every OS and Node version reports.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node: ['22', '24']
@@ -19,8 +21,8 @@ jobs:
       run:
         working-directory: plugins/${{ matrix.skill }}/skills/${{ matrix.skill }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
       - run: node scripts/validate-package.mjs
@@ -29,8 +31,9 @@ jobs:
   repository:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       - run: node scripts/validate-repository.mjs
+      - run: node --test scripts/tests/compare-baseline.test.mjs scripts/tests/install-check.test.mjs

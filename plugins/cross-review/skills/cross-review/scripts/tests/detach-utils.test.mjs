@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { retryDeadline, DEFAULT_MAX_WAIT_S, processStartMs, processStartToken, startTokenFromProcStat, workerIsLive, START_TOLERANCE_MS, stopRecordedChild, stateFromProcStat, processExists } from '../detach-utils.mjs';
+import { retryDeadline, DEFAULT_MAX_WAIT_S, processStartMs, processStartToken, startTokenFromProcStat, workerIsLive, START_TOLERANCE_MS, stopRecordedChild, stopRecordedWorker, stateFromProcStat, processExists } from '../detach-utils.mjs';
 
 async function harness(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'detach utils '));
@@ -48,7 +48,7 @@ async function harness(t) {
     "  else await handlers.runDetach({brief:argv[argv.indexOf('--brief')+1], envMode:'filtered'}, argv);",
     "} catch (err) { log(err.message); process.exit(2); }",
   ].join('\n'));
-  const run = (argv, env = process.env) => spawnSync(process.execPath, [script, ...argv], { env, encoding: 'utf8', timeout: 20000 });
+  const run = (argv, env = process.env) => spawnSync(process.execPath, [script, ...argv], { env, encoding: 'utf8', timeout: 60000 });
   const result = path.join(dir, 'result.json');
   return { dir, script, result, run };
 }
@@ -149,11 +149,11 @@ test('wait and wait-retry reject missing paths and unsupported options [slow]', 
 test('wait-retry returns once the clock deadline passes and bounds a future deadline', async (t) => {
   const h = await harness(t);
   const clock = date => date.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',hour12:true});
-  await fs.writeFile(h.result, JSON.stringify({status:'rate-limited', retryAfter:clock(new Date(Date.now()-120000)), threadId:'fake-thread'}));
+  await fs.writeFile(h.result, JSON.stringify({status:'rate-limited', retryAfter:clock(new Date(Date.now()-120000)), finishedAt:new Date(Date.now()-150000).toISOString(), threadId:'fake-thread'}));
   const past = h.run(['--wait-retry', h.result]);
   assert.equal(past.status, 0, past.stderr);
   assert.match(past.stdout, /resume thread fake-thread/);
-  await fs.writeFile(h.result, JSON.stringify({status:'rate-limited', retryAfter:clock(new Date(Date.now()+300000))}));
+  await fs.writeFile(h.result, JSON.stringify({status:'rate-limited', retryAfter:clock(new Date(Date.now()+300000)), finishedAt:new Date().toISOString()}));
   const future = h.run(['--wait-retry', h.result, '--max-wait', '1']);
   assert.equal(future.status, 3, future.stderr);
   assert.match(future.stdout, /run --wait-retry again/);
@@ -214,11 +214,13 @@ test('R2-F17: workerIsLive keeps a verified pid for a short time and treats an u
 test('R2-F17: wait refuses a live pid that is not the recorded worker (reused pid) and keeps a matching one running [slow]', async (t) => {
   const h = await harness(t);
   const child = liveChild(t);
+  // Stamped at the spawn: the --wait below can take over 10 s on a loaded host, past the start tolerance.
+  const spawnedAt = new Date().toISOString();
   await fs.writeFile(h.result, JSON.stringify({ status: 'running', workerPid: child.pid, workerStartedAt: new Date(Date.now() - 3600000).toISOString(), startedAt: new Date(Date.now() - 3600000).toISOString() }));
   const run = h.run(['--wait', h.result, '--max-wait', '2']);
   assert.equal(run.status, 1, run.stdout + run.stderr);
   assert.match(run.stdout, /worker.*gone/);
-  await fs.writeFile(h.result, JSON.stringify({ status: 'running', workerPid: child.pid, workerStartedAt: new Date().toISOString(), startedAt: new Date().toISOString() }));
+  await fs.writeFile(h.result, JSON.stringify({ status: 'running', workerPid: child.pid, workerStartedAt: spawnedAt, startedAt: spawnedAt }));
   const alive = h.run(['--wait', h.result, '--max-wait', '1']);
   assert.equal(alive.status, 3, 'a matching start time keeps the worker running');
 });
@@ -415,4 +417,35 @@ test('stopRecordedChild on Windows: kills only the recorded process, or the chil
   assert.equal(stopRecordedChild({ childPid: 50, childStartedAt: at }, opts({ exists: () => false, readChildren: children })), true);
   assert.deepEqual(killed.splice(0), [61], 'a child started two hours later belongs to a process that reused the pid');
   assert.equal(stopRecordedChild({ childPid: 50, childStartedAt: at }, opts({ exists: () => false, readChildren: () => [] })), false);
+});
+
+test('Linux round linux-r1 F4: stopRecordedWorker stops a live worker only when its start token or start time proves it', () => {
+  const calls = [];
+  const kill = (pid, sig) => { calls.push([pid, sig]); };
+  const base = { kill, exists: () => true, killTree: (pid) => { calls.push(['tree', pid]); return true; } };
+  // Token recorded and readable: it decides; a reused pid has another token.
+  assert.equal(stopRecordedWorker({ workerPid: 4242, workerStartToken: 't1' }, { ...base, readToken: () => 't1', platform: 'linux' }), true);
+  assert.deepEqual(calls.splice(0), [[-4242, 'SIGKILL']], 'the worker group is signalled');
+  assert.equal(stopRecordedWorker({ workerPid: 4242, workerStartToken: 't1' }, { ...base, readToken: () => 't2', platform: 'linux' }), false);
+  // No readable token: the start time decides, within the tolerance.
+  const startedAt = new Date(1_000_000).toISOString();
+  const noToken = { ...base, readToken: () => null };
+  assert.equal(stopRecordedWorker({ workerPid: 77, workerStartedAt: startedAt }, { ...noToken, readStart: () => 1_000_000 + START_TOLERANCE_MS - 1, platform: 'darwin' }), true);
+  assert.equal(stopRecordedWorker({ workerPid: 77, workerStartedAt: startedAt }, { ...noToken, readStart: () => 1_000_000 + START_TOLERANCE_MS + 1, platform: 'darwin' }), false);
+  assert.equal(stopRecordedWorker({ workerPid: 77 }, { ...noToken, readStart: () => 1_000_000, platform: 'darwin' }), false, 'nothing recorded proves nothing');
+  calls.splice(0);
+  assert.equal(stopRecordedWorker({ workerPid: 77, workerStartedAt: startedAt }, { ...noToken, readStart: () => 1_000_000, platform: 'win32' }), true);
+  assert.deepEqual(calls.splice(0), [['tree', 77]], 'Windows stops the tree');
+  assert.equal(stopRecordedWorker({ workerPid: 77, workerStartedAt: startedAt }, { ...noToken, exists: () => false, readStart: () => 1_000_000, platform: 'win32' }), false, 'a gone worker');
+  assert.equal(stopRecordedWorker({}, base), false);
+});
+
+test('Linux round linux-r2 F1: stopRecordedChild also stops what carries the CLI run id, whoever now holds its pid', () => {
+  const swept = [];
+  const markedStop = (id) => { swept.push(id); return [901, 902]; };
+  const base = { kill: () => {}, readTable: () => new Map(), markedStop, platform: 'linux' };
+  assert.equal(stopRecordedChild({ childPid: 4242, childRunId: 'r1' }, { ...base, readToken: () => 'x' }), true, 'no token recorded: the run id still finds them');
+  assert.equal(stopRecordedChild({ childPid: 4242, childStartToken: 't', childRunId: 'r2' }, { ...base, readToken: () => 'other' }), true, 'a reused pid is not signalled, the run id still is');
+  assert.deepEqual(swept, ['r1', 'r2']);
+  assert.equal(stopRecordedChild({ childPid: 4242, childStartToken: 't' }, { ...base, readToken: () => 'other', markedStop: () => { throw new Error('no run id, no sweep'); } }), false);
 });

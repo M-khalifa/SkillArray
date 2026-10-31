@@ -1,0 +1,160 @@
+{"findings": [
+{
+"id": "F1",
+"origins": ["X1", "Y4"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X1", "response": "conceded"},
+{"claim": "Y4", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "STATIC_TRACE",
+"evidence": "claude-dispatch.mjs:256-262: when the timer fires on an exited child with no answer it sets only stream.timedOut, then cleanup() (lines 238-244) clears the grace timer that holds the 5 s exit wait (lines 325-336, the only place that sets stopIncomplete and exitedOutputOpen). codex-dispatch.mjs:680-687 resolves {code: null, timedOut: true} with neither flag, and the exit-wait callback at :798-805 returns early on settled. So a finite timeout that falls inside the 5 s exit wait records a timeout ('killed') with no stopIncomplete and no output-open warning. The pair-review and cross-review copies are the same."
+},
+"final_state": "settled-agree",
+"summary": "If a finite --timeout falls due inside the new 5 s exit wait after a CLI exits without answering, the run is recorded as killed by the timeout, and both the stopIncomplete flag and the output-open warning are lost.",
+"recommended_fix": "In the timer's exited-and-unanswered branch of claude-dispatch.mjs (about line 260) and codex-dispatch.mjs (about line 687), set stopIncomplete and exitedOutputOpen and keep the exit code, as the exit wait does, and do not call it a kill. Also make review-run.mjs noteAnswerStop (about lines 834-837) record stop-incomplete for an unanswered attempt, because it currently returns unless stoppedAfterAnswer is set. Add a test that uses a finite timeout.",
+"priority": 2
+},
+{
+"id": "F2",
+"origins": ["X2"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X2", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Ran the gate regexes from build-manifest.mjs:261 against review-run.mjs:776 SEAT_SECTION_RE (with * _ ` removed) on 11 headings. The gate rejects '### Checks performed', '## 4. Checks performed', '## (1) Checks performed', '## **Checks performed**', '## `Checks performed`', '# Checks performed', '## No findings.' and '### No findings', and review-run's reader accepts all 8. Only '## Checks performed', '## Checks performed:' and '## No findings' pass both. A seat that passes phase1 --wait is therefore listed in missing_seat_files, and the manifest status becomes incomplete. The two skills' build-manifest.mjs copies are byte-identical."
+},
+"final_state": "settled-agree",
+"summary": "The new seat-file gate in build-manifest accepts only an exact level-2 heading, so a finished seat whose section heading review-run accepts (level 3, numbered, emphasised, '## No findings.') is recorded as missing and the run as incomplete.",
+"recommended_fix": "Share review-run.mjs SEAT_SECTION_RE (tested on the text with * _ ` removed) and use it in the build-manifest.mjs:261 gate. Fix this together with the gate's opposite gap (the finding about a heading-only file) in one structural check.",
+"priority": 2
+},
+{
+"id": "F3",
+"origins": ["Y3"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "Y3", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Ran the build-manifest.mjs:261 gate on a file whose only unfenced heading is '## Checks performed': the gate is true, so the seat counts as present. The gate does not require a claim heading or a No findings line, while the old gate (/^##\\s+(?:[A-Z]\\d+\\b|No findings)/im) rejected such a file. build-manifest.mjs:277 then gives 'completed' when the audit finished. A normal run reaches this only if the file also passes phase1 --wait validation, which rejects these shapes, or if the manifest is built by hand. That limits how often it happens, but the gate is still the last guard."
+},
+"final_state": "settled-agree",
+"summary": "The new build-manifest gate counts a Phase 1 file that holds only a Checks performed heading (cut off or malformed, with no claim and no No findings) as a completed seat, so the manifest and report can say COMPLETE with two passes.",
+"recommended_fix": "In build-manifest.mjs:261, require the structural validator's shape: a claim heading or No findings, plus the completion section. Reuse the Phase 1 structural check instead of a single regex. Add a test for a file that holds only the heading.",
+"priority": 2
+},
+{
+"id": "F4",
+"origins": ["X3", "Y2"],
+"severity": "HIGH",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X3", "response": "conceded"},
+{"claim": "Y2", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Ran shipped runDirNamedIn(text, plugins/pair-review, plugins/cross-review) on Windows with the path skills/../../pair-review/skills/pair-review/SKILL.md in 13 wrappings. Caught: plain, (), backticks, _, '> ' with a space, and a plain backslash form. Missed (null): **..**, *..*, ~~..~~, '>' with no space, 'a|', '|..|', and **..** with backslashes. RELATIVE_UP_RE at build-brief.mjs:250 has no * ~ > | in its look-behind set and excludes * and | from the token. The same guard is the check at exchange.mjs:235 (peer view), blind-relabel.mjs:3112 (audit-prep) and assertOutsideRunDir (packet and rules), so these spellings reach the peer and the auditor. HIGH follows the packet's rule that a blinding leak is HIGH; how often a seat writes such a path is unknown."
+},
+"final_state": "settled-agree",
+"summary": "The new relative '..' run-folder guard misses a path in bold, italics or strikethrough, or one that follows '>' or '|' with no space, so the run-folder path reaches the peer view, the auditor and the briefs.",
+"recommended_fix": "At build-brief.mjs:250, add * ~ > | to the RELATIVE_UP_RE look-behind set, for example (?<=^|[\\s\"'`(\\[<=,;*~>|]). Add the wrappings above (bold, italic, strike, compact blockquote, table bar) to the regression matrix.",
+"priority": 1
+},
+{
+"id": "F5",
+"origins": ["X4"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X4", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Ran shipped rewritePaths(text, [['/home/u/proj', '/srv/new']]). 'see /home/u/proj/a.js' becomes '/srv/new/a.js' (intended). 'see /mnt/backup/home/u/proj/a.js' becomes '/mnt/backup/srv/new/a.js' and 'see x/home/u/proj/a.js' becomes 'x/srv/new/a.js' (wrong paths). 'see /home/u/proj2/a.js' is left alone (the end boundary holds). build-recheck-packet.mjs:323 has an end boundary only. This affects POSIX keys only, the problem predates this round, and it stays MEDIUM under the packet's platform cap."
+},
+"final_state": "settled-agree",
+"summary": "The recheck packet's path rewrite has no start boundary, so on Linux and macOS a longer path that ends with the old target or run path is rewritten into a path that does not exist.",
+"recommended_fix": "At build-recheck-packet.mjs:323, put a start look-behind before the key group, like the one scrubDir uses (for example (?<![\\p{L}\\p{N}_.~/\\\\-])), and test it with a key that has a prefix.",
+"priority": 2
+},
+{
+"id": "F6",
+"origins": ["X5"],
+"severity": "MEDIUM",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "X5", "response": "disputed-with-counter-fact", "counter_fact": "On this host, the unset USER forms do not resolve to the existing folder."}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "On this Windows host USER is undefined and USERNAME is set. Shipped expandPathVars leaves C:\\Users\\%USER%\\x, /c/Users/$USER/x and C:\\Users\\$env:USER\\x unchanged, while %USERNAME% expands. runDirNamedIn returns null for the run folder written with %USER% in place of the user name, and it catches the %USERNAME% spelling. The non-expansion is real. The peer's counter-fact also holds: on Windows the spelling names no existing folder, so it acts like the accepted placeholder spelling (C:\\Users\\<user>\\...) that the known deviations already list. It still shows the rest of the run-folder path."
+,"severity": "LOW",
+"severity_reason": "On Windows an unset %USER% in a path works like a user-name placeholder, which the known deviations already accept for shortened run-folder spellings, so what leaks is the run-folder path without the user name and not a working path."
+},
+"final_state": "unresolved-low-stakes",
+"summary": "On Windows, $USER, %USER% and $env:USER are not expanded because USER is unset, so a run-folder path written with them passes the guard. The peer counters that such a path resolves to no real folder, which makes it close to an accepted placeholder spelling.",
+"recommended_fix": "Optionally, in path-utils.mjs:24, fall back between USER and USERNAME (or use os.userInfo().username) so either spelling resolves. Check that this closes it by running runDirNamedIn with a %USER% spelling on Windows.",
+"priority": 3
+},
+{
+"id": "F7",
+"origins": ["X6"],
+"severity": "LOW",
+"basis": "SOURCE_CITATION",
+"evidence_strength": "DETERMINISTIC",
+"peer_responses": [
+{"claim": "X6", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "SOURCE_CITATION",
+"evidence": "build-brief.mjs:200 allows reading 'this brief, your Phase 1 brief, the task packet, your own output and your scratch folder'. review-run.mjs:265 (PROMPTS.phase2), pair-review phase-2-cross-examination.md:274 and :288, and cross-review phase-2-cross-examination.md:436 and :450 all list the delta brief (or brief), Phase 1 brief, task packet and scratch folder but not the seat's own output. review-run.mjs:264 (PROMPTS.phase1) asks the seat to add findings to its file as it goes, yet its read list leaves that file out."
+},
+"final_state": "settled-agree",
+"summary": "The Phase 1 and Phase 2 resume prompts still leave the seat's own output out of the files it may read, which contradicts the brief they point to.",
+"recommended_fix": "Add 'your own output' (Phase 1: 'your own findings file') to the read lists in review-run.mjs:264-265 and in the four resume texts in both phase-2-cross-examination.md files.",
+"priority": 3
+},
+{
+"id": "F8",
+"origins": ["Y1"],
+"severity": "HIGH",
+"basis": "EXECUTED",
+"evidence_strength": "REPRODUCED",
+"peer_responses": [
+{"claim": "Y1", "response": "conceded"}
+],
+"auditor_check": {
+"result": "CONFIRMED",
+"basis": "EXECUTED",
+"evidence": "Ran shipped seatBlockedLine on '## No findings / Blocked: none / ## Checks performed / <prefix>Blocked: reader denied' with 12 prefixes. Read: '1. ', 'iv) ', 'a. ', '12. ', '- [x] '. Returned empty (the block is lost): '1. 2. ', '1) 2) ', '(1) (2) ', 'a. b. ', '1. a. ', '- 1. 2. ', '> 1. > 2. '. LOOSE_BLOCKED_RE at review-run.mjs:777 allows only one list label, while the removed pattern took any run of numeric labels, so the numeric-repeat shapes are a regression. The letter and mixed shapes were never read and fall under the known LOW 'contradicts itself' deviation."
+,"severity": "MEDIUM",
+"severity_reason": "A blocked No findings seat can pass as clean, but only after it writes a strict 'Blocked: none' and then a block behind two stacked list labels, which is an unusual input; the numeric shapes are a regression the old reader handled, so the known LOW deviation does not cover them."
+},
+"final_state": "settled-agree",
+"summary": "After an earlier strict 'Blocked: none', a block written behind two or more stacked list labels ('1. 2.', '(1) (2)') is not read, so a blocked No findings seat passes Phase 1 as clean; the old reader handled the numeric shapes.",
+"recommended_fix": "At review-run.mjs:777, let the LOOSE_BLOCKED_RE label group repeat with markers between labels, for example ((?:[a-z]|[ivx]{1,4}|\\d+)[.)]\\s*|\\(\\d+\\)\\s*|[^\\p{L}\\p{N}]|\\[[ xX]\\])*. Add repeated-label rows to the test matrix in review-run.test.mjs.",
+"priority": 1
+}
+]}

@@ -1,0 +1,13 @@
+{
+  "steps": [
+    "validate: exit 0, 27 warning(s)",
+    "exchange prepare: exit 0, 27 warning(s)",
+    "exchange finish: exit 0, 27 warning(s)",
+    "audit-prep: exit 1, 0 warning(s)"
+  ],
+  "status": null,
+  "missing_seat_files": null,
+  "findings": 0,
+  "states": {},
+  "report_status": null
+}

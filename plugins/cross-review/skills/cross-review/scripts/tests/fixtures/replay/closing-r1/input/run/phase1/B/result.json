@@ -1,0 +1,71 @@
+{
+  "threadId": "01a155f1-391b-7041-82a7-d11ed2906377",
+  "touchedFiles": [],
+  "modelRequested": "gpt-6.1-sol",
+  "effortRequested": "high",
+  "modelResolved": "gpt-6.1-sol",
+  "effortResolved": "high",
+  "selectionNote": "modelResolved and effortResolved come from the thread rollout (turn_context), null when it is missing.",
+  "isolated": false,
+  "worktreePath": null,
+  "isolationNote": null,
+  "webAccess": false,
+  "host": null,
+  "transport": "cli",
+  "readOnly": {
+    "fileTools": "enforced",
+    "shell": "enforced",
+    "cwd": "target"
+  },
+  "detached": true,
+  "workerPid": 32208,
+  "workerStartedAt": "2026-10-19T20:53:21.831Z",
+  "workerStartToken": null,
+  "workerLog": "@@RUN_JSON@@\\phase1\\B\\dispatch-worker.log",
+  "startedAt": "2026-10-19T20:53:23.227Z",
+  "finishedAt": "2026-10-19T21:21:51.348Z",
+  "durationMs": 1708121,
+  "timeoutS": 0,
+  "usage": {
+    "input_tokens": 8969198,
+    "cached_input_tokens": 8692864,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 41866,
+    "reasoning_tokens": 24700,
+    "estimated_cost_usd": null,
+    "source": "provider",
+    "raw": {
+      "input_tokens": 8969198,
+      "cached_input_tokens": 8692864,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 41866,
+      "reasoning_output_tokens": 24700
+    }
+  },
+  "envMode": "filtered",
+  "usage_delta": {
+    "input_tokens": 8969198,
+    "cached_input_tokens": 8692864,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 41866,
+    "reasoning_tokens": 24700,
+    "source": "fresh-thread"
+  },
+  "configOverrides": [
+    "agents.enabled=false",
+    "features.multi_agent=false",
+    "features.plugins=false",
+    "features.apps=false",
+    "features.skill_search=false",
+    "skills.max_context_tokens=1",
+    "mcp_servers.AcmeCloudMCP.enabled=false",
+    "mcp_servers.AcmeCloudStageMCP.enabled=false",
+    "mcp_servers.node_repl.enabled=false",
+    "mcp_servers.open-brain.enabled=false"
+  ],
+  "childThreads": [],
+  "stderrLog": "@@RUN_JSON@@\\phase1\\B\\result.stderr.log",
+  "finalMessageOut": "@@RUN_JSON@@\\phase1\\B-findings.md",
+  "finalMessage": "# Seat B findings\n\n## B1 [AC-1] [AC-10] — Indented code can satisfy the zero-findings status gate\n\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nTrigger: A zero-findings response contains `Blocked: none` only inside an indented Markdown code block. Deployment frequency unknown. Holds everywhere; reproduced on Windows.\nEvidence:\n```text\nplugins/pair-review/skills/pair-review/scripts/review-run.mjs:765-770\nThe parser skips fenced lines, then matches l.text.trim().\nFour spaces or a tab therefore disappear before matching.\n\nCommand: node --input-type=module -\nCalled shipped run() with in-memory filesystem fixtures and shipped\nvalidateProblems(), using phase1 --wait --native-done A,B --max-wait 1.\nNo filesystem writes occurred.\n\nFixture section:\n## Checks performed\n    Blocked: none\n\nObserved:\n{\"name\":\"indented\",\"code\":0,\"validated\":true,\"detail\":[\"validate Phase 1: clean\"]}\n\nControls:\nhealthy declaration: exit 0\ndeclaration inside a fence: exit 1\ndeclaration inside a quote block: exit 1\nexplicit blocked declaration: exit 1\n\nSibling inputs containing a tab or space-plus-tab also return \"\" from\nseatBlockedLine(), meaning no block.\n```\nSuggested fix: Match the canonical declaration without removing code indentation; add Phase 1 regression cases for spaces and tabs.\nSame shape elsewhere: `plugins/cross-review/skills/cross-review/scripts/review-run.mjs:769`; identical installed copies under both `.claude/skills/` and `.agents/skills/`, for both skills.\n\n## B2 [AC-1] [AC-4] — Completed CLI results can leave their processes running indefinitely\n\nSeverity: HIGH\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nTrigger: A CLI emits its terminal success event and complete answer, then hangs during shutdown. The sequencer supplies timeout zero by default, so this can persist indefinitely. Frequency unknown. Reproduced on Windows.\nEvidence:\n```text\nplugins/pair-review/skills/pair-review/scripts/review-run.mjs:411-413\nreturn ['--timeout', String(desc.flags.timeoutS ?? 0)];\n\nplugins/pair-review/skills/pair-review/scripts/claude-dispatch.mjs:265-278\nA result event only assigns stream.result.\nThe promise resolves from the child's close handler.\n\nCommand: node --input-type=module -\nExposed the shipped private runner in memory. Replaced only the executable\nspawn with a real Node subprocess emitting a successful result, then waiting.\nNo files were written.\n\n{\"stage\":\"success-result-received\",\"runnerFinished\":false,\"processes\":[{\"pid\":10660}]}\n{\"stage\":\"after-explicit-cleanup\",\"processes\":[],\"answerRetained\":\"Final review answer.\"}\n\nThe other shared CLI runner reproduced the same issue after agent_message\nand turn.completed events:\n\n{\"stage\":\"after-final-and-turn-completed\",\"timeout\":0,\"runnerFinished\":false,\"processes\":[{\"pid\":7916,\"exitCode\":null,\"signalCode\":null}]}\n{\"stage\":\"after-explicit-cleanup\",\"runnerFinished\":true,\"processes\":[],\"answerRetained\":\"Final review answer.\"}\n\nWith timeout 1, that runner instead returned timedOut:true despite retaining\nthe complete answer. Normal process shutdown returned code 0.\n```\nSuggested fix: After a terminal success event, allow bounded shutdown grace, then stop and await the process tree while preserving the successful answer.\nSame shape elsewhere: `plugins/cross-review/skills/cross-review/scripts/claude-dispatch.mjs:265`; the other shared CLI runner’s terminal-event/close handlers at lines 704/744, also reproduced. `plugins/cross-review/skills/cross-review/scripts/opencode-dispatch.mjs:599` uses the same close-only completion pattern, checked statically. Shared copies also occur in all four installed skills.\n\n## B3 [AC-9] [AC-10] — Backtick-quoted evidence paths are still split or rewritten\n\nSeverity: LOW\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nTrigger: A quoted path contains an option-like folder component or literal percent escape. Holds everywhere; reproduced with Windows path fixtures.\nEvidence:\n```text\nplugins/pair-review/skills/pair-review/scripts/preflight.mjs:1425-1429\ndecodeFileUrls(word) runs on every path.\nThe option regex rejects the quoted item before stat() checks the whole path.\n\nplugins/pair-review/skills/pair-review/scripts/path-utils.mjs:30-32\nPercent escapes are decoded across the entire supplied string.\n\nCommand: node --input-type=module -\nCalled shipped packetReach() with a read-only stat fixture exposing exactly\nthree existing files. Each input was wrapped in backticks.\n\nInput: C:\\review-fixture\\release -final\\evidence.log\nResult: outside=[], notFound=[]\n\nInput: C:\\review-fixture\\percent%20literal\\evidence.log\nResult: outside=[]\n        notFound=[\"C:\\review-fixture\\percent literal\\evidence.log\"]\n\nControl: C:\\review-fixture\\plain space\\evidence.log\nResult: outside=[\"C:\\review-fixture\\plain space\\evidence.log\"]\n\nThe previous quoted-path branch checked the whole existing path first.\nThe new branch loses both existing paths.\n```\nSuggested fix: Check the complete literal quoted path before command classification, and decode percent escapes only within file URLs.\nSame shape elsewhere: `plugins/cross-review/skills/cross-review/scripts/preflight.mjs:1425` and `scripts/path-utils.mjs:30`; identical installed copies. Both preflight reach probing and Phase 1 path warnings consume this scanner.\n\n## B4 [AC-5] [AC-10] — Valid single-digit endpoint ports are silently omitted\n\nSeverity: LOW\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nTrigger: A packet names a valid endpoint using port 1–9. Only the advisory reach probe is affected. Holds everywhere.\nEvidence:\n```text\nplugins/pair-review/skills/pair-review/scripts/preflight.mjs:1504-1506\nBoth endpoint expressions require (\\d{2,5}).\n\nCommand: node --input-type=module -\nCalled shipped packetPorts().\n\nInput:\ntcp://localhost:7/ http://localhost:8/ localhost:9 127.0.0.1:6 [::1]:5\nOutput:\n[]\n\nSibling control:\ntcp://localhost:17/ http://localhost:18/ localhost:19 127.0.0.1:16 [::1]:15\nOutput:\n[\"localhost:17\",\"localhost:18\",\"localhost:19\",\"127.0.0.1:16\",\"[::1]:15\"]\n```\nSuggested fix: Accept one through five port digits in both expressions.\nSame shape elsewhere: `plugins/cross-review/skills/cross-review/scripts/preflight.mjs:1504-1506`; identical installed copies. Both URL and bare-address branches have the restriction.\n\n## B5 [AC-5] — Cross-review’s entry page incorrectly restricts the second reviewer to a CLI\n\nSeverity: MEDIUM\nBasis: EXECUTED\nEvidence strength: REPRODUCED\nTrigger: A user follows the entry page’s CLI-only restriction on the alternate host. The default supported trial configuration instead requires a native second reviewer. Holds everywhere.\nEvidence:\n```text\nplugins/cross-review/skills/cross-review/SKILL.md:21-24\nThe entry paragraph restricts the second reviewer to CLI/bridge execution,\nsays no other layout has a defined dispatch path, and says configuration\nenforces that restriction.\n\nplugins/cross-review/skills/cross-review/scripts/review-config.mjs:189\ntransport: seat.runtime === nativeRuntime ? (transport ?? 'native') : 'cli'\n\nCommand: node --input-type=module -\nCalled shipped buildSeats(), evaluateSupport() and validateSupport().\nUsed a successful-session-probe support fixture; no live probe was run.\n\n{\"transport\":null,\"secondTransport\":\"native\",\"statuses\":[\"probe\",\"trial\",\"trial\"],\"accepted\":true}\n{\"transport\":\"cli\",\"secondTransport\":\"cli\",\"statuses\":[\"probe\",\"unsupported\",\"trial\"],\"accepted\":false}\n\nThe host reference separately documents the native second-reviewer route.\n```\nSuggested fix: Qualify the entry paragraph by host and explicitly allow the native route described in the host reference.\nSame shape elsewhere: none found in the other entry page, README, or host tables searched.\n\n## Checks performed\n\n- AC-1: Executed Phase 1 status-gate fixtures and terminal-result subprocess fixtures; clean acceptance and completion defects remain (B1, B2). NOT MET\n- AC-2: Checked packet/rules guards, identity-path masking, audit retry sanitization, and grant checks. Paid actor round trips were outside this read-only review. PARTIAL\n- AC-3: Independently reconciled the closing diff: 19 files, 434 additions, 474 removals. Checked synthetic outcome attribution and ground-truth extraction. MET\n- AC-4: Completed-result processes remained pending until explicit cleanup (B2). Every subprocess started here was stopped and awaited; system-wide process enumeration was denied. NOT MET\n- AC-5: Configuration execution contradicts the entry page; endpoint extraction omits supported-shaped inputs (B4, B5). NOT MET\n- AC-6: Reviewed compatibility branches, optional descriptor fields, and synthesized zero-claim handling. Historical run folders were not replayed through write-producing lifecycle steps. PARTIAL\n- AC-7: No removable-weight defect confirmed; no weight claims raised. MET\n- AC-8: Read all four feedback files and traced fixes covering cache drift, native replies, missing outputs, status, counts, recheck publication, audit errors, aliases, and report fallback. Accepted deviations retained. Full suites and historical reproductions were not rerun because they write files. PARTIAL\n- AC-9: Whole quoted paths previously accepted are now split or decoded incorrectly (B3). Removed wording guesses and bare-host probing match declared changes; other examined narrowing produced no additional regression. NOT MET\n- AC-10: Status and path tests omit reproduced broken sibling inputs; endpoint tests omit single-digit ports (B1, B3, B4). Author-reported mutation results were not treated as executed evidence. NOT MET\n- H1: Standalone malformed, fenced, and quoted declarations stop. Indented code passes; conflicting duplicates, earlier declarations, and malformed trailing declarations also pass the exercised gate. PARTLY CONFIRMED\n- H2: CRLF, trailing spaces, and `None.` work. Bold labels are deliberately outside the required format. REFUTED\n- H3: Terminal answers remain pending until process exit; bounded runs become timeout failures. Answers remain in result data, and the sequencer default is unlimited rather than 1800 seconds. PARTLY CONFIRMED\n- H4: No additional persistent leak after process exit was demonstrated. Owned-process lists were empty after awaited cleanup. Full dispatcher/job interruption tests were not run because they write files; system-wide listing was denied. REFUTED\n- H5: Static traces cover concurrent cache publication, spaced/non-ASCII paths, corrupt assemblies, and version-derived cache names. Failures reach the fallback before command execution. DLL-writing race tests were not executable within this review’s no-write constraint. REFUTED\n- H6: Exercised quoted paths, line/column suffixes, brackets, rootless paths, file URLs, and command suffixes. Those controls pass; option-like components and literal percent escapes fail (B3). PARTLY CONFIRMED\n- H7: Executed absolute, Git Bash, relative, home-relative, file-URL, rootless, and parent-segment guard cases; all refused. Sibling control passed. Junction handling was traced through native realpath; POSIX variable expansion was exercised with explicit platform arguments. REFUTED\n- H8: Found the entry-page transport contradiction (B5). No project/vendor-domain coupling found in the searched protocol and brief text. CONFIRMED\n- Repository validation passed. All four installed copies matched repository bytes: 100 files per pair-review copy, 104 per cross-review copy.\n- Six syntax checks passed. Full test suites were intentionally not run because no scratch folder or filesystem writes were authorized.\n- Coverage: read fully — closing diff hunks, four feedback files, smaller core helpers and benchmark helpers; read partly — large lifecycle, dispatch, translation, reporting, documentation, and test files; not read — remaining unchanged tests and fixtures.\nBlocked: rg: CommandNotFoundException; tasklist.exe: ERROR: Access denied\nweb: 0 queries, 0 page fetches",
+  "status": "completed"
+}

@@ -1,0 +1,79 @@
+{
+  "threadId": null,
+  "sessionId": "205ea41b-7211-4353-bac6-c44400f57cb7",
+  "finalMessage": "7 CONCEDE, 0 DISPUTE. written",
+  "touchedFiles": [],
+  "modelRequested": "opus",
+  "effortRequested": null,
+  "modelResolved": "claude-opus-5-5",
+  "effortResolved": null,
+  "selectionNote": "modelResolved comes from system/init; the stream does not verify effective effort.",
+  "isolated": true,
+  "worktreePath": "C:\\Users\\dev\\AppData\\Local\\Temp\\rv-6cd03266",
+  "isolationNote": "snapshot worktree; reused=true; skipped nested repositories: none",
+  "readOnly": {
+    "fileTools": "enforced",
+    "shell": "prompt-only",
+    "cwd": "worktree"
+  },
+  "host": null,
+  "transport": "cli",
+  "webAccess": false,
+  "usageSemantics": "per-call",
+  "usage": {
+    "input_tokens": 6,
+    "cached_input_tokens": 585367,
+    "cache_write_input_tokens": 13025,
+    "output_tokens": 4194,
+    "reasoning_tokens": null,
+    "estimated_cost_usd": null,
+    "source": "provider",
+    "raw": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 13025,
+      "cache_read_input_tokens": 585367,
+      "output_tokens": 4194,
+      "output_tokens_details": {
+        "thinking_tokens": 1510
+      },
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 13025,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "global",
+      "iterations": [
+        {
+          "input_tokens": 2,
+          "output_tokens": 22,
+          "cache_read_input_tokens": 199456,
+          "cache_creation_input_tokens": 2881,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2881
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+    }
+  },
+  "costUsd": 4.392436,
+  "permissionDenials": [],
+  "status": "completed",
+  "startedAt": "2026-10-20T07:27:45.408Z",
+  "finishedAt": "2026-10-20T07:28:53.308Z",
+  "durationMs": 67900,
+  "timeoutS": 0,
+  "envMode": "filtered",
+  "detached": true,
+  "workerPid": 3300,
+  "workerStartedAt": "2026-10-20T07:27:45.282Z",
+  "workerStartToken": null,
+  "workerLog": "@@RUN_JSON@@\\phase2\\A\\dispatch-worker.log"
+}

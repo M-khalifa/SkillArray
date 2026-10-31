@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="600" viewBox="0 0 1600 600" role="img" aria-labelledby="t d">
+  <title id="t">How a SkillArray review works</title>
+  <desc id="d">Reviewer A and reviewer B review the same target alone. Their findings are swapped with names removed: A's findings go to B and B's go to A, and each accepts or refutes the other's findings with evidence. The verdicts go to a fresh auditor, which re-checks every finding and writes the report.</desc>
+  <defs>
+    <style>
+      .h { font: 700 34px ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #EEF3F8; }
+      .s { font: 400 23px ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #A9B6C4; }
+      .n { font: 700 20px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 3px; }
+      .box { fill: #121F2C; stroke-width: 3; }
+      .wire { fill: none; stroke: #2E3E50; stroke-width: 4; stroke-linecap: round; }
+      .lane { fill: none; stroke-width: 5; stroke-linecap: round; stroke-dasharray: 2 12; }
+    </style>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- Swap: A's findings run the top lane, turn at the right end and come back on the bottom lane to B; B's do the opposite.
+         The two dots pass each other at the turn. Verdicts then run from each reviewer straight through to the auditor. -->
+    <path id="a2b" d="M440 150 C 530 150, 520 250, 610 250 L 840 250 C 930 250, 930 350, 840 350 L 610 350 C 520 350, 530 450, 440 450"/>
+    <path id="b2a" d="M440 450 C 530 450, 520 350, 610 350 L 840 350 C 930 350, 930 250, 840 250 L 610 250 C 520 250, 530 150, 440 150"/>
+    <path id="aout" d="M440 150 C 530 150, 520 300, 610 300 L 1160 300"/>
+    <path id="bout" d="M440 450 C 530 450, 520 300, 610 300 L 1160 300"/>
+  </defs>
+  <rect width="1600" height="600" rx="22" fill="#0B1622"/>
+
+  <!-- reviewers -->
+  <rect class="box" x="60" y="80" width="380" height="140" rx="20" stroke="#F0A347">
+    <animate attributeName="stroke-width" values="3;3;7;3;3" keyTimes="0;0.56;0.6;0.66;1" dur="8s" repeatCount="indefinite"/>
+  </rect>
+  <circle cx="102" cy="128" r="11" fill="#F0A347"/>
+  <text class="h" x="126" y="140">Reviewer A</text>
+  <text class="s" x="96" y="190">reviews alone</text>
+  <rect class="box" x="60" y="380" width="380" height="140" rx="20" stroke="#6EA6FF">
+    <animate attributeName="stroke-width" values="3;3;7;3;3" keyTimes="0;0.56;0.6;0.66;1" dur="8s" repeatCount="indefinite"/>
+  </rect>
+  <circle cx="102" cy="428" r="11" fill="#6EA6FF"/>
+  <text class="h" x="126" y="440">Reviewer B</text>
+  <text class="s" x="96" y="490">reviews alone</text>
+
+  <!-- cross-check box with its two lanes -->
+  <rect class="box" x="600" y="190" width="400" height="220" rx="22" stroke="#2E3E50"/>
+  <path class="lane" d="M610 250 L 840 250 C 930 250, 930 350, 840 350 L 610 350" stroke="#F0A347" opacity=".15">
+    <animate attributeName="opacity" values=".15;.15;.9;.9;.15;.15" keyTimes="0;0.12;0.2;0.5;0.58;1" dur="8s" repeatCount="indefinite"/>
+  </path>
+  <path class="lane" d="M610 350 L 840 350 C 930 350, 930 250, 840 250 L 610 250" stroke="#6EA6FF" opacity=".15" stroke-dashoffset="7">
+    <animate attributeName="opacity" values=".15;.15;.9;.9;.15;.15" keyTimes="0;0.12;0.2;0.5;0.58;1" dur="8s" repeatCount="indefinite"/>
+  </path>
+  <text class="h" x="735" y="290" text-anchor="middle">Blind cross-check</text>
+  <text class="s" x="735" y="324" text-anchor="middle">A checks B, B checks A</text>
+
+  <!-- auditor -->
+  <rect class="box" x="1160" y="210" width="380" height="180" rx="22" stroke="#3CC3CC">
+    <animate attributeName="stroke-width" values="3;3;7;3" keyTimes="0;0.9;0.95;1" dur="8s" repeatCount="indefinite"/>
+  </rect>
+  <text class="h" x="1350" y="292" text-anchor="middle">Fresh auditor</text>
+  <text class="s" x="1350" y="330" text-anchor="middle">re-checks every finding</text>
+
+  <path class="wire" d="M440 150 C 530 150, 520 250, 610 250"/>
+  <path class="wire" d="M440 450 C 530 450, 520 350, 610 350"/>
+  <path class="wire" d="M1000 300 L 1160 300"/>
+
+  <!-- swap dots, each with a short trail -->
+  <g filter="url(#glow)">
+    <circle r="7" fill="#F0A347" opacity="0"><animateMotion dur="8s" begin="0.18s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.55;1" calcMode="linear"><mpath href="#a2b"/></animateMotion><animate attributeName="opacity" values="0;.35;.35;0;0" keyTimes="0;0.04;0.52;0.56;1" dur="8s" begin="0.18s" repeatCount="indefinite"/></circle>
+    <circle r="13" fill="#F0A347" opacity="0"><animateMotion dur="8s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.55;1" calcMode="linear"><mpath href="#a2b"/></animateMotion><animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.03;0.55;0.6;1" dur="8s" repeatCount="indefinite"/></circle>
+    <circle r="7" fill="#6EA6FF" opacity="0"><animateMotion dur="8s" begin="0.18s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.55;1" calcMode="linear"><mpath href="#b2a"/></animateMotion><animate attributeName="opacity" values="0;.35;.35;0;0" keyTimes="0;0.04;0.52;0.56;1" dur="8s" begin="0.18s" repeatCount="indefinite"/></circle>
+    <circle r="13" fill="#6EA6FF" opacity="0"><animateMotion dur="8s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.55;1" calcMode="linear"><mpath href="#b2a"/></animateMotion><animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.03;0.55;0.6;1" dur="8s" repeatCount="indefinite"/></circle>
+    <!-- verdicts to the auditor -->
+    <circle r="13" fill="#3CC3CC" opacity="0"><animateMotion dur="8s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.66;0.92;1" calcMode="linear"><mpath href="#aout"/></animateMotion><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.66;0.69;0.92;1" dur="8s" repeatCount="indefinite"/></circle>
+    <circle r="13" fill="#3CC3CC" opacity="0"><animateMotion dur="8s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.66;0.92;1" calcMode="linear"><mpath href="#bout"/></animateMotion><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.66;0.69;0.92;1" dur="8s" repeatCount="indefinite"/></circle>
+  </g>
+
+  <!-- stage labels light up in turn -->
+  <text class="n" x="250" y="568" text-anchor="middle" fill="#5B6B7C">1  ALONE<animate attributeName="fill" values="#F2F6FA;#F2F6FA;#5B6B7C;#5B6B7C" keyTimes="0;0.12;0.16;1" dur="8s" repeatCount="indefinite"/></text>
+  <text class="n" x="800" y="568" text-anchor="middle" fill="#5B6B7C">2  CROSS-CHECK, BLIND<animate attributeName="fill" values="#5B6B7C;#5B6B7C;#F2F6FA;#F2F6FA;#5B6B7C;#5B6B7C" keyTimes="0;0.12;0.16;0.62;0.66;1" dur="8s" repeatCount="indefinite"/></text>
+  <text class="n" x="1350" y="568" text-anchor="middle" fill="#5B6B7C">3  FINAL CALL<animate attributeName="fill" values="#5B6B7C;#5B6B7C;#F2F6FA;#F2F6FA" keyTimes="0;0.62;0.66;1" dur="8s" repeatCount="indefinite"/></text>
+</svg>

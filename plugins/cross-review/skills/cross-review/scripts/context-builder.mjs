@@ -6,7 +6,7 @@
 // not become the default packet-construction path until the benchmark
 // runner (bench/run-comparison.mjs) has actually compared scoped-vs-full
 // recall on real cases. Both reviewer seats retain their existing, already
-// real ability to read beyond this packet (codex/opencode via --cd
+// real ability to read beyond this packet (codex via --cd
 // filesystem access, pair-review via Read/Grep) -- this script's output is
 // a starting point, never presented to a reviewer as "the complete
 // relevant context."
@@ -203,8 +203,8 @@ async function buildPacket({ cd, base, symbolFileCap }) {
   let diffResult, nameOnlyResult, untrackedResult;
   try {
     [diffResult, nameOnlyResult, untrackedResult] = await Promise.all([
-      runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--relative', base], cd),
-      runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--relative', base, '--name-only', '-z'], cd),
+      runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--no-renames', '--relative', base], cd),
+      runCapture('git', [...GIT_PLAIN, 'diff', ...DIFF_PLAIN, '--no-renames', '--relative', base, '--name-only', '-z'], cd),
       runCapture('git', ['ls-files', '--others', '--exclude-standard', '-z'], cd),
     ]);
   } catch (err) {

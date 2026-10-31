@@ -17,8 +17,9 @@ async function check(dir) {
   for (const item of await fs.readdir(dir, { withFileTypes: true })) {
     if (item.name.startsWith('.')) continue;
     const file = path.join(dir, item.name);
-    if (item.isDirectory()) { await check(file); continue; }
-    if (item.name.endsWith('.mjs')) execFileSync(process.execPath, ['--check', file]);
+    // Test fixtures hold stored review files verbatim; their links are data, not this package's docs.
+    if (item.isDirectory()) { if (!(item.name === 'fixtures' && path.basename(dir) === 'tests')) await check(file); continue; }
+    if (item.name.endsWith('.mjs')) execFileSync(process.execPath, ['--check', file], { windowsHide: true });
     if (!item.name.endsWith('.md')) continue;
     const body = await fs.readFile(file, 'utf8');
     for (const match of body.matchAll(/\]\(([^)]+)\)/g)) {

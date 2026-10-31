@@ -1,0 +1,296 @@
+# Seat B findings
+
+## B1 [AC-2] [AC-8] [AC-10] [H7] — Encoded and normalized run paths still reach blind readers
+
+Severity: HIGH
+Basis: EXECUTED
+Evidence strength: REPRODUCED
+Trigger: A reviewer quotes a run path as an encoded file URL or with dot segments. Applies everywhere; deployment frequency unknown.
+Evidence:
+```text
+Command: node --input-type=module
+Imported shipped scrubDir and scanText; tested 12 path spellings entirely in memory.
+
+{"input":"file:///C:/reviews/run%20space","redactions":0,"blocking":0}
+{"input":"C:/reviews/./run space","redactions":0,"blocking":0}
+{"aliasShapes":12,"leaked":5}
+
+The fixture run directory was C:/reviews/run space.
+No directory was created.
+
+plugins/pair-review/skills/pair-review/scripts/path-utils.mjs:85
+scrubDir matches literal spellings without decoding URLs or normalizing dot segments.
+
+plugins/pair-review/skills/pair-review/scripts/exchange.mjs:227
+The returned text becomes the peer view.
+
+plugins/pair-review/skills/pair-review/scripts/blind-relabel.mjs:3109
+The returned text becomes the auditor's input.
+```
+Suggested fix: Recognize encoded URLs and normalized path aliases before publishing either blind view.
+Same shape elsewhere: plugins/pair-review/skills/pair-review/scripts/exchange.mjs:227; plugins/pair-review/skills/pair-review/scripts/blind-relabel.mjs:3109.
+
+## B2 [AC-1] [AC-8] [AC-10] [H10] — Formatted block declarations can preserve a false clean result
+
+Severity: HIGH
+Basis: EXECUTED
+Evidence strength: REPRODUCED
+Trigger: A “No findings” file contains an earlier healthy declaration followed by a real block written as a task-list item, heading, or beneath an emphasized section heading. Applies everywhere; frequency unknown.
+Evidence:
+```text
+Command: node --input-type=module
+Called shipped seatBlockedLine, validateProblems and review-run.run.
+Filesystem reads and writes were replaced with an in-memory Map.
+
+Representative input:
+## No findings
+## Checks performed
+Blocked: none
+- [ ] Blocked: target EACCES
+
+seatBlockedLine returned an empty string.
+validateProblems returned [].
+
+Selected runner output:
+{"shape":"plain-block","exit":1,"clean":false,"warning":false}
+{"shape":"heading-block","exit":0,"clean":true,"warning":false,"reason":null}
+{"shape":"unchecked-block","exit":0,"clean":true,"warning":false,"reason":null}
+{"shape":"checked-block","exit":0,"clean":true,"warning":false,"reason":null}
+{"shape":"bold-section-block","exit":0,"clean":true,"warning":false,"reason":null}
+
+Twelve block-format shapes were tested.
+
+plugins/pair-review/skills/pair-review/scripts/review-run.mjs:774
+Only unadorned level-two section headings update section ownership.
+
+plugins/pair-review/skills/pair-review/scripts/review-run.mjs:785
+The loose label matcher excludes heading and task-list markers.
+```
+Suggested fix: Recognize those Markdown wrappers before classifying declarations; an earlier healthy declaration must never hide a later block.
+Same shape elsewhere: plugins/pair-review/skills/pair-review/scripts/review-run.mjs:839 consumes this result for the completion gate and blind-review warning; no second block reader found.
+
+## B3 [AC-1] [AC-10] [H11] — A completed native turn without a reply accepts stale output
+
+Severity: HIGH
+Basis: EXECUTED
+Evidence strength: REPRODUCED
+Trigger: A native reviewer has usable output from an earlier turn, then completes another turn without a final reply. Applies everywhere; frequency unknown.
+Evidence:
+```text
+Command: node --input-type=module
+Called shipped transcript readers and review-run.run with in-memory filesystem fixtures.
+
+Transcript sequence:
+session_meta
+task_started
+task_complete(last_agent_message="written")
+task_started
+task_complete(last_agent_message absent)
+
+Reader result:
+{"shape":"later-empty","state":"done","reply":null}
+
+Completion-gate results:
+{"shape":"later-empty","exit":0,"clean":true,"warning":false,"reason":null}
+{"shape":"later-null","exit":0,"clean":true,"warning":false,"reason":null}
+{"shape":"fresh-empty","exit":0,"clean":true,"warning":false,"reason":null}
+
+Ten transcript shapes were checked; aborted turns were correctly refused.
+
+plugins/pair-review/skills/pair-review/scripts/native-agent.mjs:93
+task_complete establishes done regardless of reply availability.
+
+plugins/pair-review/skills/pair-review/scripts/review-run.mjs:233
+checkFinalReply neither refuses nor warns when the reply is null.
+```
+Suggested fix: Require a nonempty reply from the latest completed turn before accepting its existing output.
+Same shape elsewhere: plugins/pair-review/skills/pair-review/scripts/review-run.mjs:680 covers both reviewer phases; plugins/pair-review/skills/pair-review/scripts/review-run.mjs:1355 uses the same check for the auditor.
+
+## B4 [AC-1] [AC-3] [AC-8] [AC-10] [H4] — Empty reviewer files still produce COMPLETE and two passes
+
+Severity: HIGH
+Basis: EXECUTED
+Evidence strength: REPRODUCED
+Trigger: A run retains valid final findings JSON, but a reviewer file is empty, truncated or otherwise unusable when the manifest is rebuilt. Applies everywhere; frequency unknown.
+Evidence:
+```text
+Command: node --input-type=module
+Called shipped build-manifest.run(parseArgs(...)) and buildReport.
+All filesystem operations used an in-memory Map.
+
+Selected results from ten content shapes:
+{"shape":"empty","status":"completed","report":"COMPLETE","passes":2,"seatHashed":true}
+{"shape":"spaces","status":"completed","report":"COMPLETE","passes":2,"seatHashed":true}
+{"shape":"header-only","status":"completed","report":"COMPLETE","passes":2,"seatHashed":true}
+{"shape":"unfinished","status":"completed","report":"COMPLETE","passes":2,"seatHashed":true}
+{"shape":"fenced-only","status":"completed","report":"COMPLETE","passes":2,"seatHashed":true}
+
+A separate absent-file control produced INCOMPLETE.
+
+plugins/pair-review/skills/pair-review/scripts/build-manifest.mjs:254
+The new reviewer-file gate checks stat success, not content validity.
+
+plugins/pair-review/skills/pair-review/scripts/build-report.mjs:727
+Report completion trusts manifest.status.
+
+plugins/pair-review/skills/pair-review/scripts/build-report.mjs:735
+Reviewer-pass coverage counts descriptor entries.
+```
+Suggested fix: Validate both selected reviewer artifacts before setting completed status or counting completed passes.
+Same shape elsewhere: plugins/pair-review/skills/pair-review/scripts/build-report.mjs:727; plugins/pair-review/skills/pair-review/scripts/build-report.mjs:735.
+
+## B5 [AC-2] [AC-9] [AC-10] [H7] — Path rewriting corrupts quoted sibling-folder references
+
+Severity: MEDIUM
+Basis: EXECUTED
+Evidence strength: REPRODUCED
+Trigger: Evidence cites a sibling such as a quoted “run backup” directory. Applies everywhere.
+Evidence:
+```text
+Command: node --input-type=module
+Called shipped scrubDir and rewritePaths across ten sibling suffixes.
+
+Fixture:
+run directory: C:/reviews/run
+quoted sibling: `C:/reviews/run backup/x.log`
+
+Selected output:
+{"suffix":"-evidence","scrubChanged":false,"rewriteChanged":false}
+{"suffix":".bak","scrubChanged":false,"rewriteChanged":false}
+{"suffix":"Old","scrubChanged":false,"rewriteChanged":false}
+{"suffix":" backup","scrubChanged":true,"rewriteChanged":true}
+{"suffix":",archive","scrubChanged":true,"rewriteChanged":true}
+
+scrubDir also changed sibling names containing plus, at-sign, parentheses
+or a non-ASCII letter.
+
+plugins/pair-review/skills/pair-review/scripts/path-utils.mjs:100
+The boundary excludes only a limited ASCII continuation set.
+
+plugins/pair-review/skills/pair-review/scripts/build-recheck-packet.mjs:323
+Whitespace and comma terminate matches even inside quoted paths.
+
+Before the new exchange scrub, the quoted sibling reference remained intact.
+```
+Suggested fix: Preserve complete quoted sibling paths when matching directory components.
+Same shape elsewhere: plugins/pair-review/skills/pair-review/scripts/build-recheck-packet.mjs:323; the scrub affects both exchange and auditor staging.
+
+## B6 [AC-1] [AC-4] [AC-8] [AC-10] [H9] [H12] — Timeout and signal handlers still target an exited CLI
+
+Severity: MEDIUM
+Basis: EXECUTED
+Evidence strength: REPRODUCED
+Trigger: A CLI answers and exits while inherited output remains open, then its finite timeout expires before the answer grace ends. Holds everywhere.
+Evidence:
+```text
+Command: node --experimental-vm-modules --input-type=module
+
+Loaded the shipped dispatcher modules in memory and exposed their existing
+runner functions. Spawn/kill were recording doubles; timers ran 100 times
+faster. No real process was signalled.
+
+Ten runner cases covered both dispatcher families:
+{"family":"file-channel","shape":"exited-zero","timedOut":true,"code":0,"kills":[{"exited":true,"exitCode":0}]}
+{"family":"final-message","shape":"exited-zero","timedOut":true,"code":0,"kills":[{"exited":true,"exitCode":0}]}
+{"family":"file-channel","shape":"exited-no-timeout","timedOut":false,"code":0,"stopIncomplete":true,"kills":[]}
+
+A separate ten-case check of the exported signal handlers also recorded
+kill requests for already-exited children.
+
+plugins/pair-review/skills/pair-review/scripts/claude-dispatch.mjs:251
+plugins/pair-review/skills/pair-review/scripts/codex-dispatch.mjs:674
+Timeout callbacks call killTree without checking exit state.
+
+The exit-state check exists only in the later answer-grace callback.
+Dispatch consequently classifies the successful answer as timed-out.
+```
+Suggested fix: Disarm timeout and signal killing on process exit while retaining bounded output draining and its warning.
+Same shape elsewhere: plugins/pair-review/skills/pair-review/scripts/claude-dispatch.mjs:206; plugins/pair-review/skills/pair-review/scripts/codex-dispatch.mjs:69 contain the corresponding signal-forwarding callbacks.
+
+## B7 [AC-1] [AC-8] [AC-10] [H5] — Early packet warnings omit four reserved label families
+
+Severity: LOW
+Basis: EXECUTED
+Evidence strength: REPRODUCED
+Trigger: Packet text uses a reserved reviewer or auditor label, directly or after a hyphen. Applies everywhere.
+Evidence:
+```text
+Command: node --input-type=module
+Called shipped peerLabelLines, claim-ID scanners and translateFindings.
+
+Matrix: five reserved letter families, each bare and hyphenated.
+{"shapes":10,"earlyWarnings":2,"laterRefusals":10}
+
+Legal hypothesis, acceptance-criterion and declared-checklist controls
+produced no early warning.
+
+plugins/pair-review/skills/pair-review/scripts/preflight.mjs:1815
+peerLabelLines recognizes only the peer-label family.
+```
+Suggested fix: Warn for every reserved family that downstream validation can reject, retaining legal-tag exemptions.
+Same shape elsewhere: plugins/pair-review/skills/pair-review/scripts/preflight.mjs:2036 checks repository rules with the same helper; plugins/pair-review/skills/pair-review/scripts/preflight.mjs:2040 checks the packet.
+
+## B8 [AC-2] [AC-8] [AC-10] [H8] — Three leading slashes leave the POSIX alias bypass open
+
+Severity: MEDIUM
+Basis: STATIC_TRACE
+Evidence strength: DETERMINISTIC
+Trigger: On Linux or macOS, a packet cites a link into the run directory using three or more leading slashes. Frequency unknown.
+Evidence:
+```text
+Command: node --input-type=module
+Executed shipped pathStartRe for Linux and macOS with one through five
+leading slashes: ten shapes.
+
+Selected output:
+{"platform":"linux","slashes":2,"normalized":"/root/review-link/phase1/findings.md","pathStarts":1}
+{"platform":"linux","slashes":3,"normalized":"/root/review-link/phase1/findings.md","pathStarts":0}
+{"platform":"darwin","slashes":3,"normalized":"/root/review-link/phase1/findings.md","pathStarts":0}
+
+Normalization used node:path.posix.normalize.
+No real link was created.
+
+plugins/pair-review/skills/pair-review/scripts/build-brief.mjs:250
+The expression accepts only one or two leading slashes.
+
+plugins/pair-review/skills/pair-review/scripts/build-brief.mjs:268
+Only recognized starts enter filesystem resolution. A link alias lacks the
+literal run-directory spelling, so neither guard branch detects this form.
+
+The changed test explicitly expects a three-slash path not to be recognized.
+```
+Suggested fix: Accept arbitrary leading slash runs on POSIX while preserving URL exclusion and Windows network-path handling.
+Same shape elsewhere: plugins/pair-review/skills/pair-review/scripts/preflight.mjs:1434 repeats the one-or-two-slash restriction in packet scanning.
+
+## Checks performed
+
+- AC-1: Completion gates, manifest generation and timeout handling reproduced false success or wrong status; findings B2, B3, B4 and B6. NOT MET
+- AC-2: Encoded path leakage, sibling-reference corruption and the remaining POSIX alias variant established; findings B1, B5 and B8. NOT MET
+- AC-3: Independent fixture inspection found one unusable reviewer artifact while the report counted two passes; finding B4. NOT MET
+- AC-4: Recording doubles confirmed timeout and signal kill requests against exited children; no real PID-reuse or live process-tree experiment performed; finding B6. NOT MET
+- AC-5: README, manifests, changed protocol passages and selected command routes checked; remaining reference/help combinations were not exhaustively exercised—a coverage gap. PARTIAL
+- AC-6: Compatibility paths inspected, but no permitted historical run was available for an end-to-end replay—a coverage gap. PARTIAL
+- AC-7: No weight defect established in inspected changes; remaining code was not exhaustively checked for removable behavior—a coverage gap. PARTIAL
+- AC-8: Six feedback inventories inspected and corresponding fixes traced. Literal fixes generally hold, but sibling cases remain in findings B1, B2, B4, B6, B7 and B8. NOT MET
+- AC-9: Added scrubbing changes a quoted sibling path previously preserved, finding B5. No additional legitimate-input regression found in the inspected case-folding, exit-code or path-start changes; those implement stated platform distinctions or widen acceptance. NOT MET
+- AC-10: Inspected regression tests omit the reproduced sibling cases; the slash test explicitly asserts the defective exclusion. Findings B1–B8 identify the resulting behavior. NOT MET
+- H1: Ten injected Linux/macOS cases preserved exit codes and output within the drain grace, bounded held-open output, and reported successful group cleanup; timeout/stop arbitration also traced. REFUTED
+- H2: Inspected reviewer, delta, auditor and native-wrapper instructions contain the read restrictions and identify permitted inputs. REFUTED
+- H3: Successful injected group kills set the result flag and warning; absent groups do neither. No live PID-reuse experiment performed. REFUTED
+- H4: Missing files become incomplete, but empty and malformed files still produce COMPLETE; finding B4. PARTLY CONFIRMED
+- H5: Peer-family warnings work; eight other tested reserved-label shapes reach later refusal without warning; finding B7. PARTLY CONFIRMED
+- H6: Platform arguments produce Linux-sensitive and Windows/macOS-folded comparisons; Windows case variants were refused with the original supplied spelling. REFUTED
+- H7: Five of twelve alias spellings escaped scrubbing; quoted sibling names were also changed; findings B1 and B5. CONFIRMED
+- H8: Two-slash recognition is fixed and Windows network paths remain excluded; three-or-more-slash siblings remain missed; finding B8. PARTLY CONFIRMED
+- H9: Unlimited-timeout answer handling avoids killing exited children; finite timeout and signal paths still request it; finding B6. PARTLY CONFIRMED
+- H10: Ordinary block declarations survive later healthy declarations, but task-list and heading forms can remain falsely healthy; finding B2. CONFIRMED
+- H11: Aborted turns are refused and normal finished turns pass; latest turns without replies still pass existing output; finding B3. PARTLY CONFIRMED
+- H12: Normal phase-one, phase-two and auditor stop-note propagation traced through manifest/report generation; the finite-timeout branch instead loses the successful held-open-output classification; finding B6. PARTLY CONFIRMED
+- H13: Reported literal cases largely have fixes or accepted deviations; unclosed sibling variants remain as detailed above. PARTLY CONFIRMED
+- Repository validation passed. Syntax checks: 55 files, zero failures.
+- Four installed trees matched repository hashes: 100 files per pair-review tree, 104 per cross-review tree. Specified plugin-cache path absent.
+- Shared findings reviewed once; repository validation confirmed shared-copy parity.
+- Coverage: read fully—supplied 1,387-line diff, README, manifests, path helpers, native transcript reader and both scoped benchmark scripts; read partly—lifecycle, dispatch, staging, reporting, references, tests and six feedback files; not read—remaining reference and test bodies.
+- Disk-writing suites were not run under the no-scratch rule. Supplied preflight contains no Tier 2 execution. No files created, changed or deleted; all command sessions finished.
+Blocked: rg search: CommandNotFoundException; searches completed with built-in alternatives.
+web: 0 queries, 0 page fetches

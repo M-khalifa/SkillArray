@@ -54,9 +54,7 @@ export async function readChecklist(dir, name) {
 }
 
 function defaultRuntime(provider) {
-  if (Object.hasOwn(PROVIDERS, provider)) return PROVIDERS[provider].runtimes[0];
-  // opencode is the only runtime that accepts an uncatalogued provider.
-  return 'opencode';
+  return Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider].runtimes[0] : null;
 }
 
 function normalizeConfig(config, skill) {
@@ -79,19 +77,6 @@ function validateSeat(seat, role) {
       !EFFORT.test(seat.effort)) {
     throw new Error(`Invalid reviewer ${role}; supply explicit provider, runtime, model, and effort or default`);
   }
-  // An OpenCode model ID is provider/model; without this check, seat.provider is a free-standing
-  // label that dispatch never uses to route, so it can silently disagree with what the model ID
-  // actually invokes (e.g. provider "google" alongside model "anthropic/claude-opus-5").
-  if (seat.runtime === 'opencode') {
-    const slash = seat.model.indexOf('/');
-    const modelProvider = slash === -1 ? null : seat.model.slice(0, slash);
-    if (modelProvider === null || modelProvider.toLowerCase() !== seat.provider.toLowerCase()) {
-      throw new Error(
-        `Invalid reviewer ${role}; OpenCode model IDs are provider/model, "${seat.model}" does ` +
-          `not start with "${seat.provider}/"`
-      );
-    }
-  }
 }
 
 export function validateConfig(config, skill) {
@@ -108,14 +93,12 @@ export function validateConfig(config, skill) {
     }
     if (A.model === B.model) throw new Error('Pair review requires two distinct models');
   } else {
-    // Phase 1/2 dispatch only seat A through this harness (Claude) and seat B
-    // through a CLI (codex-dispatch.mjs or opencode-dispatch.mjs); no other
-    // layout has a defined dispatch path.
+    // Seat A is a Claude reviewer and seat B a Codex one; no other layout has a defined dispatch path.
     if (A.provider !== 'anthropic' || A.runtime !== 'claude') {
       throw new Error('Cross review requires seat A to run on the Claude harness (provider anthropic, runtime claude)');
     }
-    if (!['codex', 'opencode'].includes(B.runtime)) {
-      throw new Error('Cross review requires seat B to run through codex-dispatch.mjs or opencode-dispatch.mjs (runtime codex or opencode)');
+    if (B.runtime !== 'codex') {
+      throw new Error('Cross review requires seat B to run through codex-dispatch.mjs (provider openai, runtime codex)');
     }
     if (A.provider === B.provider) throw new Error('Cross review requires two different providers');
   }
@@ -129,7 +112,9 @@ export async function readConfig(file, skill) {
   let parsed;
   try { parsed = JSON.parse(raw.replace(/^\uFEFF/, '')); }
   catch (err) { throw new SyntaxError(`${file} is not valid JSON (${err.message}); fix it or run reset`); }
-  return validateConfig(parsed, skill);
+  // A file saved by an older version (an OpenCode seat, say) no longer validates: name it and the way out.
+  try { return validateConfig(parsed, skill); }
+  catch (err) { throw new Error(`${file} holds saved choices this version cannot use (${err.message}); run reset, then setup`); }
 }
 
 function emptyConfig(skill) {
@@ -176,8 +161,41 @@ const NATIVE_RUNTIME_OF_HOST = { 'claude-code': 'claude', codex: 'codex' };
 
 // The seats file preflight --host reads, built from a resolved configuration: an actor whose runtime is the host's own
 // is a native agent unless transport says cli; every other runtime runs through its CLI. The auditor repeats seat A unless --auditor names another model of the same provider.
-export function buildSeats(config, host, { transport = null, repoOnly = false, auditDepth = null, falsification = false, auditorModel = null, auditorEffort = null } = {}) {
-  if (auditDepth !== null && !['light', 'full'].includes(auditDepth)) throw new Error('--audit-depth must be light or full');
+// --env ROLE=NAME,NAME, --env-mode ROLE=filtered|inherit and --use-api-key ROLE (each once per role) as run.json env settings.
+export function seatEnv(options = {}) {
+  const out = {};
+  const roleOf = (role, flag) => {
+    if (!['A', 'B', 'auditor'].includes(role)) throw new Error(`${flag} takes a role first: A, B or auditor`);
+    return (out[role] ??= {});
+  };
+  const once = (env, key, flag, role) => {
+    if (env[key] !== undefined) throw new Error(`${flag} given twice for ${role}`);
+  };
+  for (const value of options.env ?? []) {
+    const m = /^([^=]+)=(.+)$/.exec(value);
+    if (!m) throw new Error('--env takes ROLE=NAME,NAME (variable names, never values)');
+    const env = roleOf(m[1], '--env');
+    once(env, 'pass', '--env', m[1]);
+    env.pass = m[2].split(',').map((s) => s.trim()).filter(Boolean);
+    const bad = env.pass.find((n) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(n));
+    if (bad !== undefined) throw new Error(`--env ${m[1]}: "${bad}" is not a variable name (names only, never NAME=value)`);
+  }
+  for (const value of options['env-mode'] ?? []) {
+    const m = /^([^=]+)=(filtered|inherit)$/.exec(value);
+    if (!m) throw new Error('--env-mode takes ROLE=filtered or ROLE=inherit');
+    const env = roleOf(m[1], '--env-mode');
+    once(env, 'mode', '--env-mode', m[1]);
+    env.mode = m[2];
+  }
+  for (const role of options['use-api-key'] ?? []) {
+    const env = roleOf(role, '--use-api-key');
+    once(env, 'apiKey', '--use-api-key', role);
+    env.apiKey = true;
+  }
+  return out;
+}
+
+export function buildSeats(config, host, { transport = null, repoOnly = false, falsification = false, auditorModel = null, auditorEffort = null, env = {} } = {}) {
   const nativeRuntime = NATIVE_RUNTIME_OF_HOST[host];
   if (!nativeRuntime) throw new Error('--host must be claude-code or codex');
   if (transport !== null && !['native', 'cli'].includes(transport)) throw new Error('--transport must be native or cli');
@@ -189,11 +207,23 @@ export function buildSeats(config, host, { transport = null, repoOnly = false, a
     transport: seat.runtime === nativeRuntime ? (transport ?? 'native') : 'cli',
   });
   const { A, B } = config.reviewers;
-  return {
+  const seats = {
     seatA: actor(A), seatB: actor(B),
     auditor: auditorModel === null ? actor(A) : { ...actor(A), model: auditorModel, effort: auditorEffort },
-    flags: { auditDepth: auditDepth ?? 'light', falsification, mode: config.mode, ...(repoOnly ? { repoOnly: true } : {}) },
+    flags: { falsification, mode: config.mode, repoOnly: repoOnly === true },
   };
+  // The auditor runs on seat A's provider, so it takes seat A's setting unless it has its own.
+  for (const [role, key] of [['A', 'seatA'], ['B', 'seatB'], ['auditor', 'auditor']]) {
+    const own = env[role] ?? (role === 'auditor' ? env.A : undefined);
+    if (!own) continue;
+    if (seats[key].transport !== 'cli') {
+      if (env[role]) throw new Error(`the environment options for ${role} apply to a CLI actor only; ${role} runs as a native agent (use --transport cli)`);
+      continue;
+    }
+    if (own.apiKey && seats[key].runtime !== 'claude') throw new Error(`--use-api-key ${role}: ANTHROPIC_API_KEY is for a Claude CLI actor; name the variable with --env ${role}=NAME instead`);
+    seats[key].env = { ...own };
+  }
+  return seats;
 }
 
 export async function writeConfig(file, config) {
@@ -214,10 +244,16 @@ export function parseOptions(argv) {
   const options = {};
   const allowed = ['a', 'b', 'a-effort', 'b-effort', 'a-provider', 'b-provider', 'a-runtime', 'b-runtime', 'mode'];
   if (command === 'checklists') allowed.push('name');
-  if (command === 'seats') allowed.push('host', 'transport', 'out', 'audit-depth', 'auditor', 'auditor-effort');
+  if (command === 'seats') allowed.push('host', 'transport', 'out', 'auditor', 'auditor-effort', 'env', 'env-mode', 'use-api-key');
+  const repeatable = command === 'seats' ? ['env', 'env-mode', 'use-api-key'] : [];
   if (rest.includes('--help') || rest.includes('-h')) return { command: '--help', options: {} };
   for (let i = 0; i < rest.length; i += 2) {
-    if (command === 'seats' && (rest[i] === '--repo-only' || rest[i] === '--falsification')) {
+    if (repeatable.includes(rest[i]?.replace(/^--/, '')) && rest[i].startsWith('--')) {
+      if (!rest[i + 1] || rest[i + 1].startsWith('--')) throw new Error(`${rest[i]} requires a value`);
+      (options[rest[i].slice(2)] ??= []).push(rest[i + 1]);
+      continue;
+    }
+    if (command === 'seats' && (rest[i] === '--repo-only' || rest[i] === '--falsification' || rest[i] === '--replace')) {
       const flag = rest[i].slice(2);
       if (options[flag]) throw new Error(`Duplicate option: ${rest[i]}`);
       options[flag] = true;
@@ -240,7 +276,7 @@ async function main() {
   if (command === '--help') {
     process.stdout.write('review-config.mjs show|catalog|setup|resolve|seats|checklists|reset\n' +
       'checklists [--name NAME]: lists your own bug checklists (<config dir>/checklists/NAME.md, one "- item" per line, never in the repository), or prints one so its items can go into the task packet as hypotheses.\n' +
-      'seats: --host claude-code|codex [--transport native|cli] [--repo-only] [--falsification] [--audit-depth light|full] [--auditor MODEL [--auditor-effort LEVEL]] [--out FILE] [--a MODEL --b MODEL --mode MODE, and the other resolve overrides, for this run only]: prints (or writes) the seats file preflight --host reads, built from the saved choices.\n' +
+      'seats: --host claude-code|codex [--transport native|cli] [--repo-only] [--falsification] [--auditor MODEL [--auditor-effort LEVEL]] [--env ROLE=NAME,NAME] [--env-mode ROLE=filtered|inherit] [--use-api-key ROLE] [--out FILE [--replace]] [--a MODEL --b MODEL --mode MODE, and the other resolve overrides, for this run only]: prints (or writes) the seats file preflight --host reads, built from the saved choices.\n' +
       'setup/resolve: --a-provider PROVIDER --a-runtime RUNTIME --a MODEL [--a-effort LEVEL] (same for B) [--mode MODE]\n' +
       'setup saves; resolve overrides for one run without saving; reset removes only this skill config.\n');
     return;
@@ -270,13 +306,30 @@ async function main() {
   const config = resolveConfig(saved, skill, options);
   if (command === 'seats') {
     if (!options.host) throw new Error('seats needs --host claude-code or --host codex');
-    const seats = buildSeats(config, options.host, { transport: options.transport ?? null, repoOnly: options['repo-only'] === true, auditDepth: options['audit-depth'] ?? null, falsification: options.falsification === true, auditorModel: options.auditor ?? null, auditorEffort: options['auditor-effort'] ?? null });
+    const seats = buildSeats(config, options.host, { transport: options.transport ?? null, repoOnly: options['repo-only'] === true, falsification: options.falsification === true, auditorModel: options.auditor ?? null, auditorEffort: options['auditor-effort'] ?? null, env: seatEnv(options) });
+    // The manifest's selection_source: "saved" when the seat's model came from the saved choices, "explicit" when this run
+    // chose another model, provider or runtime (an effort override alone keeps the saved model).
+    for (const role of ['A', 'B']) {
+      const overridden = ['', '-provider', '-runtime'].some((suffix) => options[`${role.toLowerCase()}${suffix}`] !== undefined);
+      seats[`seat${role}`].selectionSource = saved !== null && !overridden ? 'saved' : 'explicit';
+    }
     const text = JSON.stringify(seats, null, 2) + '\n';
+    // A field run on Codex's default effort got a 61-second pass with one claim, and Codex does not report the effort it chose.
+    for (const role of ['A', 'B']) {
+      const seat = seats[`seat${role}`];
+      if (seat.runtime === 'codex' && seat.transport === 'cli' && !seat.effort) {
+        process.stderr.write(`review-config: WARNING: seat ${role} (codex) runs on Codex's default effort, which the rollout does not report; set one with --${role.toLowerCase()}-effort high if the review needs depth\n`);
+      }
+    }
+    // A native agent starts with whatever the host loads into every agent (the user's global instructions, memory).
+    const native = [['seat A', seats.seatA], ['seat B', seats.seatB], ['the auditor', seats.auditor]].filter(([, s]) => s?.transport === 'native').map(([n]) => n);
+    if (native.length > 0) process.stderr.write(`review-config: note: ${native.join(', ')} ${native.length === 1 ? 'runs as a native agent and also sees' : 'run as native agents and also see'} the host's own instructions and memory (told to treat them as unchecked context); use --transport cli where that matters\n`);
     if (options.out) {
       try {
-        await fs.writeFile(path.resolve(options.out), text, { flag: 'wx' });
+        // --replace: switching a seat's transport before preflight; run.json keeps its own copy, so a run already started is unchanged.
+        await fs.writeFile(path.resolve(options.out), text, { flag: options.replace === true ? 'w' : 'wx' });
       } catch (err) {
-        if (err.code === 'EEXIST') throw new Error(`${path.resolve(options.out)} already exists and is never overwritten: choose a new --out path`);
+        if (err.code === 'EEXIST') throw new Error(`${path.resolve(options.out)} already exists: choose a new --out path, or add --replace to overwrite it`);
         throw err;
       }
       process.stdout.write(JSON.stringify({ seatsFile: path.resolve(options.out) }) + '\n');

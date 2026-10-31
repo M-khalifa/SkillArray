@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Mechanical backing for review-protocol.md's blind exchange: relabels claim IDs,
 // scans for vendor/model self-identification, and coin-flips the Phase 3 audit
 // mapping. Without this, "blind review" was orchestrator-followed prose only.
@@ -10,13 +9,16 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { headingTags as readHeadingTags, packetCriteria } from './build-report.mjs';
-import { comparablePath, isInsidePath, isMainModule, pathSpellingsOf } from './path-utils.mjs';
+import { generatorLine, headingTags as readHeadingTags, packetCriteria } from './build-report.mjs';
+import { extractSection, runDirNamedIn } from './build-brief.mjs';
+import { comparablePath, foldsCase, GIT_C_LOCALE, gitRepoFromProbe, isInsidePath, pathSpellingsOf, scrubDir } from './path-utils.mjs';
+import { makeIo, refuseDirectRun, runStep as runStepWith, StepExit } from './step-io.mjs';
 
 class RelayError extends Error {}
+const io = makeIo();
 
 function log(msg) {
-  process.stderr.write(`blind-relabel: ${msg}\n`);
+  io.err(`blind-relabel: ${msg}\n`);
 }
 
 // A UTF-8 BOM (PowerShell Set-Content -Encoding utf8 writes one) breaks JSON.parse and every
@@ -29,494 +31,14 @@ async function readUtf8(filePath) {
   return stripBom(await fs.readFile(filePath, 'utf8'));
 }
 
+// The protocol copy staged for the auditor holds only the sections it works from: the full file's scope, model-identity and
+// manifest examples name the vendors and models, which the auditor must not learn.
+const AUDITOR_PROTOCOL_SECTIONS = ['## Three label layers', '## Evidence and findings: reviewer-authored fields', '### Web verification: reviewer rules', '## Interaction modes',
+  '## Synthesis: adjudication-added fields', '## Falsification pass', '## Canonical findings', '## findings.json', '## Fresh-context auditor'];
+export function auditorProtocol(text) {
+  return `# Review protocol: the auditor's sections\n\n${AUDITOR_PROTOCOL_SECTIONS.map((h) => extractSection(text, h)).join('\n\n')}\n`;
+}
 const PROTOCOL_PATH = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'references', 'review-protocol.md');
-
-const USAGE = `blind-relabel.mjs — relabel, scan, and coin-flip for review-protocol.md's blind exchange.
-
-Usage:
-  node blind-relabel.mjs relabel --in <path> --out <path> --from <A|B|P> --to <P|X|Y> [--phase1-dir <path>]
-  node blind-relabel.mjs scan --in <path> [--target-dir <path>] [--source-dir <path>]... [--tokens t1,t2,...]
-    [--phase1-dir <path> --forbid-seats <A|B|A,B>] [--phase2-dir <path>] [--target-urls <file>]
-  node blind-relabel.mjs flip --out <path>
-  node blind-relabel.mjs translate --in <path> --out <path> --mapping <path> [--phase1-dir <path>] [--verification-dir <path>]
-  node blind-relabel.mjs validate --phase1-dir <path> [--seat A|B] [--target-dir <path>] [--source-dir <path>]... [--packet <task-packet.md>]
-  node blind-relabel.mjs append-rebuttals --in <raw rebuttals, P ids> --onto <peer's phase1 file>
-    --rebutter <A|B> --peer-view <phase2 peer-view the rebutter saw> [--target-dir <path>] [--source-dir <path>]...
-  node blind-relabel.mjs audit-prep --phase1-dir <path> --mapping <flip json> --out-dir <path>
-    --target-dir <path> [--source-dir <path>]... [--tokens t1,t2,...] [--phase2-dir <path>] [--packet <task-packet.md>]
-  node blind-relabel.mjs splice --file <findings.md> (--match-heading "## A3" | --match-line <exact line> | --match-line-file <file>)
-    (--with <file> | --with-result <dispatcher result.json>)
-  node blind-relabel.mjs clear-cache
-  node blind-relabel.mjs -h | --help
-
-scan, append-rebuttals, audit-prep and translate also accept --checklist NAME (repeatable);
-validate accepts it too and ignores it.
-Every file read here tolerates a leading UTF-8 BOM.
---source-dir (repeatable) is another repository the task packet quotes by path. It adds that
-repository's text to the claim-ID/peer-label target-derived exemption below, and nothing else:
-vendor-token and seat-vocabulary exemptions still come from --target-dir only, so a CLAUDE.md in a
-quoted repository never exempts "Claude" in prose. A missing --source-dir is an error.
-
-relabel:
-  Rewrites heading and prose occurrences of the REAL "<from><N>" claim IDs
-  (e.g. A1, B12) to "<to><N>" (numbers are kept, so P<n> -> A<n> is the
-  identity on numbers), and any "# Seat <from> findings" header to
-  "# Peer findings". A real claim ID is one this file itself declares -- a
-  "## <from><n>" or "### <from><n>" heading or a "Claim: <from><n>" line
-  (raw line, fence-skipped) -- plus, with --phase1-dir (only for --from A|B),
-  every such ID in that seat's own <from>-findings.md there. A Phase 3 second
-  pass (--from <peer letter>) needs --phase1-dir, since the peer's IDs appear
-  in this file only as prose cross-references. Any other claim-ID-shaped token
-  (a product name like A100/B200, a cell reference, an A10 when no claim A10
-  exists) is left untouched. Residual: a token shaped like a claim ID that is
-  not a real claim (e.g. a hallucinated "A99") is therefore no longer
-  rewritten, and scan --forbid-seats (which checks only real heading IDs) does
-  not flag it either.
-  Text inside fenced code blocks and inline code spans is left untouched, so
-  claim IDs referenced there (a rare but real case) do not relabel; never put
-  a claim ID inside an Evidence fence for this reason. Fences follow CommonMark:
-  an opening fence is a run of 3+ backticks OR 3+ tildes; the closing fence must
-  use the SAME character and be at least as long, so a \`\`\` line inside a
-  \~\~\~-opened block (or a longer backtick run) is fenced content, not a
-  delimiter -- a shorter or differently-charactered "close" does not end the
-  fence. Inline code follows the same rule: a run of N backticks opens a span
-  that closes only at the next run of exactly N backticks; an unmatched run is
-  literal text, not code. A backslash-escaped backtick (\\\`) is literal
-  punctuation, not a delimiter, per CommonMark 6.1 -- it never opens a span, so
-  text like \\\`Codex\\\` stays scannable prose; this escape-awareness applies
-  only to finding a span's OPENING delimiter, never to matching its closer
-  (CommonMark: backslash escapes do not work inside an already-open code span).
-  Known limitation: inline code spans are matched WITHIN A SINGLE LINE only,
-  unlike CommonMark's real grammar, which allows a span to cross a line ending
-  (converted to a space in the rendered span). An opening backtick run with no
-  closing run on the SAME line is therefore left as literal text on that line
-  -- this over-scans and over-relabels a genuine multiline span (its claim IDs
-  get relabeled, its identity tokens get scanned), the fail-safe direction for
-  a blind, never the reverse. A real multiline-span implementation is deferred
-  (see phase-2-cross-examination.md's residual limitations) because a naive "span stays open until the next
-  matching run, across lines" parser would create a NEW blinding bypass: an
-  unclosed backtick anywhere lets a stray later backtick on an unrelated line
-  close a span that swallows real headings and claim IDs in between, hiding
-  them from relabel/scan -- the unsafe direction. Writes --out; does not
-  modify --in. An unterminated fenced code block (missing the matching closing
-  fence) exits nonzero and writes nothing, same as scan below.
-
-scan:
-  Reads --in, strips fenced/inline code, and checks the remaining prose for
-  vendor/model tokens (claude, anthropic, codex, openai, gpt-, opencode,
-  fable, opus, sonnet, haiku) and runtime tool names (SendMessage,
-  spawn_agent), plus any --tokens (comma-separated, case-insensitive) supplied
-  for this run -- the actual configured model/provider strings, e.g.
-  "gpt-5.6-sol,google/gemini-3-pro" -- and for a seat-letter mention (Seat A,
-  Reviewer A, seat a, reviewer a, ... -- case-insensitive on the letter).
-  A known false-positive shape: ordinary prose like "gives the reviewer a
-  chance" also matches (self-identification or identity tier, depending on
-  whether a first-person marker is nearby); this costs one redaction round
-  and is accepted, since a missed lowercase leak would otherwise defeat the
-  blind silently. Three tiers:
-    - Self-identification (first person near a token or seat letter, e.g.
-      "as Codex I ran" or "As seat A, I found..."): exit 1, listed as
-      SELF-IDENTIFICATION on stderr.
-    - Any other non-target-derived identity mention -- third person included,
-      e.g. "The Codex reviewer found this" or "Reviewer A found the issue":
-      ALSO exit 1, listed as IDENTITY on stderr. This tier exists because
-      third-person identity prose is as real a leak as first-person self-ID;
-      only first person gets its own separate label since it is the strongest,
-      most direct signal.
-    - A target-derived vendor/model token mention (e.g. a target file named
-      codex-dispatch.mjs, or a target's own SKILL.md naming its supported
-      providers), OR a seat-letter mention when the target's own SKILL.md or
-      references/*.md themselves use seat vocabulary (the target IS a review
-      protocol like this one, so "seat A" in prose is target terminology, not
-      an identity leak): exit 0, listed on stderr for the orchestrator's own
-      review. --target-dir marks a vendor token (built-in or supplied via
-      --tokens) as target-derived only when it also appears in that
-      directory's own file names, SKILL.md, or references/*.md content; the
-      seat-vocabulary exemption is separate and content-based (never
-      name-based, since a bare letter would false-positive constantly against
-      filenames), checked only against the target's own SKILL.md/references
-      prose.
-  A third-person vendor/model mention whose every occurrence sits inside a
-  longer chunk quoted verbatim from the --target-dir text (the whole model
-  word, e.g. "GPT-5.4", must be followed or preceded by more target text, as
-  in "GPT-5.4/5.5"), or whose 20+ character line is target text, is reported
-  as target-derived instead. First-person self-identification never is; its
-  word gap may span a dot inside a version number ("GPT-5.4/5.5 I checked").
-  Residual limitation: writing style, structure, or phrasing can still hint at
-  identity; this check catches literal token/seat-mention co-occurrence only.
-  The target-derived exemption is token-global (does not distinguish "this
-  specific occurrence cites the target" from "this token merely occurs
-  somewhere in the target"), a known limitation, not contextual. Like relabel,
-  inline code span matching is single-line only (see relabel above); a
-  multiline span's identity tokens are scanned as prose rather than exempted
-  as code -- fail-safe (over-scans), never a leak. An
-  unterminated fenced code block (missing a same-character, same-or-longer
-  closing fence, per CommonMark) exits nonzero rather
-  than silently skipping every line after it as if it were code.
-  (With --phase1-dir and --forbid-seats) Additionally checks the RAW text,
-  fenced content INCLUDED (unlike the vendor/seat check above, which exempts
-  fences), for each forbidden seat's own real claim IDs -- the exact
-  enumerable set from that seat's actual Phase 1 headings, via
-  extractClaimHeadings, never a generic \\b[A-Z]\\d+\\b pattern that would
-  false-positive on a legitimate target-code identifier, hex digest, or cell
-  reference. A hit (e.g. "my A4" surviving inside an Evidence fence after an
-  A-to-P/A-to-X relabel) is a hard stop, same exit and same "return for
-  redaction" outcome as a self-identification hit -- this closes
-  relabelText's own documented "never put a claim ID inside an Evidence
-  fence" limitation mechanically. --forbid-seats takes the seat letter(s)
-  whose real IDs must not survive in THIS file: the source seat only for a
-  Phase 2 peer-view (e.g. --forbid-seats A when scanning the A-to-P relabeled
-  file seat B will read), both seats for a Phase 3 double-relabeled X/Y file
-  (--forbid-seats A,B). --phase1-dir and --forbid-seats must be supplied
-  together or not at all.
-  Vendor/--tokens matching is word-bounded ("affable" never hits "fable",
-  "octopus" never hits "opus"); a token glued to punctuation such as
-  codex-dispatch.mjs still counts as a mention. With --target-dir on a git
-  work tree, the exempt names come from "git ls-files --cached --others
-  --exclude-standard" (so a branch name under .git/ or an ignored install
-  tree never exempts a token); otherwise the directory walk skips .git/ and
-  node_modules/.
-  (With --phase2-dir) Hard stop, same exit as a claim-ID leak: any P<n> token,
-  fence content included, whose number is a claim ("## P<n>" heading) in that
-  run's peer-view-for-A.md / peer-view-for-B.md -- a stale Phase 2 label
-  points at the other letter's claim. Run it on every Phase 3 file.
-  Target-derived claim-ID exemption (--forbid-seats and --phase2-dir hits, and
-  the same checks in validate, append-rebuttals, and audit-prep): with
-  --target-dir, a hit on token T in line L is reported as a non-blocking
-  "target-derived" line instead of a hard stop when EVERY occurrence of T on L
-  either (a) sits inside a larger CHUNK (the non-whitespace run around T, with
-  quote/backtick/bracket/paren/comma/period characters trimmed from both ends)
-  that occurs verbatim in the target, e.g. a hardware ID "20:00:00:25:B5:00:00:0A",
-  "df -B1", or "P0-P4"; or (b) L itself, with leading ">" quote markers and
-  surrounding backticks stripped, is at least 20 characters and occurs verbatim
-  in the target (a quoted docstring line "P1 scope ... is P2"). The target text
-  is every file in the same file set as above (git-listed, or walked skipping
-  .git/ and node_modules/), skipping files over 2 MB or containing NUL, in
-  --target-dir and every --source-dir; it is read once and cached in
-  <os tmp>/skillarray-exempt-cache-<user> (SKILLARRAY_EXEMPT_CACHE_DIR
-  overrides), keyed by every file's size, mtime and ctime plus, for git, HEAD,
-  git status and the bytes of changed files, so later commands skip the read
-  until something changes. The cache is used only from a directory this user
-  owns with no group/other access (POSIX); files are created 0600; one entry is
-  kept per target and entries older than a week are dropped. A bare token
-  in reviewer prose ("see A2", "as P7 says", "A2/A3" when that chunk is not in
-  the target) still hard-stops, and without --target-dir or --source-dir
-  nothing is exempt. Residual: a real leak whose exact chunk or 20+ character
-  line happens to also occur in the target passes as target-derived; each
-  --source-dir adds text, so the chance grows with every repository added.
-  (With --target-urls <file>, one URL per line) Every URL in the scanned text,
-  fences included, that matches a listed URL after normalization (lowercase
-  scheme/host, fragment dropped, trailing slash dropped) is reported as a
-  TRUST-BOUNDARY line on stderr. Non-blocking: it never changes the exit code;
-  the orchestrator resolves each one (was a target-embedded URL fetched?).
-
-flip:
-  Writes --out (a JSON file) with a coin-flipped { "A": "X", "B": "Y" } or
-  { "A": "Y", "B": "X" } mapping. Read it for the manifest only; never show
-  it to the auditor.
-
-translate:
-  Rewrites the fresh Phase 3 auditor's canonical-findings JSON (--in) back to
-  real A/B claim IDs using --mapping (the flip mapping from the "flip"
-  subcommand above), and writes --out. Only structured ID fields are
-  rewritten: id, origins[], peer_responses[].claim, verifications[].claim,
-  basis_from. Every other string is copied verbatim, never ID-rewritten --
-  the documented pass-through prose fields are summary, recommended_fix,
-  title, priority, auditor_check.reason, and suggested_fix (plus evidence and auditor_check.evidence,
-  which are captured output). Refuses when any non-evidence prose string
-  contains one of this run's anonymous origin IDs (the X<n>/Y<n> origins in
-  --in, plus every Phase 1 claim's anonymous form with --phase1-dir) or any
-  P<n> token: such a label would ship unresolved. Derives each finding's
-  "independently_discovered" field mechanically from whether its translated
-  origins span both seat letters -- never trusts the auditor's own claim about
-  this. Refuses (writes nothing) on: invalid JSON; a malformed or hand-edited
-  mapping; an origin that fails to translate to a real A<n>/B<n> ID; (with
-  --phase1-dir) an origin whose claim ID has no matching heading in that
-  seat's real Phase 1 findings file (headings are a structural property of
-  each RAW line -- fence-skipped but never inline-code-stripped first, so a
-  "## A99" inside a fenced Evidence excerpt, or a heading-shaped string only
-  reachable by first removing a preceding inline-code span, never counts as a
-  real heading), catching a hallucinated claim ID; (also
-  with --phase1-dir) a real Phase 1 claim from EITHER seat that appears as
-  the origin of no finding at all, catching a claim the auditor silently
-  dropped; a finding id not of the form F<n>, or a duplicate one; the same claim ID
-  appearing as an origin of more than one finding; a peer_responses array that
-  does not exactly match its finding's origins, or whose claim is not a
-  non-empty string; missing evidence, or evidence that is not a non-empty
-  array of non-empty strings ("no evidence, no finding" enforced mechanically);
-  any of severity, basis, evidence_strength, final_state, or a
-  peer_responses[].response outside the exact enum review-protocol.md defines;
-  a missing auditor_check object, an auditor_check.result outside
-  CONFIRMED/REFUTED/INCONCLUSIVE/NOT_CHECKED, a non-null basis/evidence when
-  NOT_CHECKED, a HIGH/CRITICAL finding (severity as derived with
-  --phase1-dir) left NOT_CHECKED without a non-empty auditor_check.reason
-  unless its final_state is dropped-speculative, an auditor_check.reason that
-  is present but not a non-empty string, a missing/empty evidence otherwise, or an auditor_check.basis
-  not one of the same basis enum used elsewhere (EXECUTED/STATIC_TRACE/
-  SOURCE_CITATION/INFERENCE); a final_state of settled-refuted with no
-  refutation provenance (no disputed-with-counter-fact peer_responses entry,
-  no auditor_check.result of REFUTED, and no verifications[] entry of
-  REFUTED), OR with an auditor_check.result of CONFIRMED (the auditor cannot
-  both independently confirm a claim and settle it as refuted, even when a
-  peer counter-fact exists); a final_state of settled-agree with no agreement
-  provenance (independently_discovered is not true, no peer_responses entry
-  is conceded, and no verifications[] entry is CONFIRMED -- note
-  auditor_check.result of CONFIRMED ALONE is NOT sufficient provenance here,
-  unlike settled-refuted's auditor_check REFUTED route, since
-  review-protocol.md's settled-agree definition has no equivalent clause), OR
-  with an auditor_check.result of REFUTED, OR with any peer_responses entry
-  of disputed-with-counter-fact UNLESS a verifications[] entry for that same
-  finding is CONFIRMED (a specific counter-fact contradicts "both sides
-  align" unless a falsification verifier already independently checked and
-  confirmed the claim anyway -- the protocol's own designated mechanism for
-  settling a disputed claim in its favor);
-  a final_state of dropped-speculative
-  unless evidence_strength is SPECULATIVE, independently_discovered is false,
-  no peer_responses entry disputed it, auditor_check.result is not CONFIRMED
-  or REFUTED, and verifications[] is empty (dropped-speculative means
-  "SPECULATIVE, neither corroborated nor attacked, nor independently
-  checked by a falsification verifier", checked mechanically, not trusted
-  from the auditor's own classification -- a verifications[] entry existing
-  at all means a verifier ran, regardless of the verdict it reached); any
-  CONFIRMED verifications[] verdict (on any origin, for any finding) paired
-  with final_state settled-refuted, or any REFUTED verdict paired with
-  settled-agree (review-protocol.md's Canonical findings section groups
-  claims into one F only when they assert the SAME defect, so one origin's
-  verdict speaks for the finding as a whole, not only for that origin); a
-  verifications[].claim that is not one of
-  its finding's origins, a duplicate one, or not a non-empty string; a
-  verifications[].verdict outside CONFIRMED/REFUTED/INCONCLUSIVE (the auditor
-  supplies only claim+verdict here -- basis and evidence are never trusted
-  from the auditor's JSON, see below); a finding with a non-empty
-  verifications array when --verification-dir was not supplied (this
-  mechanism is not opt-out: the verifier file, not the auditor's JSON, is
-  authoritative for a verification record, so it cannot be validated without
-  the directory); (with --verification-dir) a cited verification file that
-  does not exist on disk, a verification-*.md file on disk that no finding
-  cites, a verification file missing a "Claim:", "Verdict:", "Basis:" (one of
-  the same basis enum as above), or "Evidence:" line (everything from
-  "Evidence:" to end of file is the evidence body, preserved verbatim except
-  for the single structural blank line immediately after "Evidence:" and any
-  trailing blank line(s) from the file's own terminator -- interior
-  indentation and interior blank lines are untouched, so a
-  "Verdict:"-shaped line inside the evidence text is body content, not a
-  second header line), a verification file's own "Claim:" line naming a
-  different claim than its filename, or a finding's asserted
-  verifications[].verdict disagreeing with what its verification file's own
-  "Verdict:" line says (the verifier's file is authoritative for its ENTIRE
-  record -- claim, verdict, basis, AND evidence, never the auditor's
-  transcription of it; translate populates verifications[].basis and
-  verifications[].evidence from the file, discarding whatever the auditor's
-  JSON supplied). This is the ONLY supported way to produce
-  findings.json; never hand-transcribe the auditor's X/Y output into real IDs.
-  (With --phase1-dir) A canonical finding's severity/basis/evidence_strength/
-  evidence are recomputed mechanically from its own origins' real Phase 1
-  claim blocks and OVERWRITE whatever the auditor's JSON supplied for these --
-  same authority precedent as verifications[] over the verifier file above.
-  severity takes the single strongest value among the finding's origins,
-  independently (CRITICAL>HIGH>MEDIUM>LOW) -- severity is a property of
-  impact, not evidence quality, so a finding is never underreported just
-  because its most-severe origin had middling evidence. basis and
-  evidence_strength are DIFFERENT: they are copied together, as a PAIR, from
-  the single "strongest-evidenced origin" (review-protocol.md's own phrase),
-  never independently maximized per field -- doing so can synthesize a
-  (basis, evidence_strength) combination no origin ever actually asserted
-  (e.g. one origin EXECUTED+SUPPORTED, another STATIC_TRACE+REPRODUCED,
-  independent-per-field-max wrongly reports EXECUTED+REPRODUCED, overclaiming
-  the finding's real evidentiary strength beyond what either origin
-  established). The strongest-evidenced origin is chosen by basis first
-  (EXECUTED>STATIC_TRACE>SOURCE_CITATION>INFERENCE), evidence_strength as the
-  tiebreak (REPRODUCED>DETERMINISTIC>SUPPORTED>PLAUSIBLE>SPECULATIVE), then
-  origins[] array order as a final deterministic tiebreak. The chosen
-  origin's real ID is recorded as a new "basis_from" field, so which origin
-  the pair came from is explicit in the artifact, not just inferable from
-  the rule. evidence becomes one verbatim entry per origin, in origins[]
-  order, extracted from each origin's own Evidence fence (same
-  structural-blank-trim rule as a verification file's Evidence: body). The
-  body ends at the fence's closing line, or at the end of a group of fences
-  separated only by blank lines; fence delimiter lines are never content.
-  Unfenced evidence ends at the next heading, thematic break, or
-  "Suggested fix:" line. suggested_fix becomes one "<origin-id>: <text>" entry
-  per origin whose block has a "Suggested fix:" line (empty array if none);
-  that line never enters evidence.
-  --audit-depth light|full (default light) is the depth the auditor brief was
-  built with (build-brief.mjs --audit-depth) and is recorded as findings.json's
-  top-level "audit_depth". Under full, every finding left NOT_CHECKED (other
-  than dropped-speculative) needs auditor_check.reason, at any severity.
-  Without --phase1-dir, the auditor's own severity/basis/evidence_strength/
-  evidence are trusted as before (no basis_from field is added in that case)
-  -- this recomputation is opt-in via the same flag as the origin-coverage
-  checks above, not a separate flag.
-
-validate:
-  Checks every claim block ("## A<n>"/"## B<n>" through the next heading or
-  EOF) in BOTH seats' real Phase 1 files under --phase1-dir for a recognized
-  "Severity:", "Basis:", "Evidence strength:", and a non-empty "Evidence:"
-  body -- the same completeness check translate's --phase1-dir derivation
-  requires of every ORIGIN claim, run here on every claim up front, before
-  any finding cites it. Also rejects: a claim-like heading that does not
-  match the exact "## A<n>"/"## B<n>" form (e.g. a bare "## 1" -- a model
-  that ignores the claim-ID schema must never be silently read as zero
-  findings, since both parse to zero real claim blocks); a real claim ID
-  heading appearing more than once in the same file (the second block would
-  otherwise silently overwrite the first for mechanical derivation, so the
-  first occurrence is kept and the duplicate is reported, never merged); a
-  claim heading using the OTHER seat's letter (e.g. "## B1" inside
-  A-findings.md); and a seat with zero recognized claim headings AND zero
-  claim-like malformed-heading attempts that does not also contain the exact
-  literal marker "## No findings" under its own seat header -- an empty or
-  unparseable file is never treated as a legitimate zero-findings verdict on
-  its own; ordinary prose like "(no findings)" does NOT satisfy this, only
-  the exact marker heading does. Also checks every raw "## Rebuttals..."
-  line (once a Phase 2 rebuttal exists) against the exact required form
-  "## Rebuttals (from <A|B>) of <A|B> claims" -- matching relabel's own
-  rebuttalHeading regex exactly, since a looser match here would pass a
-  heading relabel itself does not recognize -- and rejects a seat naming
-  itself as its own rebutter ("(from A) of A"). Deliberately does NOT
-  enforce which file a rebuttal heading is appended to: placement is
-  standardized in prose (review-protocol.md and phase-2-cross-examination.md:
-  onto the PEER's file), but relabel itself is placement-agnostic (it
-  relabels a seat's letter wherever the heading appears), so validate only
-  rejects the universally-invalid case above rather than enforcing
-  placement itself. Lists every problem across every claim (not
-  just the first), then exits nonzero. A nonzero exit means: return the
-  affected seat's file to that seat's OWN context for reformatting --
-  restate the required field lines (or the "## No findings" marker), change
-  nothing else -- same procedure as a scan redaction round, never a hand
-  edit. Run this at the Phase 1 gate (before Phase 2 delta briefs are built),
-  again after Phase 2's rebuttals are appended (before Phase 3's double
-  relabel, since that is the only point the rebuttal-heading check above can
-  fire), and again after any reformatting round. A CommonMark thematic break
-  (bare ---/***/___, 3+ chars) between claims is recognized as a claim
-  boundary the same way a heading is, so a real reviewer's own paragraph
-  separator does not corrupt evidence capture.
-  Rebuttal entries inside a "## Rebuttals (from <S>) of <T> claims" section
-  MUST use "### <id>" headings (or none). A claim-shaped "##" heading inside
-  such a section (e.g. "## P71", or a "## A1" duplicating a real claim) is
-  reported against the REBUTTING seat <S>, which wrote it -- return that
-  section to <S>, not to the file's owner. The section runs to the next "##"
-  heading that is neither claim-shaped nor another rebuttal heading.
-  Also rejects any of the run's real claim IDs (both seats' "## A<n>"/"## B<n>"
-  headings) inside a fence or inline code span, since relabel never rewrites
-  code and the ID would leak through the blind. Each is returned to the file's
-  own seat, or to the rebutting seat inside a rebuttal section. With
-  --target-dir, the target-derived exemption described under scan applies.
-  --seat A|B checks only that seat's file, so a seat that finished early (or
-  whose peer failed) can be gated at once; the other seat's claim IDs are not
-  known then, so run the full two-seat validate once both files exist.
-
-append-rebuttals:
-  Persists one seat's Phase 2 rebuttals onto the peer's Phase 1 file. --in is
-  the rebutter's raw output using P ids; --onto must be the peer's
-  "<peer>-findings.md"; --peer-view is the phase2 peer-view the rebutter saw.
-  Normalizes "## P<n>" entry headings to "### P<n>", then refuses (listing
-  every problem, --onto left unchanged) unless every "## P<n>" claim in
-  --peer-view is covered by exactly one entry (a "##"/"###" P<n> heading or a
-  "Claim: P<n>" line) with an "Action: CONCEDE" or "Action: DISPUTE" line.
-  Also refuses: an entry for a P id not in --peer-view; a heading and Claim
-  line naming different ids; a P token inside a fence or inline code span
-  whose number is a peer-view claim (relabel never rewrites code, so it would
-  leak into Phase 3, unless target-derived per scan's rule when --target-dir
-  is given); a "## Rebuttals" line in --in; an --onto that already has this
-  section. Relabels P -> the peer letter (real-ID rule above, widened with the
-  peer-view's claims), appends a blank line, the exact
-  "## Rebuttals (from <rebutter>) of <peer> claims" heading, a blank line and
-  the entries, then runs validate's checks on --onto's directory with the new
-  content. Writes --onto atomically (temp file + rename) only when all pass.
-
-audit-prep:
-  The whole Phase 3 double relabel in one step. Reads the flip --mapping and
-  both seats' files under --phase1-dir (they must pass validate), relabels
-  each seat's own letter then the peer letter (a second pass with nothing to
-  rewrite, e.g. zero rebuttals, is fine here), and scans each result with
-  --target-dir/--tokens, --forbid-seats A,B, and (when given) --phase2-dir.
-  All work is in memory; nothing is written to --phase1-dir or next to the
-  mapping. Only when both scans are clean does it write exactly
-  "<label>-findings.md" for both seats into --out-dir, plus, with --packet,
-  a byte-exact "task-packet.md" copy and this skill's own
-  "review-protocol.md" (so nothing is copied by hand after a failed try).
-  Refuses when --out-dir already contains any file or equals --phase1-dir or
-  the mapping file's folder; a retry needs a new empty folder. On any scan
-  hit, or an unreadable --packet, it prints the problem, writes nothing,
-  exits nonzero.
-  On success it also prints one JSON line
-  {"falsificationBreakdown":{"high_or_critical","disputed","conceded","unaddressed","disputed_ids":["X2", ...]}}:
-  HIGH/CRITICAL claims of both seats, split by the peer's rebuttal Action
-  (an entry without a CONCEDE/DISPUTE Action, or no entry, is unaddressed).
-  --breakdown-out <file> also writes that line to a file (outside --out-dir)
-  for build-manifest.mjs --falsification, so the numbers are never retyped.
-
-splice:
-  Puts a seat's redacted text back into its file, so the orchestrator never
-  hand-edits seat text. --match-heading "## A3" replaces that claim block:
-  the one heading line starting with it (not "## A30"), up to the next
-  heading of the same or higher level or an unfenced "---" break (kept),
-  keeping the blank lines before it. The replacement must start with the
-  same heading, hold no other such heading or "---" break, and, for a claim
-  heading, parse as one claim block with Severity/Basis/Evidence strength/
-  Evidence (prose after the Evidence fence is allowed, as in any claim).
-  --match-line replaces the one line equal to it, fences included
-  (for a single leaked Evidence line); an empty replacement deletes it. Repeat
-  --match-line and --with in pairs (same order) to fix several lines in one
-  call; every pair must apply or the file is left unchanged.
-  --match-line-file <path> takes the exact line from a UTF-8 file (one
-  trailing newline dropped; a file with more than one line is refused), so a
-  line with double quotes needs no shell escaping; it pairs with --with like
-  --match-line, and the two options can be mixed. The
-  replacement is --with <file> or a dispatcher --with-result's finalMessage,
-  with leading/trailing blank lines dropped and the file's own line ending.
-  Refuses (file unchanged) on zero or several matches, an unterminated
-  fence before or after, text before the heading, or a malformed claim.
-  Writes atomically. Re-run validate and scan afterwards.
-
-scorecard:
-  Prints the Phase 3 scorecard (phase-3-scorecard.md) from a translated
-  findings.json (--in): a totals line per final_state, then one table row per
-  finding with its title (or summary), origins, independently_discovered,
-  severity, basis, evidence strength, peer responses (with any falsification
-  verdict), auditor_check.result, final_state and a Note saying why an
-  unresolved or refuted finding ended that way, plus the audit depth when
-  the file records one, all copied from the file,
-  never recomputed. --out writes it to a file instead of stdout. With
-  --phase1-dir, a Hypotheses column lists the bracketed tags ("[H3]",
-  "[CHK-2]") in each origin claim's own heading, for a packet that gives the
-  seats a numbered list to confirm or refute. Refuses a
-  finding whose origins are not real A<n>/B<n> IDs (run translate first).
-
-Outside checklist labels (--checklist NAME, repeatable; scan, append-rebuttals,
-audit-prep, translate; validate accepts and ignores it, since it never checks P
-labels): a P-number written directly after a declared name
-("CHK-P1", "CHK-P1-P3", "CHK-P1–P3") is not a Phase 2 peer label. Without
---checklist nothing is exempt; any other word ("OK-P3", "see-P3") or a spaced
-range tail ("CHK-P1 - P7") is still checked. append-rebuttals' P -> peer-letter
-rewrite leaves a declared label unchanged, and the target-derived check still
-sees the unmasked line. NAME is 2-16 upper-case letters or digits, starting
-with a letter. Residual: a seat that writes a real peer reference as
-"CHK-P3" passes when CHK is declared.
-
-clear-cache:
-  Deletes this user's cached target text (see the target-derived exemption
-  above). Run it in the review's cleanup step.
-`;
-
-// USAGE's command lines for one subcommand (with their continuation lines), or every
-// command line when the subcommand is unknown.
-function shortUsage(sub) {
-  const lines = USAGE.split('\n');
-  const out = [];
-  let keep = false;
-  for (const line of lines) {
-    if (/^\s*node blind-relabel\.mjs /.test(line)) keep = !sub || !lines.some((l) => l.includes(`blind-relabel.mjs ${sub} `)) || line.includes(`blind-relabel.mjs ${sub} `);
-    else if (!/^\s{4,}\S/.test(line)) keep = false;
-    if (keep) out.push(line);
-  }
-  return `Usage:\n${out.join('\n')}`;
-}
-
-function printUsageAndExit(code) {
-  process.stdout.write(USAGE);
-  process.exit(code);
-}
 
 function takeValue(argv, i, flag) {
   const v = argv[i + 1];
@@ -714,6 +236,7 @@ function parseArgs(argv) {
 // direction -- it hides real prose, not just code. CommonMark caps leading whitespace at
 // <=3 spaces; a tab or 4+ spaces is indented code, not a fence.
 const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
 
 function parseFenceLines(text) {
   // Every line-anchored regex in this file (seat headers, rebuttal headings, claim headings,
@@ -955,11 +478,19 @@ function matchedTokens(text, matchers) {
 const WALK_SKIP_DIRS = new Set(['.git', 'node_modules']);
 
 // Git targets: tracked + untracked-not-ignored names only, so a branch ref under .git/ or an
-// ignored install tree never exempts a token. Returns null when targetDir is not in a work tree.
+// ignored install tree never exempts a token. Returns null when targetDir is not in a work tree; a repository git refuses to
+// open is an error, not a plain folder whose every file would be target text.
 function gitListedNames(targetDir) {
-  const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: targetDir, encoding: 'utf8' });
-  if (probe.error || probe.status !== 0 || probe.stdout.trim() !== 'true') return null;
-  const r = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+  const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { windowsHide: true, cwd: targetDir, encoding: 'utf8', env: { ...process.env, ...GIT_C_LOCALE } });
+  if (probe.error) throw new RelayError(`--target-dir: git could not run in ${targetDir}: ${probe.error.message}`);
+  let inside;
+  try {
+    inside = gitRepoFromProbe({ code: probe.status, stdout: probe.stdout, stderr: probe.stderr }, targetDir);
+  } catch (err) {
+    throw new RelayError(`--target-dir: ${err.message}`);
+  }
+  if (!inside) return null;
+  const r = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { windowsHide: true,
     cwd: targetDir,
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
@@ -1063,13 +594,13 @@ function sha256File(file) {
 // file git reports as changed or untracked. null means no caching.
 async function contentKey(targetDir, entries) {
   const parts = [path.resolve(targetDir)];
-  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: targetDir, encoding: 'utf8' });
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { windowsHide: true, cwd: targetDir, encoding: 'utf8' });
   if (!head.error && head.status === 0) {
-    const st = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.'], {
+    const st = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.'], { windowsHide: true,
       cwd: targetDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024,
     });
     if (st.error || st.status !== 0) return null;
-    const prefix = spawnSync('git', ['rev-parse', '--show-prefix'], { cwd: targetDir, encoding: 'utf8' }).stdout?.trim() ?? '';
+    const prefix = spawnSync('git', ['rev-parse', '--show-prefix'], { windowsHide: true, cwd: targetDir, encoding: 'utf8' }).stdout?.replace(/\r?\n$/, '') ?? '';
     parts.push(head.stdout.trim(), st.stdout);
     // Status paths are repo-root relative; entries (ls-files in targetDir) are targetDir relative.
     // A rename or copy record ("R  new", "C  new") is followed by a bare record holding the old path.
@@ -1393,10 +924,22 @@ function runPathMasker(dirs) {
   return (line) => line.replace(re, '<path>');
 }
 
+// A target or source folder whose name holds a vendor word ("claude-code-plugins") is cited by that name in prose and
+// in relative paths: the whole name is hidden like its absolute path (in another case only where the OS folds case). A
+// name that is only the vendor word is not.
+function folderNameMasker(dirs, matchers) {
+  const names = [...new Set(dirs.map((d) => path.basename(path.resolve(d))))]
+    .filter((name) => matchedTokens(name, matchers).length > 0 && !matchers.some((m) => m.token.toLowerCase() === name.toLowerCase()));
+  if (names.length === 0) return (line) => line;
+  const escaped = names.sort((a, b) => b.length - a.length).map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const re = new RegExp(`(?<![A-Za-z0-9._-])(?:${escaped.join('|')})(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])`, foldsCase() ? 'gi' : 'g');
+  return (line) => line.replace(re, '<path>');
+}
+
 // targetText (the --target-dir text only, never --source-dir) lets a third-person vendor/model token
 // pass when every occurrence sits inside a longer chunk quoted verbatim from the target ("GPT-5.4/5.5"
 // in a quoted sentence), or its 20+ character line is target text. Self-identification never passes.
-async function scanText(text, targetDir, extraTokens = [], targetText = null, maskDirs = []) {
+async function scanText(text, targetDir, extraTokens = [], targetText = null, maskDirs = [], sourceDirs = []) {
   const derived = await targetDerivedTokens(targetDir, extraTokens);
   const { lines: fenceLines, unterminated } = parseFenceLines(text);
   if (unterminated) {
@@ -1405,8 +948,9 @@ async function scanText(text, targetDir, extraTokens = [], targetText = null, ma
   // Inline code is scanned like prose: "the `OpenAI` reviewer" is a leak. A span quoted from the
   // target stays exempt through the same target-derived checks as a prose quote.
   const mask = runPathMasker([targetDir, ...maskDirs, os.tmpdir()].filter(Boolean));
-  const lines = fenceLines.map(({ text: line, inFence }) => (inFence ? '' : mask(line)));
   const matchers = buildTokenMatchers(extraTokens);
+  const maskNames = folderNameMasker([targetDir, ...sourceDirs].filter(Boolean), matchers);
+  const lines = fenceLines.map(({ text: line, inFence }) => (inFence ? '' : maskNames(mask(line))));
   const selfIdRe = buildSelfIdRe(extraTokens);
   const selfIdHits = [];
   const identityHits = [];
@@ -1620,6 +1164,11 @@ function levelWord(raw, allowed) {
 
 const CLAIM_EVIDENCE_LINE_RE = /^Evidence:\s*(.*)$/;
 const SUGGESTED_FIX_LINE_RE = /^Suggested fix:\s*(.*?)\s*$/;
+const CLAIM_TRIGGER_LINE_RE = /^Trigger:\s*(.*?)\s*$/;
+// Optional: whether the defect was already in the code before the change under review. Any other word is not kept.
+const CLAIM_PRE_EXISTING_LINE_RE = /^Pre-existing:\s*(yes|no|unknown)\b/i;
+// Seats often write the class-sweep line after other text ("Impact: ... Same shape elsewhere: ..."), so it matches anywhere in an unfenced line.
+const SAME_SHAPE_RE = /(?:^|[^A-Za-z])Same shape elsewhere:\s*(.*?)\s*$/;
 // A CommonMark thematic break (bare ---/***/___, 3+ chars, optional spaces between them) used as
 // a claim separator, same as real Phase 1 output observed in practice: it terminates the current
 // block/evidence body the same way a "## " heading does, but starts no new block (there is no
@@ -1709,7 +1258,7 @@ function extractClaimBlocks(text) {
       }
       current = {
         id: headingMatch[1], line: idx + 1, heading: line.trim(), severity: null, basis: null, evidenceStrength: null,
-        evidence: null, suggestedFix: null,
+        evidence: null, suggestedFix: null, trigger: null, sameShape: null, preExisting: null,
       };
       blocks.set(current.id, current);
       return;
@@ -1724,6 +1273,11 @@ function extractClaimBlocks(text) {
       return;
     }
     if (current === null) return;
+    // Read only: the line stays wherever the evidence rules put it.
+    if (!inFence && current.sameShape === null) {
+      const ss = SAME_SHAPE_RE.exec(line);
+      if (ss && ss[1].length > 0) current.sameShape = ss[1];
+    }
     // Evidence boundary rules: see the function doc above.
     let evidenceEnded = false;
     if (evidenceLines !== null && afterFence !== null) {
@@ -1745,6 +1299,16 @@ function extractClaimBlocks(text) {
     const sfMatch = SUGGESTED_FIX_LINE_RE.exec(line);
     if (sfMatch) {
       if (current.suggestedFix === null && sfMatch[1].length > 0) current.suggestedFix = sfMatch[1];
+      return;
+    }
+    const preMatch = CLAIM_PRE_EXISTING_LINE_RE.exec(line);
+    if (preMatch) {
+      if (current.preExisting === null) current.preExisting = preMatch[1].toLowerCase();
+      return;
+    }
+    const trMatch = CLAIM_TRIGGER_LINE_RE.exec(line);
+    if (trMatch) {
+      if (current.trigger === null && trMatch[1].length > 0) current.trigger = trMatch[1];
       return;
     }
     const sevMatch = CLAIM_SEVERITY_LINE_RE.exec(line);
@@ -1828,7 +1392,7 @@ async function getClaimBlock(id, phase1Dir, blocksBySeat) {
 // mechanically from its own real Phase 1 origins, discarding whatever the auditor's JSON
 // supplied for these -- same precedent as checkVerificationsAgainstDir's verifier-file
 // authority. Only runs when --phase1-dir is supplied; without it, the auditor's own values are
-// still trusted, matching the pre-existing behavior and USAGE's known-limitation text for that case.
+// still trusted.
 // blocksBySeat is caller-scoped (one per translateFindings call, reused across findings in that
 // call), never module-level -- a pure function shouldn't carry state across unrelated calls.
 // A missing or unrecognized field in an origin's own claim block (a typo'd "Evidence Strength:",
@@ -1876,6 +1440,19 @@ async function deriveFromOrigins(finding, phase1Dir, blocksBySeat) {
   finding.suggested_fix = finding.origins
     .map((id, i) => (blocks[i].suggestedFix === null ? null : `${id}: ${blocks[i].suggestedFix}`))
     .filter((s) => s !== null);
+  // Seat-written lines, present only when an origin has one; an auditor's own copy is never kept.
+  for (const [key, field] of [['trigger', 'trigger'], ['sameShape', 'same_shape'], ['preExisting', 'pre_existing']]) {
+    const lines = finding.origins.map((id, i) => (blocks[i][key] === null ? null : `${id}: ${blocks[i][key]}`)).filter((s) => s !== null);
+    if (lines.length > 0) finding[field] = lines;
+    else delete finding[field];
+  }
+  // summary is optional for the auditor; without it and a title every report row would be blank, so the first origin's
+  // Phase 1 heading text ("## A1 — <title>") names the finding.
+  const blank = (v) => typeof v !== 'string' || v.trim() === '';
+  if (blank(finding.title) && blank(finding.summary)) {
+    const heading = blocks[0].heading.replace(/^#+\s*\S+\s*(?:[—–:-]\s*)?/, '').trim();
+    if (heading) finding.title = heading;
+  }
 }
 
 async function checkOriginsAgainstPhase1(origins, phase1Dir) {
@@ -1887,7 +1464,8 @@ async function checkOriginsAgainstPhase1(origins, phase1Dir) {
     }
     if (!bySeat[seat].has(id)) {
       throw new RelayError(
-        `translated origin "${id}" has no "## ${id}" heading in ${seat}-findings.md; ` +
+        // No seat file name: review-run sends this text back to a blind auditor.
+        `translated origin "${id}" has no Phase 1 claim heading "## ${id}"; ` +
           'refusing to publish a finding citing a claim ID that does not exist in Phase 1'
       );
     }
@@ -1940,6 +1518,22 @@ const VERIFICATION_VERDICT_LINE_RE = /^Verdict:\s*(CONFIRMED|REFUTED|INCONCLUSIV
 const VERIFICATION_BASIS_LINE_RE = /^Basis:\s*([A-Z_]+)\b/;
 const VERIFICATION_EVIDENCE_LINE_RE = /^Evidence:\s*(.*)$/;
 
+// True when a verifier file, read the way parseVerificationFile reads it, says REFUTED with Basis INFERENCE: review-run
+// checks this before the auditor runs, so the file goes back to its verifier instead of failing translate after a paid audit.
+export function refutesByInference(text) {
+  const { lines, unterminated } = parseFenceLines(text);
+  if (unterminated) return false;
+  let verdict = null;
+  let basis = null;
+  for (const { text: line, inFence } of lines) {
+    if (inFence) continue;
+    if (VERIFICATION_EVIDENCE_LINE_RE.test(line)) break;
+    verdict ??= VERIFICATION_VERDICT_LINE_RE.exec(line)?.[1] ?? null;
+    basis ??= VERIFICATION_BASIS_LINE_RE.exec(line)?.[1] ?? null;
+  }
+  return verdict === 'REFUTED' && basis === 'INFERENCE';
+}
+
 function parseVerificationFile(text, fileLabel) {
   const { lines, unterminated } = parseFenceLines(text);
   if (unterminated) {
@@ -1985,6 +1579,9 @@ function parseVerificationFile(text, fileLabel) {
     throw new RelayError(`${fileLabel}: has Basis "${basis}", not one of: ${[...BASIS_VALUES].join(', ')}`);
   }
   if (evidenceLines === null) throw new RelayError(`${fileLabel}: missing an "Evidence:" line`);
+  if (verdict === 'REFUTED' && basis === 'INFERENCE') {
+    throw new RelayError(`${fileLabel}: has Verdict REFUTED with Basis INFERENCE; a refutation needs a command and its output (EXECUTED) or the cited lines (STATIC_TRACE, SOURCE_CITATION), otherwise the verdict is INCONCLUSIVE`);
+  }
   // "Verbatim" means byte-identical content, not merely non-empty -- .trim() on the full joined
   // block would strip real leading indentation from the first content line (code, logs, YAML) and
   // any trailing whitespace a real evidence line legitimately ends with. Only the STRUCTURAL
@@ -2019,7 +1616,9 @@ async function checkVerificationsAgainstDir(findings, verificationDir, mapping) 
             `(anonymous "${anonId}") but ${filePath} does not exist`
         );
       }
-      const parsed = parseVerificationFile(content, filePath);
+      // A malformed verifier file is the orchestrator's to fix, not the auditor's: the "--verification-dir" label makes
+      // review-run fail the step instead of sending the message (and the run folder path in it) to the auditor.
+      const parsed = parseVerificationFile(content, `--verification-dir: ${filePath}`);
       if (parsed.claim !== anonId) {
         throw new RelayError(
           `--verification-dir: ${filePath} is named for "${anonId}" but its own "Claim:" line ` +
@@ -2068,7 +1667,7 @@ async function checkVerificationsAgainstDir(findings, verificationDir, mapping) 
   }
 }
 
-async function translateFindings(auditJson, mapping, phase1Dir, verificationDir, checklist = [], auditDepth = 'light') {
+async function translateFindings(auditJson, mapping, phase1Dir, verificationDir, checklist = [], auditDepth = 'full') {
   if (auditDepth !== 'light' && auditDepth !== 'full') throw new RelayError('--audit-depth must be light or full');
   const auditToSeat = invertSeatMapping(mapping);
   let parsed;
@@ -2085,9 +1684,9 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir,
   const seenFindingIds = new Set();
   const seenOrigins = new Set();
   const blocksBySeat = new Map();
-  for (const finding of translated.findings) {
+  for (const [index, finding] of translated.findings.entries()) {
     if (!FINDING_ID_RE.test(finding.id)) {
-      throw new RelayError(`finding id "${finding.id}" is not of the form "F<n>"`);
+      throw new RelayError(`findings[${index}] ${finding.id === undefined ? 'has no "id"' : `has id "${finding.id}", which is not of the form "F<n>"`} (expected "F${index + 1}"); every finding needs one`);
     }
     if (seenFindingIds.has(finding.id)) {
       throw new RelayError(`duplicate finding id "${finding.id}"`);
@@ -2162,6 +1761,13 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir,
       }
     } else {
       assertEnum(finding.auditor_check.basis, BASIS_VALUES, 'auditor_check.basis', finding.id);
+      // Absence of proof is not a refutation: a REFUTED check must show what it ran or read.
+      if (finding.auditor_check.result === 'REFUTED' && finding.auditor_check.basis === 'INFERENCE') {
+        throw new RelayError(
+          `finding "${finding.id}" has auditor_check.result "REFUTED" with basis "INFERENCE" -- a refutation needs ` +
+            'a command and its output (EXECUTED) or the cited lines (STATIC_TRACE, SOURCE_CITATION); otherwise the result is INCONCLUSIVE'
+        );
+      }
       if (typeof finding.auditor_check.evidence !== 'string' || finding.auditor_check.evidence.length === 0) {
         throw new RelayError(
           `finding "${finding.id}" has auditor_check.result "${finding.auditor_check.result}" but ` +
@@ -2171,6 +1777,12 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir,
     }
     // A severity the auditor's own check supports (a peer's conceded correction, or what it found).
     // "severity" stays the claims' own value; severity_audited carries the audited one.
+    if (Object.hasOwn(finding, 'severity_audited')) {
+      throw new RelayError(
+        `finding "${finding.id}" has a top-level severity_audited; translate sets it from auditor_check.severity ` +
+          '(with auditor_check.severity_reason, on a CONFIRMED check) -- put the audited severity there'
+      );
+    }
     if (finding.auditor_check.severity === null) delete finding.auditor_check.severity;
     if (finding.auditor_check.severity_reason === null) delete finding.auditor_check.severity_reason;
     const sevReason = finding.auditor_check.severity_reason;
@@ -2345,6 +1957,13 @@ async function translateFindings(auditJson, mapping, phase1Dir, verificationDir,
     // review-protocol.md -- each clause below is one of those three conditions, checked
     // mechanically rather than trusted from the auditor's own classification.
     if (finding.final_state === 'dropped-speculative') {
+      // severity_audited needs a CONFIRMED check, which dropped-speculative refuses below, so the claimed severity decides.
+      if (finding.severity === 'CRITICAL') {
+        throw new RelayError(
+          `finding "${finding.id}" has final_state "dropped-speculative" but is CRITICAL -- an unchecked ` +
+            'CRITICAL claim is "unresolved-high-stakes", never dropped from the report'
+        );
+      }
       if (finding.evidence_strength !== 'SPECULATIVE') {
         throw new RelayError(
           `finding "${finding.id}" has final_state "dropped-speculative" but evidence_strength ` +
@@ -2445,7 +2064,7 @@ async function runRelabel(args) {
   const out = relabelText(text, args.from, args.to, extraIds);
   await fs.mkdir(path.dirname(args.out), { recursive: true });
   await fs.writeFile(args.out, out);
-  process.stdout.write(`relabeled ${args.from} -> ${args.to}, wrote ${args.out}\n`);
+  io.out(`relabeled ${args.from} -> ${args.to}, wrote ${args.out}\n`);
 }
 
 // Library half of scan: every hit class for one text, no printing, no exit.
@@ -2454,7 +2073,7 @@ async function collectScanHits(text, opts) {
   // The run folder and its parent hold the run's own evidence and work folders, which seats cite.
   const runDir = opts.phase1Dir ? path.dirname(path.resolve(opts.phase1Dir)) : null;
   const maskDirs = [...(opts.sourceDirs ?? []), ...(runDir ? [runDir, path.dirname(runDir)] : [])];
-  const { selfIdHits, identityHits, otherHits } = await scanText(text, opts.targetDir, opts.tokens ?? [], vendorText, maskDirs);
+  const { selfIdHits, identityHits, otherHits } = await scanText(text, opts.targetDir, opts.tokens ?? [], vendorText, maskDirs, opts.sourceDirs ?? []);
   const needTarget = (opts.forbidSeats || opts.peerIds) && opts.targetText === undefined;
   const targetText = needTarget ? await readExemptText(opts.targetDir, opts.sourceDirs ?? []) : opts.targetText ?? null;
   const allClaimIdHits = opts.forbidSeats
@@ -2513,9 +2132,9 @@ async function runScan(args) {
         `${hits.peerLabelHits.length} Phase 2 peer-label leak(es); ` +
         'return this file for redaction, do not forward'
     );
-    process.exit(1);
+    throw new StepExit(1);
   }
-  process.stdout.write(
+  io.out(
     `scan clean: 0 identity matches, ${hits.otherHits.length + hits.derivedIdHits.length} target-derived reported, ` +
       `${hits.trustHits.length} trust-boundary URL(s) reported\n`
   );
@@ -2525,7 +2144,7 @@ async function runFlip(args) {
   const mapping = flipMapping();
   await fs.mkdir(path.dirname(args.out), { recursive: true });
   await fs.writeFile(args.out, JSON.stringify(mapping, null, 2) + '\n');
-  process.stdout.write(`wrote ${args.out}\n`);
+  io.out(`wrote ${args.out}\n`);
 }
 
 async function runTranslate(args) {
@@ -2539,10 +2158,11 @@ async function runTranslate(args) {
   } catch (err) {
     throw new RelayError(`--mapping is not valid JSON: ${err.message}`);
   }
-  const translated = await translateFindings(auditJson, mapping, args.phase1Dir, args.verificationDir, args.checklist ?? [], args.auditDepth ?? 'light');
+  const translated = await translateFindings(auditJson, mapping, args.phase1Dir, args.verificationDir, args.checklist ?? [], args.auditDepth ?? 'full');
   await fs.mkdir(path.dirname(args.out), { recursive: true });
-  await fs.writeFile(args.out, JSON.stringify(translated, null, 2) + '\n');
-  process.stdout.write(`translated ${translated.findings.length} finding(s), wrote ${args.out}\n`);
+  // Through a temp file: a later step treats findings.json as the finished audit.
+  await writeFileAtomic(args.out, JSON.stringify(translated, null, 2) + '\n');
+  io.out(`translated ${translated.findings.length} finding(s), wrote ${args.out}\n`);
 }
 
 // Checks every claim block in both seats' real Phase 1 files against claimBlockProblems, listing
@@ -2588,7 +2208,14 @@ function rebuttalSections(fenceLines) {
 // the peer's claim IDs are then unknown, so the full two-seat validate must still run later.
 function validateProblems(textsBySeat, targetText = null, seats = ['A', 'B']) {
   const problems = [];
-  const runIds = new Set(seats.flatMap((s) => [...extractClaimHeadings(textsBySeat[s])]));
+  // Every seat's claim IDs, also of a seat file that cannot be parsed yet: a peer's ID in this seat's code is found now,
+  // not after both rewrites are spent.
+  // In a file with an unclosed fence every heading line counts: a heading after a stray opener is still that seat's claim.
+  // Two stray fence lines that balance cannot be told from a quoted claim block, so a closed fence's headings are quotes.
+  const runIds = new Set(Object.keys(textsBySeat).flatMap((s) => {
+    const { lines, unterminated } = parseFenceLines(textsBySeat[s] ?? '');
+    return lines.filter((l) => unterminated || !l.inFence).map((l) => CLAIM_HEADING_RE.exec(l.text)?.[1]).filter(Boolean);
+  }));
   const runIdRe = buildClaimIdRe(runIds);
   for (const seat of seats) {
     const text = textsBySeat[seat];
@@ -2673,6 +2300,7 @@ function validateProblems(textsBySeat, targetText = null, seats = ['A', 'B']) {
       for (const p of claimBlockProblems(block)) {
         add(`${seat}-findings.md: claim "${id}" has ${p}`);
       }
+      if (block.sameShape === null) add(`${seat}-findings.md: claim "${id}" has no "Same shape elsewhere:" line (name the other places with the same shape, or write "none found" and what you searched)`);
     }
     for (const m of malformedHeadings) {
       const inRebuttal = rebuttalEntryProblem(m.line, m.text);
@@ -2717,10 +2345,10 @@ function logValidateProblems(problems) {
     'redaction round, never a hand edit');
 }
 
-// "Parser.py:345" or "src/x.mjs:12-18" in a claim's Evidence: warns when the line is past the end of
+// "service.py:345" or "src/x.mjs:12-18" in a claim's Evidence: warns when the line is past the end of
 // every file of that name under --target-dir and each --source-dir. A bare name is first narrowed to
-// the paths the task packet names ("ZFS_DEVICE/Parser.py"), since a repository can hold dozens of
-// Parser.py files. A path found nowhere is left alone: seats also cite logs and outside files.
+// the paths the task packet names ("billing/service.py"), since a repository can hold dozens of
+// service.py files. A path found nowhere is left alone: seats also cite logs and outside files.
 const CITATION_RE = /(?<![\w/\\.:-])((?:[\w.-]+[\\/])*[\w-][\w.-]*\.[A-Za-z0-9]{1,8}):(\d+)(?:-(\d+))?(?![\w.:-])/g;
 const PACKET_PATH_RE = /[\w.-]+(?:[\\/][\w.-]+)+/g;
 
@@ -2771,6 +2399,34 @@ async function citationWarnings(texts, dirs, packetText = '') {
   return warnings;
 }
 
+// The Phase 1 seat files' claim-level problems as validate reads them (both seats together, so a peer's claim ID in a
+// seat's code is found), by seat, for review-run's format check to send back in each seat's one rewrite. An unterminated
+// fence is one problem of that seat. A target or source folder that cannot be read stops the step instead. What the
+// reading logs is kept out of review-run's output.
+async function seatClaimProblems(textsBySeat, { targetDir = null, sourceDirs = [] } = {}) {
+  const saved = io.err;
+  io.err = () => true;
+  try {
+    const targetText = await readExemptText(targetDir, sourceDirs);
+    const seats = Object.keys(textsBySeat);
+    const bySeat = Object.fromEntries(seats.map((s) => [s, []]));
+    const unparsed = seats.filter((s) => {
+      try { extractClaimBlocks(textsBySeat[s]); return false; } catch (err) {
+        if (!(err instanceof RelayError)) throw err;
+        bySeat[s].push(err.message);
+        return true;
+      }
+    });
+    const parsed = seats.filter((s) => !unparsed.includes(s));
+    if (parsed.length > 0) {
+      for (const p of validateProblems(textsBySeat, targetText, parsed)) if (p.returnTo in bySeat) bySeat[p.returnTo].push(p.text);
+    }
+    return bySeat;
+  } finally {
+    io.err = saved;
+  }
+}
+
 async function runValidate(args) {
   const seats = args.seat ? [args.seat] : ['A', 'B'];
   const texts = {};
@@ -2778,21 +2434,28 @@ async function runValidate(args) {
   const problems = validateProblems(texts, await readExemptText(args.targetDir, args.sourceDirs), seats);
   if (problems.length > 0) {
     logValidateProblems(problems);
-    process.exit(1);
+    throw new StepExit(1);
   }
   // A warning, not a refusal: the claim can still be right with a wrong line number.
   const packetText = args.packet ? await readRequired(args.packet, '--packet') : '';
   for (const w of await citationWarnings(texts, [args.targetDir, ...(args.sourceDirs ?? [])], packetText)) {
     log(`WARNING: ${w}; ask the seat to correct the line in its own file, or note it in the report`);
   }
+  for (const [seat, text] of Object.entries(texts)) {
+    for (const [id, block] of extractClaimBlocks(text).blocks) {
+      if ((block.severity === 'HIGH' || block.severity === 'CRITICAL') && block.trigger === null) {
+        log(`WARNING: seat ${seat} ${id} is ${block.severity} with no "Trigger:" line; the report cannot say what input makes it happen or how often`);
+      }
+    }
+  }
   if (args.seat) {
-    process.stdout.write(
+    io.out(
       `validate clean (seat ${args.seat} only): its claim blocks and rebuttal headings are well formed; ` +
         'run validate without --seat once both files exist, since the other seat\'s claim IDs were not checked\n'
     );
     return;
   }
-  process.stdout.write('validate clean: every claim block in both seats has a recognized Severity/Basis/Evidence strength/Evidence, and every rebuttal-section heading matches the required form\n');
+  io.out('validate clean: every claim block in both seats has a recognized Severity/Basis/Evidence strength/Evidence, and every rebuttal-section heading matches the required form\n');
 }
 
 // Rebuttal entries for one letter within [start, end] (1-based lines): an entry opens at a
@@ -2929,7 +2592,7 @@ async function runAppendRebuttals(args) {
     throw new RelayError('validate failed on the appended result; --onto left unchanged');
   }
   await writeFileAtomic(args.onto, newOnto);
-  process.stdout.write(`appended ${entries.length} rebuttal(s) from ${rebutter} to ${args.onto}; validate clean\n`);
+  io.out(`appended ${entries.length} rebuttal(s) from ${rebutter} to ${args.onto}; validate clean\n`);
 }
 
 // HIGH/CRITICAL claims per seat and what the peer's rebuttal section did with each. disputed_ids names the disputed ones
@@ -2986,14 +2649,14 @@ async function requireAppendedRebuttals(phase2Dir, texts) {
     if (!new RegExp(`^## Rebuttals \\(from ${seat}\\) of ${peer} claims\\s*$`, 'm').test(texts[peer])) {
       throw new RelayError(
         `seat ${seat} had peer claims to rebut (peer-view-for-${seat}.md), but ${peer}-findings.md has no ` +
-          `"## Rebuttals (from ${seat}) of ${peer} claims" section: run exchange.mjs finish until it succeeds ` +
-          `(with --incomplete-seats ${seat} if that seat's exchange cannot be completed); nothing written to --out-dir`
+          `"## Rebuttals (from ${seat}) of ${peer} claims" section: run review-run phase2 --wait until it succeeds ` +
+          `(a seat that cannot finish its exchange makes the review incomplete); nothing written to --out-dir`
       );
     }
   }
 }
 
-async function runAuditPrep(args) {
+async function runAuditPrep(args, { renameFn = fs.rename } = {}) {
   let mapping;
   try {
     mapping = JSON.parse(await readRequired(args.mapping, '--mapping'));
@@ -3031,7 +2694,7 @@ async function runAuditPrep(args) {
   const staged = args.packet
     ? {
         'task-packet.md': await readBytes(args.packet, '--packet'),
-        'review-protocol.md': await readBytes(PROTOCOL_PATH, 'bundled review-protocol.md'),
+        'review-protocol.md': Buffer.from(auditorProtocol((await readBytes(PROTOCOL_PATH, 'bundled review-protocol.md')).toString('utf8')), 'utf8'),
       }
     : {};
   const texts = { A: await readPhase1Seat('A', args.phase1Dir), B: await readPhase1Seat('B', args.phase1Dir) };
@@ -3049,8 +2712,17 @@ async function runAuditPrep(args) {
     const peer = seat === 'A' ? 'B' : 'A';
     const pass1 = relabelText(texts[seat], seat, mapping[seat]);
     // Zero peer-letter targets (no rebuttals, no cross-references) is a valid second pass here.
-    const pass2 = relabelText(pass1, peer, mapping[peer], [...realClaimIds(texts[peer], peer)]);
+    const relabeled = relabelText(pass1, peer, mapping[peer], [...realClaimIds(texts[peer], peer)]);
     const name = `${mapping[seat]}-findings.md`;
+    // A run-folder path a seat pasted must not show the auditor where the run's records are.
+    const { text: pass2, count: runPaths } = scrubDir(relabeled, path.dirname(path.resolve(args.phase1Dir)));
+    if (runPaths > 0) log(`${name}: ${runPaths} run-folder path(s) written as <run-dir>`);
+    // The run-folder guard reads every other spelling (~, variables, a drive-less or short name, a link): one left blocks.
+    const runPathLeft = runDirNamedIn(pass2, path.dirname(path.resolve(args.phase1Dir)), args.targetDir ?? null);
+    if (runPathLeft) {
+      log(`${name}: RUN-FOLDER PATH still named (${runPathLeft.leaked}${runPathLeft.resolved ? ', which resolves into it' : ''}); return it to its seat to cite the path another way`);
+      blocked += 1;
+    }
     const hits = await collectScanHits(pass2, {
       targetDir: args.targetDir,
       sourceDirs: args.sourceDirs,
@@ -3068,16 +2740,33 @@ async function runAuditPrep(args) {
   if (blocked > 0) {
     throw new RelayError(`${blocked} blocking scan hit(s); nothing written to --out-dir -- return the named file(s) for redaction`);
   }
-  await fs.mkdir(args.outDir, { recursive: true });
-  const written = { ...finals, ...staged };
-  for (const [name, content] of Object.entries(written)) await fs.writeFile(path.join(args.outDir, name), content);
-  process.stdout.write(`audit-prep: wrote ${Object.keys(written).join(', ')} to ${args.outDir}; both scans clean\n`);
+  // The breakdown first, then every staged file in a sibling folder renamed into place last: an interrupted run leaves
+  // --out-dir empty (at most a .staging-* sibling), so the same step can run again.
   const breakdownLine = `${JSON.stringify({ falsificationBreakdown: falsificationBreakdown(texts, mapping) })}\n`;
-  process.stdout.write(breakdownLine);
   if (args.breakdownOut) {
     await fs.mkdir(path.dirname(path.resolve(args.breakdownOut)), { recursive: true });
     await writeFileAtomic(args.breakdownOut, breakdownLine);
   }
+  const outDir = path.resolve(args.outDir);
+  await fs.mkdir(path.dirname(outDir), { recursive: true });
+  const staging = await fs.mkdtemp(`${outDir}.staging-`);
+  const written = { ...finals, ...staged };
+  for (const [name, content] of Object.entries(written)) await fs.writeFile(path.join(staging, name), content);
+  // --out-dir is empty here (checked above); an existing empty folder makes way for the rename.
+  await fs.rmdir(outDir).catch((err) => { if (err.code !== 'ENOENT') throw err; });
+  // Windows can hold a just-written folder for a moment (a virus scan): EPERM or EBUSY. Retry, and leave no staging folder.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await renameFn(staging, outDir);
+      break;
+    } catch (err) {
+      if ((err.code === 'EPERM' || err.code === 'EBUSY') && attempt < 10) { await new Promise((r) => setTimeout(r, 500)); continue; }
+      await fs.rm(staging, { recursive: true, force: true }).catch((rmErr) => log(`could not remove ${staging}: ${rmErr.message}`));
+      throw err;
+    }
+  }
+  io.out(`audit-prep: wrote ${Object.keys(written).join(', ')} to ${args.outDir}; both scans clean\n`);
+  io.out(breakdownLine);
 }
 
 const HEADING_RE = /^(#{1,6})\s/;
@@ -3165,7 +2854,7 @@ async function runSplice(args) {
       done.push(`${spliced.start}-${spliced.end}`);
     }
     await writeFileAtomic(args.file, text);
-    process.stdout.write(
+    io.out(
       `splice: replaced ${args.pairs.length} line(s) (at ${done.join(', ')}) of ${args.file}; ` +
         're-run validate (and scan) on this file before continuing\n'
     );
@@ -3189,7 +2878,7 @@ async function runSplice(args) {
   }
   const spliced = spliceText(original, { heading: args.matchHeading, line: args.matchLine === undefined ? undefined : await resolveMatchLine(args.matchLine) }, replacement);
   await writeFileAtomic(args.file, spliced.text);
-  process.stdout.write(
+  io.out(
     `splice: replaced line(s) ${spliced.start}-${spliced.end} of ${args.file} with ${spliced.count} line(s); ` +
       're-run validate (and scan) on this file before continuing\n'
   );
@@ -3225,7 +2914,7 @@ function scorecardNote(f) {
   if (!String(f.final_state).startsWith('unresolved')) return '';
   if (responses.includes('disputed-with-counter-fact') && !verified) {
     return `peer counter-fact not tested${counterFactQuote(f)}; an auditor confirmation alone cannot settle it` +
-      (f.final_state === 'unresolved-high-stakes' ? ' (ask for "deep verify disputed high-severity findings")' : '');
+      (f.final_state === 'unresolved-high-stakes' ? ' (ask for "deep verify disputed high-severity findings"; with a CLI auditor, a new run with --falsification)' : '');
   }
   if (responses.includes('disputed-no-counter-fact')) return 'disputed without a counter-fact, not settled either way';
   if (verified) return `falsification verdict ${(f.verifications ?? []).map((v) => v.verdict).join(', ')}`;
@@ -3305,7 +2994,9 @@ function scorecardMarkdown(doc, headingTags = null) {
   const lines = [
     `${findings.length} findings: ${states.join(', ')}`,
     ...(checked === 0 && high.length > 0
-      ? [`Note: no claim was independently checked by the auditor (light audit, every claim conceded); ${high.length} HIGH/CRITICAL finding(s) are settled by concession only. Use --audit-depth full to have the auditor re-check them.`]
+      ? [doc.audit_depth === 'light'
+        ? `Note: no claim was independently checked by the auditor (light audit, every claim conceded); ${high.length} HIGH/CRITICAL finding(s) are settled by concession only.`
+        : `Note: the auditor could check none of the claims; ${high.length} HIGH/CRITICAL finding(s) are unchecked: see each auditor_check.reason.`]
       : []),
     `Independently discovered: ${count((f) => f.independently_discovered === true)}. ` +
       `HIGH/CRITICAL: ${high.length}. Auditor checked: ${count((f) => f.auditor_check && f.auditor_check.result !== 'NOT_CHECKED')}. ` +
@@ -3331,6 +3022,7 @@ function scorecardMarkdown(doc, headingTags = null) {
     ].map(scorecardCell).join(' | ') + ' |');
   }
   if (headingTags) lines.push(...tagTable(findings, headingTags));
+  lines.push('', generatorLine());
   return lines.join('\n') + '\n';
 }
 
@@ -3345,24 +3037,20 @@ async function runScorecard(args) {
   const table = scorecardMarkdown(doc, args.phase1Dir ? await phase1HeadingTags(args.phase1Dir) : null);
   if (args.out) {
     await writeFileAtomic(args.out, table);
-    process.stdout.write(`scorecard: wrote ${doc.findings.length} row(s) to ${args.out}\n`);
+    io.out(`scorecard: wrote ${doc.findings.length} row(s) to ${args.out}\n`);
   } else {
-    process.stdout.write(table);
+    io.out(table);
   }
 }
 
-async function main() {
-  const argv = process.argv.slice(2);
-  if (argv.length === 0 || argv[0] === '-h' || argv[0] === '--help') printUsageAndExit(0);
+async function main(argv) {
   let args;
   try {
     args = parseArgs(argv);
   } catch (err) {
     if (err instanceof RelayError) {
-      // The error goes last: the full help runs to hundreds of lines and would scroll it away.
-      process.stderr.write(`${shortUsage(argv[0])}\nRun with --help for every option.\n\n`);
       log(err.message);
-      process.exit(2);
+      return 2;
     }
     throw err;
   }
@@ -3377,27 +3065,24 @@ async function main() {
     else if (args.sub === 'splice') await runSplice(args);
     else if (args.sub === 'scorecard') await runScorecard(args);
     else if (args.sub === 'clear-cache') {
-      process.stdout.write(`clear-cache: removed ${await clearExemptCache()} cached target text file(s) from ${exemptCacheDir()}\n`);
+      io.out(`clear-cache: removed ${await clearExemptCache()} cached target text file(s) from ${exemptCacheDir()}\n`);
     }
   } catch (err) {
     if (err instanceof RelayError) {
       log(err.message);
-      process.exit(1);
+      return 1;
     }
     throw err;
   }
+  return 0;
 }
 
-const isDirectRun =
-  isMainModule(import.meta.url);
-if (isDirectRun) {
-  main().catch((err) => {
-    log(`unexpected failure: ${err && err.stack ? err.stack : err}`);
-    process.exit(1);
-  });
-}
+// One subcommand in-process: { code, stdout, stderr }.
+export const runStep = (argv) => runStepWith('blind-relabel', io, main, argv);
 
 export {
+  runAuditPrep,
+  seatClaimProblems,
   splitProseAndCode,
   relabelText,
   scanText,
@@ -3420,9 +3105,12 @@ export {
   falsificationBreakdown,
   parseRebuttalEntries,
   parseFenceLines,
+  splitLineSpans,
   spliceText,
   scorecardMarkdown,
   readTargetText,
   exemptCacheDir,
   clearExemptCache,
 };
+
+refuseDirectRun(import.meta.url, 'blind-relabel.mjs');

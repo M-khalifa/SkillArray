@@ -7,6 +7,9 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { RESULT_REQUIRED_KEYS, DEFAULT_MAX_WAIT_S } from '../codex-dispatch.mjs';
 
+// codex-dispatch lists the MCP servers first ("codex mcp list --json"); each fake answers that with no server.
+const MCP_LIST = "if (process.argv.includes('mcp')) { process.stdout.write('[]\\n'); process.exit(0); }\n";
+
 function assertResultSchema(output) {
   for (const key of RESULT_REQUIRED_KEYS) {
     assert.ok(key in output, `result.json missing required key "${key}"`);
@@ -26,7 +29,7 @@ test('dispatcher passes selected model and effort to a fake CLI on fresh and res
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 console.log(JSON.stringify({type:'thread.started', thread_id:'fixture-thread'}));
 console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message',
@@ -49,7 +52,7 @@ text:JSON.stringify({argv:process.argv.slice(2), input})}}));
     if (phase === 'resume') args.push('--session', 'fixture-thread');
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
     env.PATH = bin;
-    const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
+    const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 60000 });
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8'));
     assert.equal(output.status, 'completed');
@@ -67,7 +70,96 @@ text:JSON.stringify({argv:process.argv.slice(2), input})}}));
   }
 });
 
-for (const dispatcher of ['codex', 'opencode']) {
+test('codex-dispatch turns every enabled MCP server off for the seat, and starts nothing when the server list cannot be read [slow]', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex mcp off '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const fake = path.join(bin, 'fake.mjs');
+  const started = path.join(dir, 'exec-started');
+  await fs.writeFile(fake, `import { existsSync, writeFileSync } from 'node:fs';
+if (process.argv.includes('mcp')) {
+  if (existsSync(${JSON.stringify(path.join(dir, 'list-fails'))})) { process.stderr.write('mcp list broken\\n'); process.exit(3); }
+  // Listed under the seat's own overrides, so a plugin's server (already off) is never named.
+  if (!process.argv.includes('features.plugins=false')) { process.stderr.write('listed without the seat overrides\\n'); process.exit(4); }
+  process.stdout.write(JSON.stringify([{ name: 'node_repl', enabled: true }, { name: 'open-brain', enabled: true }, { name: 'code-review', enabled: false }]));
+  process.exit(0);
+}
+writeFileSync(${JSON.stringify(started)}, 'x');
+let input = '';
+for await (const chunk of process.stdin) input += chunk;
+console.log(JSON.stringify({type:'thread.started', thread_id:'mcp-thread'}));
+console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:JSON.stringify({argv:process.argv.slice(2)})}}));
+`);
+  const shim = path.join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex');
+  await fs.writeFile(shim, process.platform === 'win32'
+    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
+    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n', { mode: 0o755 });
+  const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
+  env.PATH = bin;
+  const run = async (name) => {
+    const folder = path.join(dir, name);
+    await fs.mkdir(folder);
+    await fs.writeFile(path.join(folder, 'brief.txt'), 'brief');
+    const r = spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', dir, '--sandbox', 'read-only', '--model', 'gpt-fixture'], { env, encoding: 'utf8', timeout: 30000 });
+    return { r, record: JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8')) };
+  };
+  const ok = await run('ok');
+  assert.equal(ok.r.status, 0, ok.r.stderr);
+  const argv = JSON.parse(ok.record.finalMessage).argv;
+  const overrides = argv.flatMap((a, i) => (a === '-c' ? [argv[i + 1]] : []));
+  assert.ok(overrides.includes('mcp_servers.node_repl.enabled=false') && overrides.includes('mcp_servers.open-brain.enabled=false'), overrides.join(' '));
+  assert.ok(!overrides.some((o) => o.includes('code-review')), 'a server that is already off is left alone');
+  assert.ok(ok.record.configOverrides.includes('mcp_servers.node_repl.enabled=false'), 'result.json records what was passed');
+  await fs.rm(started, { force: true });
+  await fs.writeFile(path.join(dir, 'list-fails'), '');
+  const refused = await run('refused');
+  assert.equal(refused.r.status, 1, refused.r.stderr);
+  assert.equal(refused.record.status, 'error');
+  // The refusal names the fix a review-run user can make (review-run cannot pass the dispatcher's --keep-user-extensions).
+  assert.match(refused.record.error, /codex mcp list --json" exited 3[^]*nothing was started \(update the Codex CLI until "codex mcp list --json" works\)/);
+  assert.doesNotMatch(refused.record.error, /--keep-user-extensions/);
+  await assert.rejects(fs.access(started), 'no seat was started');
+});
+
+test('codex-dispatch: a "codex mcp list" that never answers is stopped after the probe time limit, its process is killed, and no seat starts [slow]', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex mcp hang '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const fake = path.join(bin, 'fake.mjs');
+  const pidFile = path.join(dir, 'hang.pid');
+  const started = path.join(dir, 'exec-started');
+  await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
+if (process.argv.includes('mcp')) { writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000); }
+else { writeFileSync(${JSON.stringify(started)}, 'x'); }
+`);
+  const shim = path.join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex');
+  await fs.writeFile(shim, process.platform === 'win32'
+    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
+    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n', { mode: 0o755 });
+  const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
+  env.PATH = bin;
+  env.REVIEW_PROBE_TIMEOUT_MS = '2000';
+  await fs.writeFile(path.join(dir, 'brief.txt'), 'brief');
+  const r = spawnSync(process.execPath, [script, '--brief', path.join(dir, 'brief.txt'), '--cd', dir, '--sandbox', 'read-only', '--model', 'gpt-fixture'], { env, encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.status, 1, r.stderr);
+  const record = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
+  assert.match(record.error, /did not finish in 2 s; it was stopped[^]*nothing was started/);
+  await assert.rejects(fs.access(started), 'no seat was started');
+  const pid = Number(await fs.readFile(pidFile, 'utf8'));
+  let alive = true;
+  // The dispatcher waits for taskkill before it exits (taskkill dies with it); 15 s covers a kill still settling.
+  for (let i = 0; i < 60 && alive; i += 1) {
+    try { process.kill(pid, 0); await new Promise((res) => setTimeout(res, 250)); } catch { alive = false; }
+  }
+  if (alive) process.kill(pid);
+  assert.equal(alive, false, 'the hung probe process is gone, not left running');
+});
+
+for (const dispatcher of ['codex']) {
   test(`${dispatcher}-dispatch reports files a reviewer wrote into a non-git --cd via the content-hash inventory, instead of touchedFiles null`, async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), `${dispatcher} nongit touched `));
     t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -76,12 +168,10 @@ for (const dispatcher of ['codex', 'opencode']) {
     const phase1 = path.join(dir, 'phase1');
     await Promise.all([fs.mkdir(bin), fs.mkdir(target), fs.mkdir(phase1)]);
     await fs.writeFile(path.join(target, 'article.md'), 'original\n');
-    const events = dispatcher === 'codex'
-      ? `console.log(JSON.stringify({type:'thread.started', thread_id:'t1'}));
-console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'done'}}));`
-      : `console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text:'done'}}));`;
+    const events = `console.log(JSON.stringify({type:'thread.started', thread_id:'t1'}));
+console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'done'}}));`;
     const fake = path.join(bin, 'fake.mjs');
-    await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
+    await fs.writeFile(fake, MCP_LIST + `import { writeFileSync } from 'node:fs';
 let input = '';
 if (!process.stdin.isTTY) { for await (const chunk of process.stdin) input += chunk; }
 writeFileSync(${JSON.stringify(path.join(target, 'article.md'))}, 'edited by reviewer\\n');
@@ -98,7 +188,7 @@ ${events}
     const script = fileURLToPath(new URL(`../${dispatcher}-dispatch.mjs`, import.meta.url));
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
     env.PATH = bin + path.delimiter + realGitDir();
-    const result = spawnSync(process.execPath, [script, '--brief', brief, '--cd', target], { env, encoding: 'utf8', timeout: 15000 });
+    const result = spawnSync(process.execPath, [script, '--brief', brief, '--cd', target], { env, encoding: 'utf8', timeout: 60000 });
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
     assert.equal(output.status, 'completed');
@@ -116,7 +206,7 @@ test('codex-dispatch writes usage_delta: the fresh call\'s own usage, then only 
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
   // Cumulative like the real CLI: the resumed turn reports the thread's running total.
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 const resumed = process.argv.includes('resume');
 console.log(JSON.stringify({type:'thread.started', thread_id:'delta-thread'}));
@@ -136,7 +226,7 @@ console.log(JSON.stringify({type:'turn.completed', usage: resumed
   await fs.mkdir(phase1); await fs.mkdir(phase2);
   await fs.writeFile(path.join(phase1, 'brief.txt'), 'p1');
   await fs.writeFile(path.join(phase2, 'brief.txt'), 'p2');
-  let r = spawnSync(process.execPath, [script, '--brief', path.join(phase1, 'brief.txt'), '--cd', dir], { env, encoding: 'utf8', timeout: 15000 });
+  let r = spawnSync(process.execPath, [script, '--brief', path.join(phase1, 'brief.txt'), '--cd', dir], { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(r.status, 0, r.stderr);
   const first = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
   assert.equal(first.usage_delta.source, 'fresh-thread');
@@ -144,7 +234,7 @@ console.log(JSON.stringify({type:'turn.completed', usage: resumed
   // A result.json re-saved by PowerShell Set-Content -Encoding utf8 starts with a BOM.
   await fs.writeFile(path.join(phase1, 'result.json'), '\uFEFF' + JSON.stringify(first), 'utf8');
   r = spawnSync(process.execPath, [script, '--brief', path.join(phase2, 'brief.txt'), '--cd', dir, '--session', 'delta-thread',
-    '--previous-result', path.join(phase1, 'result.json')], { env, encoding: 'utf8', timeout: 15000 });
+    '--previous-result', path.join(phase1, 'result.json')], { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(r.status, 0, r.stderr);
   const second = JSON.parse(await fs.readFile(path.join(phase2, 'result.json'), 'utf8'));
   assert.equal(second.usage.input_tokens, 3196564, 'usage stays the cumulative number codex reported');
@@ -153,7 +243,7 @@ console.log(JSON.stringify({type:'turn.completed', usage: resumed
   assert.equal(second.usage_delta.output_tokens, 6000);
   // A redaction resume in the same folder: --previous-result is the result.json the retry renames.
   r = spawnSync(process.execPath, [script, '--brief', path.join(phase2, 'brief.txt'), '--cd', dir, '--session', 'delta-thread',
-    '--previous-result', path.join(phase2, 'result.json')], { env, encoding: 'utf8', timeout: 15000 });
+    '--previous-result', path.join(phase2, 'result.json')], { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(r.status, 0, r.stderr);
   const third = JSON.parse(await fs.readFile(path.join(phase2, 'result.json'), 'utf8'));
   assert.equal(third.usage_delta.source, 'delta-from-previous-result', 'the previous result is read before it is renamed');
@@ -167,7 +257,7 @@ test('codex-dispatch puts codex\'s own turn.failed error first in result.error (
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
   // Shape copied from a real failing codex exec --json run.
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 for (let i = 0; i < 30; i++) process.stderr.write('2026-09-26T00:23:39Z ERROR rmcp::transport::worker: worker quit with fatal: HTTP 401: Invalid or missing API key\\n');
 process.stderr.write('ERROR: MCP config file is not valid TOML at line 3\\n');
@@ -187,7 +277,7 @@ process.exit(1);
   const phase1 = path.join(dir, 'phase1');
   await fs.mkdir(phase1);
   await fs.writeFile(path.join(phase1, 'brief.txt'), 'p1');
-  const dispatch = () => spawnSync(process.execPath, [script, '--brief', path.join(phase1, 'brief.txt'), '--cd', dir], { env, encoding: 'utf8', timeout: 15000 });
+  const dispatch = () => spawnSync(process.execPath, [script, '--brief', path.join(phase1, 'brief.txt'), '--cd', dir], { env, encoding: 'utf8', timeout: 60000 });
   let r = dispatch();
   assert.equal(r.status, 1);
   const first = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
@@ -218,7 +308,7 @@ test('codex-dispatch --web records every web_search item (every query of a batch
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
   // Event shapes copied from a real codex 0.156 --search run.
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 console.log(JSON.stringify({type:'thread.started', thread_id:'t-web'}));
 console.log(JSON.stringify({type:'item.started', item:{id:'item_2', type:'web_search', query:'', action:{type:'other'}}}));
@@ -242,7 +332,7 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
     const folder = path.join(dir, web ? 'with' : 'without');
     await fs.mkdir(folder);
     await fs.writeFile(path.join(folder, 'brief.txt'), 'p');
-    const r = spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', dir, ...(web ? ['--web'] : [])], { env, encoding: 'utf8', timeout: 15000 });
+    const r = spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', dir, ...(web ? ['--web'] : [])], { env, encoding: 'utf8', timeout: 60000 });
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8'));
     if (web) {
@@ -262,7 +352,7 @@ test('codex-dispatch writes result.json with status "running" and the threadId a
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 console.log(JSON.stringify({type:'thread.started', thread_id:'t-killed'}));
 if (input.includes('hang')) { setTimeout(() => process.exit(0), 8000); } else {
@@ -302,7 +392,7 @@ if (input.includes('hang')) { setTimeout(() => process.exit(0), 8000); } else {
   assert.equal(JSON.parse(await fs.readFile(resultPath, 'utf8')).status, 'running', 'a killed dispatcher leaves the running record behind');
   await new Promise((r) => setTimeout(r, 8500)); // let the orphaned fake codex exit before cleanup
   await fs.writeFile(brief, 'ok');
-  const r = spawnSync(process.execPath, [script, '--brief', brief, '--cd', dir], { env, encoding: 'utf8', timeout: 15000 });
+  const r = spawnSync(process.execPath, [script, '--brief', brief, '--cd', dir], { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(JSON.parse(await fs.readFile(resultPath, 'utf8')).status, 'completed');
   const kept = JSON.parse(await fs.readFile(path.join(folder, 'result.attempt-1.json'), 'utf8'));
@@ -316,7 +406,7 @@ test('codex-dispatch --detach returns at once with a running record, the worker 
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 console.log(JSON.stringify({type:'thread.started', thread_id:'t-detach'}));
 await new Promise((r) => setTimeout(r, 1500));
@@ -387,13 +477,12 @@ test('codex-dispatch --wait-retry: exits 0 with the thread to resume once retryA
   const write = (rec) => fs.writeFile(resultPath, JSON.stringify({ status: 'rate-limited', threadId: 't-limit', ...rec }));
   const run = (...extra) => spawnSync(process.execPath, [script, '--wait-retry', resultPath, ...extra], { encoding: 'utf8', timeout: 30000 });
   const now = new Date();
-  if (now.getHours() !== 0 || now.getMinutes() > 2) {
-    await write({ retryAfter: clock(new Date(now.getTime() - 60000)) });
-    const r = run();
-    assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /usage limit ended at .*; resume thread t-limit with --session, or start a new dispatch/);
-  }
-  await write({ retryAfter: clock(new Date(now.getTime() + 2 * 3600 * 1000)) });
+  // finishedAt anchors the clock time to the day the record was written, so this holds across midnight too.
+  await write({ retryAfter: clock(new Date(now.getTime() - 60000)), finishedAt: new Date(now.getTime() - 90000).toISOString() });
+  const past = run();
+  assert.equal(past.status, 0, past.stderr);
+  assert.match(past.stdout, /usage limit ended at .*; resume thread t-limit with --session, or start a new dispatch/);
+  await write({ retryAfter: clock(new Date(now.getTime() + 2 * 3600 * 1000)), finishedAt: now.toISOString() });
   let r = run('--max-wait', '1');
   assert.equal(r.status, 3, r.stderr);
   assert.match(r.stdout, /\d+ s left until .*; run --wait-retry again/);
@@ -409,14 +498,14 @@ test('codex-dispatch --wait-retry: exits 0 with the thread to resume once retryA
   assert.equal(run('--bogus').status, 2);
 });
 
-test('both dispatchers refuse, before starting anything, to overwrite an existing --final-message-out file unless --replace-completed; a completed result.json in the folder does not stop a resume [slow]', async (t) => {
+test('codex-dispatch refuses, before starting anything, to overwrite an existing --final-message-out file unless --replace-completed; a completed result.json in the folder does not stop a resume [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch done '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const marker = path.join(dir, 'codex-started');
   const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, 'import { writeFileSync } from "node:fs";\nwriteFileSync(' + JSON.stringify(marker) + ', "x");\nprocess.exit(1);\n');
+  await fs.writeFile(fake, MCP_LIST + 'import { writeFileSync } from "node:fs";\nwriteFileSync(' + JSON.stringify(marker) + ', "x");\nprocess.exit(1);\n');
   const shim = path.join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex');
   await fs.writeFile(shim, process.platform === 'win32'
     ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
@@ -427,7 +516,7 @@ test('both dispatchers refuse, before starting anything, to overwrite an existin
   const folder = path.join(dir, 'B');
   await fs.mkdir(folder);
   await fs.writeFile(path.join(folder, 'brief.txt'), 'continue');
-  const run = (...extra) => spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', dir, '--session', 't-done', ...extra], { env, encoding: 'utf8', timeout: 15000 });
+  const run = (...extra) => spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', dir, '--session', 't-done', ...extra], { env, encoding: 'utf8', timeout: 60000 });
   const findings = path.join(dir, 'B-findings.md');
   await fs.writeFile(findings, 'the first answer');
   for (const extra of [[], ['--detach']]) {
@@ -444,8 +533,7 @@ test('both dispatchers refuse, before starting anything, to overwrite an existin
   await fs.rm(marker);
   run('--final-message-out', findings, '--replace-completed');
   await fs.access(marker);
-  const opencode = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const r = spawnSync(process.execPath, [opencode, '--brief', path.join(folder, 'brief.txt'), '--cd', dir, '--model', 'p/m', '--final-message-out', findings], { env, encoding: 'utf8', timeout: 15000 });
+  const r = run('--final-message-out', findings);
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /--final-message-out .*B-findings\.md already exists/);
   assert.match(r.stderr, /\(16 bytes\)/, 'the refusal names the file size');
@@ -453,7 +541,7 @@ test('both dispatchers refuse, before starting anything, to overwrite an existin
   assert.match(run('--final-message-out', findings).stderr, /it is empty \(0 bytes\), so that answer failed/);
 });
 
-test('both dispatchers: a run that exits 0 with an empty last message is status "error" and writes no --final-message-out file [slow]', async (t) => {
+test('codex-dispatch: a run that exits 0 with an empty last message is status "error" and writes no --final-message-out file [slow]', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch empty '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -464,12 +552,10 @@ test('both dispatchers: a run that exits 0 with an empty last message is status 
     codex: `console.log(JSON.stringify({type:'thread.started', thread_id:'t-empty'}));
 console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:' \\n'}}));
 `,
-    opencode: `console.log(JSON.stringify({type:'text', sessionID:'s-empty', part:{type:'text', text:''}}));
-`,
   };
   for (const [name, body] of Object.entries(fakes)) {
     const fake = path.join(bin, `${name}-fake.mjs`);
-    await fs.writeFile(fake, body);
+    await fs.writeFile(fake, MCP_LIST + body);
     const shim = path.join(bin, process.platform === 'win32' ? `${name}.cmd` : name);
     await fs.writeFile(shim, process.platform === 'win32'
       ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
@@ -479,14 +565,13 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   env.PATH = bin + path.delimiter + realGitDir();
   for (const [name, extra, pattern] of [
     ['codex', [], /codex exec exited 0 but its last agent_message was empty/],
-    ['opencode', ['--model', 'p/m'], /opencode run exited 0 but its last text event was empty/],
   ]) {
     const folder = path.join(dir, name);
     await fs.mkdir(folder);
     await fs.writeFile(path.join(folder, 'brief.txt'), 'go');
     const out = path.join(dir, `${name}-findings.md`);
     const script = fileURLToPath(new URL(`../${name}-dispatch.mjs`, import.meta.url));
-    const r = spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', target, '--final-message-out', out, ...extra], { env, encoding: 'utf8', timeout: 15000 });
+    const r = spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', target, '--final-message-out', out, ...extra], { env, encoding: 'utf8', timeout: 60000 });
     assert.equal(r.status, 1, r.stderr);
     const result = JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8'));
     assert.equal(result.status, 'error');
@@ -502,7 +587,7 @@ test('codex-dispatch: a Codex usage limit is status "rate-limited" with retryAft
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
   // Message text copied from a real codex 0.156 run that hit the account limit.
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 console.log(JSON.stringify({type:'thread.started', thread_id:'t-limit'}));
 const message = input.includes('limit')
@@ -522,7 +607,7 @@ process.exit(1);
     const folder = path.join(dir, kind);
     await fs.mkdir(folder);
     await fs.writeFile(path.join(folder, 'brief.txt'), kind);
-    const r = spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', dir], { env, encoding: 'utf8', timeout: 15000 });
+    const r = spawnSync(process.execPath, [script, '--brief', path.join(folder, 'brief.txt'), '--cd', dir], { env, encoding: 'utf8', timeout: 60000 });
     assert.equal(r.status, 1);
     const out = JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8'));
     assert.equal(out.status, expected);
@@ -544,7 +629,7 @@ test('codex-dispatch --final-message-out writes the exact final message as UTF-8
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 console.log(JSON.stringify({type:'thread.started', thread_id:'t-out'}));
 if (input.includes('fail')) process.exit(1);
@@ -561,7 +646,7 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   await fs.mkdir(folder, { recursive: true });
   const brief = path.join(folder, 'brief.txt');
   const out = path.join(dir, 'phase1', 'B-findings.md');
-  const dispatch = (...extra) => spawnSync(process.execPath, [script, '--brief', brief, '--cd', dir, '--final-message-out', out, ...extra], { env, encoding: 'utf8', timeout: 15000 });
+  const dispatch = (...extra) => spawnSync(process.execPath, [script, '--brief', brief, '--cd', dir, '--final-message-out', out, ...extra], { env, encoding: 'utf8', timeout: 60000 });
   await fs.writeFile(brief, 'ok');
   let r = dispatch();
   assert.equal(r.status, 0, r.stderr);
@@ -576,155 +661,13 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   assert.ok(!('finalMessageOut' in JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8'))));
 });
 
-test('opencode-dispatch --final-message-out writes the final message, and an unwritable path turns the run into status error [slow]', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode final out '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const bin = path.join(dir, 'bin');
-  const target = path.join(dir, 'target');
-  const phase1 = path.join(dir, 'phase1');
-  await Promise.all([fs.mkdir(bin), fs.mkdir(target), fs.mkdir(phase1)]);
-  await fs.writeFile(path.join(target, 'a.md'), 'x\n');
-  const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `let input = '';
-if (!process.stdin.isTTY) { for await (const chunk of process.stdin) input += chunk; }
-console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text:'## B1 — naïve'}}));
-`);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  await fs.writeFile(shim, process.platform === 'win32'
-    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n', { mode: 0o755 });
-  await fs.writeFile(path.join(phase1, 'brief.txt'), 'p1');
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-  env.PATH = bin + path.delimiter + realGitDir();
-  const dispatch = (out) => spawnSync(process.execPath, [script, '--brief', path.join(phase1, 'brief.txt'), '--cd', target, '--final-message-out', out], { env, encoding: 'utf8', timeout: 15000 });
-  const out = path.join(dir, 'B-findings.md');
-  let r = dispatch(out);
-  assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(await fs.readFile(out), Buffer.from('## B1 — naïve', 'utf8'));
-  assert.equal(JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8')).finalMessageOut, out);
-  r = dispatch(path.join(dir, 'missing-folder', 'B-findings.md'));
-  assert.equal(r.status, 1);
-  const failed = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
-  assert.equal(failed.status, 'error');
-  assert.match(failed.error, /could not write --final-message-out/);
-  assert.equal(failed.finalMessage, '## B1 — naïve', 'result.json still carries the message');
-});
-
-test('opencode-dispatch records its seat CLI in child.json while the run is going and removes it when the run ends [slow]', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode child record '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const bin = path.join(dir, 'bin');
-  const target = path.join(dir, 'target');
-  const phase1 = path.join(dir, 'phase1');
-  await Promise.all([fs.mkdir(bin), fs.mkdir(target), fs.mkdir(phase1)]);
-  await fs.writeFile(path.join(target, 'a.md'), 'x\n');
-  const seen = path.join(dir, 'seen.json');
-  const fake = path.join(bin, 'fake.mjs');
-  // The fake seat copies the dispatcher's child record while it runs, so the test sees what review-run would read.
-  await fs.writeFile(fake, `import { copyFileSync } from 'node:fs';
-let input = '';
-if (!process.stdin.isTTY) { for await (const chunk of process.stdin) input += chunk; }
-await new Promise((r) => setTimeout(r, 500));
-copyFileSync(${JSON.stringify(path.join(phase1, 'child.json'))}, ${JSON.stringify(seen)});
-console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text:'done'}}));
-`);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  await fs.writeFile(shim, process.platform === 'win32'
-    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n', { mode: 0o755 });
-  await fs.writeFile(path.join(phase1, 'brief.txt'), 'p1');
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-  env.PATH = bin + path.delimiter + realGitDir();
-  const r = spawnSync(process.execPath, [script, '--brief', path.join(phase1, 'brief.txt'), '--cd', target, '--final-message-out', path.join(dir, 'B.md')], { env, encoding: 'utf8', timeout: 20000 });
-  assert.equal(r.status, 0, r.stderr);
-  const record = JSON.parse(await fs.readFile(seen, 'utf8'));
-  assert.ok(Number.isInteger(record.childPid) && record.childPid > 0, JSON.stringify(record));
-  assert.ok(!Number.isNaN(Date.parse(record.childStartedAt)));
-  assert.ok('childStartToken' in record);
-  await assert.rejects(fs.access(path.join(phase1, 'child.json')), 'a finished run leaves no child record');
-});
-
-test('opencode-dispatch --isolate --worktree: Phase 1 and Phase 2 briefs in different folders share one worktree outside the run directory [slow]', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode worktree '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const bin = path.join(dir, 'bin');
-  const target = path.join(dir, 'target');
-  const run = path.join(dir, 'run');
-  await Promise.all([fs.mkdir(bin), fs.mkdir(target), fs.mkdir(path.join(run, 'phase1', 'B'), { recursive: true }), fs.mkdir(path.join(run, 'phase2', 'B'), { recursive: true })]);
-  const git = (...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: target, encoding: 'utf8' });
-  git('init', '-q');
-  await fs.writeFile(path.join(target, 'a.txt'), 'x\n');
-  git('add', 'a.txt');
-  git('commit', '-q', '-m', 'x');
-  const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `let input = '';
-if (!process.stdin.isTTY) { for await (const chunk of process.stdin) input += chunk; }
-console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text:'done'}}));
-`);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  await fs.writeFile(shim, process.platform === 'win32'
-    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n', { mode: 0o755 });
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-  env.PATH = bin + path.delimiter + realGitDir();
-  const worktree = path.join(dir, 'run-worktree');
-  const results = [];
-  for (const phase of ['phase1', 'phase2']) {
-    const brief = path.join(run, phase, 'B', 'brief.txt');
-    await fs.writeFile(brief, 'p');
-    const r = spawnSync(process.execPath, [script, '--brief', brief, '--cd', target, '--isolate', '--worktree', worktree], { env, encoding: 'utf8', timeout: 30000 });
-    assert.equal(r.status, 0, r.stderr);
-    results.push(JSON.parse(await fs.readFile(path.join(run, phase, 'B', 'result.json'), 'utf8')));
-  }
-  assert.equal(results[0].worktreePath, results[1].worktreePath);
-  assert.equal(path.resolve(results[0].worktreePath), path.resolve(worktree));
-  assert.match(results[1].isolationNote ?? '', /reused=true/);
-  const bad = spawnSync(process.execPath, [script, '--brief', path.join(run, 'phase1', 'B', 'brief.txt'), '--cd', target, '--worktree', worktree], { env, encoding: 'utf8' });
-  assert.notEqual(bad.status, 0);
-  assert.match(bad.stderr, /--worktree is only meaningful with --isolate/);
-});
-
-test('opencode-dispatch: a retry in the same folder keeps the earlier result.json as result.attempt-1.json [slow]', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode retry '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const bin = path.join(dir, 'bin');
-  const target = path.join(dir, 'target');
-  const phase1 = path.join(dir, 'phase1');
-  await Promise.all([fs.mkdir(bin), fs.mkdir(target), fs.mkdir(phase1)]);
-  await fs.writeFile(path.join(target, 'a.md'), 'x\n');
-  const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `let input = '';
-if (!process.stdin.isTTY) { for await (const chunk of process.stdin) input += chunk; }
-console.log(JSON.stringify({type:'text', sessionID:'s1', part:{type:'text', text:'done'}}));
-`);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  await fs.writeFile(shim, process.platform === 'win32'
-    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n', { mode: 0o755 });
-  await fs.writeFile(path.join(phase1, 'brief.txt'), 'p1');
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-  env.PATH = bin + path.delimiter + realGitDir();
-  const dispatch = () => spawnSync(process.execPath, [script, '--brief', path.join(phase1, 'brief.txt'), '--cd', target], { env, encoding: 'utf8', timeout: 15000 });
-  let r = dispatch();
-  assert.equal(r.status, 0, r.stderr);
-  const first = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
-  r = dispatch();
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /kept the earlier result\.json as result\.attempt-1\.json/);
-  assert.equal(JSON.parse(await fs.readFile(path.join(phase1, 'result.attempt-1.json'), 'utf8')).startedAt, first.startedAt);
-});
-
 test('dispatcher parses a real turn.completed.usage event into result.json\'s usage field with source "provider"', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch usage '));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `let input = '';
+  await fs.writeFile(fake, MCP_LIST + `let input = '';
 for await (const chunk of process.stdin) input += chunk;
 console.log(JSON.stringify({type:'thread.started', thread_id:'usage-fixture-thread'}));
 console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'KIWI'}}));
@@ -741,7 +684,7 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:26076,cac
   const args = [script, '--brief', brief, '--cd', dir, '--sandbox', 'read-only'];
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
   env.PATH = bin;
-  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
+  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
   assert.equal(output.status, 'completed');
@@ -770,7 +713,7 @@ test('dispatcher kills a hung codex process on --timeout and writes status timed
   // dispatcher's --timeout is the only thing that ends this process. Writes
   // its own pid so the test can confirm the REAL node process behind the
   // .cmd shim died, not just cmd.exe (see codex.cmd wrapping the shim).
-  await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
+  await fs.writeFile(fake, MCP_LIST + `import { writeFileSync } from 'node:fs';
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 console.log(JSON.stringify({type:'thread.started', thread_id:'hung-thread'}));
 setInterval(() => {}, 1000);
@@ -783,14 +726,15 @@ setInterval(() => {}, 1000);
   const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
   const brief = path.join(dir, 'brief.txt');
   await fs.writeFile(brief, 'fixture prompt');
-  const args = [script, '--brief', brief, '--cd', dir, '--sandbox', 'read-only', '--timeout', '2'];
+  // 15 s, not 2: under release-check's full parallel load the fake took over 2 s to start and write its pid.
+  const args = [script, '--brief', brief, '--cd', dir, '--sandbox', 'read-only', '--timeout', '15'];
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
   env.PATH = bin;
-  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
+  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(result.status, 1, result.stderr);
   const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
   assert.equal(output.status, 'timed-out');
-  assert.match(output.error, /timeout 2s/);
+  assert.match(output.error, /timeout 15s/);
   assertResultSchema(output);
 
   const fakePid = Number((await fs.readFile(pidFile, 'utf8')).trim());
@@ -800,235 +744,110 @@ setInterval(() => {}, 1000);
   );
 });
 
-test('opencode-dispatch kills a hung opencode process on --timeout and writes status timed-out', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode timeout '));
-  // The killed child can hold the folder for a moment on Windows (EBUSY); retry the cleanup.
+test('codex-dispatch stops a codex still running after its final answer and keeps the answer; a turn with no answer is not stopped early [slow]', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch answered '));
   t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
   const bin = path.join(dir, 'bin');
   await fs.mkdir(bin);
   const fake = path.join(bin, 'fake.mjs');
-  // Emits a sessionID event, then never closes stdout/exits on its own -- the
-  // dispatcher's --timeout is the only thing that ends this process. Does not
-  // read stdin: OPENCODE_SPAWN_STDIO sets the real child's stdin to 'ignore'.
-  await fs.writeFile(fake, `console.log(JSON.stringify({sessionID:'hung-session', type:'step_start'}));
+  const pidFile = path.join(dir, 'fake.pid');
+  await fs.writeFile(fake, MCP_LIST + `import { writeFileSync } from 'node:fs';
+let input = ''; for await (const c of process.stdin) input += c;
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+console.log(JSON.stringify({type:'thread.started', thread_id:'answered-thread'}));
+if (!input.includes('silent')) console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'the answer'}}));
+console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
+if (input.includes('orphan')) {
+  const { spawn } = await import('node:child_process');
+  const kid = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, windowsHide: true, stdio: ['ignore', 'inherit', 'inherit'] });
+  writeFileSync(${JSON.stringify(pidFile)}, String(kid.pid));
+  kid.unref();
+  process.exit(0);
+}
+if (input.includes('held')) {
+  const { spawn } = await import('node:child_process');
+  const body = "const { spawn } = require('node:child_process'); const o = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, windowsHide: true, cwd: require('node:os').tmpdir(), stdio: ['ignore', 'inherit', 'inherit'] }); require('node:fs').writeFileSync(" + JSON.stringify(${JSON.stringify(pidFile + '.held')}) + ", String(o.pid)); o.unref();";
+  const launcher = spawn(process.execPath, ['-e', body], { windowsHide: true, stdio: ['ignore', 'inherit', 'inherit'] });
+  await new Promise((resolve) => launcher.on('exit', resolve));
+}
 setInterval(() => {}, 1000);
 `);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  const wrapper = process.platform === 'win32'
+  const shim = path.join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex');
+  await fs.writeFile(shim, process.platform === 'win32'
     ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
-  await fs.writeFile(shim, wrapper, { mode: 0o755 });
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const brief = path.join(dir, 'brief.txt');
-  await fs.writeFile(brief, 'fixture prompt');
-  const args = [script, '--brief', brief, '--cd', dir, '--timeout', '2'];
+    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n', { mode: 0o755 });
+  const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
   env.PATH = bin;
-  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
-  assert.equal(result.status, 1, result.stderr);
-  const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
-  assert.equal(output.status, 'timed-out');
-  assert.match(output.error, /timeout 2s/);
-  assertResultSchema(output);
-});
-
-test('opencode-dispatch reports usage {source: "unavailable"} when no step_finish event is observed', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode usage '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const bin = path.join(dir, 'bin');
-  await fs.mkdir(bin);
-  const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `console.log(JSON.stringify({sessionID:'usage-fixture-session', type:'text', part:{type:'text', text:'PLUM'}}));
-`);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  const wrapper = process.platform === 'win32'
-    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
-  await fs.writeFile(shim, wrapper, { mode: 0o755 });
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const brief = path.join(dir, 'brief.txt');
-  await fs.writeFile(brief, 'fixture prompt');
-  const args = [script, '--brief', brief, '--cd', dir];
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-  env.PATH = bin;
-  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
-  assert.equal(result.status, 0, result.stderr);
-  const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
-  assert.equal(output.status, 'completed');
-  assert.deepEqual(output.usage, { source: 'unavailable' });
-  assertResultSchema(output);
-});
-
-test('opencode-dispatch parses a real step_finish.part.tokens event into result.json\'s usage field with source "provider"', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode usage real '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const bin = path.join(dir, 'bin');
-  await fs.mkdir(bin);
-  const fake = path.join(bin, 'fake.mjs');
-  // Exact shape captured from a live "opencode run --format json" call.
-  await fs.writeFile(fake, `console.log(JSON.stringify({type:'text', sessionID:'usage-fixture-session', part:{type:'text', text:'PLUM'}}));
-console.log(JSON.stringify({type:'step_finish', sessionID:'usage-fixture-session', part:{type:'step-finish', reason:'stop', tokens:{total:21703,input:19907,output:4,reasoning:0,cache:{write:0,read:1792}}, cost:0}}));
-`);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  const wrapper = process.platform === 'win32'
-    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
-  await fs.writeFile(shim, wrapper, { mode: 0o755 });
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const brief = path.join(dir, 'brief.txt');
-  await fs.writeFile(brief, 'fixture prompt');
-  const args = [script, '--brief', brief, '--cd', dir];
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-  env.PATH = bin;
-  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
-  assert.equal(result.status, 0, result.stderr);
-  const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
-  assert.equal(output.status, 'completed');
-  assert.equal(output.usage.source, 'provider');
-  assert.equal(output.usage.input_tokens, 19907);
-  assert.equal(output.usage.cached_input_tokens, 1792);
-  assert.equal(output.usage.cache_write_input_tokens, 0);
-  assert.equal(output.usage.output_tokens, 4);
-  assert.equal(output.usage.reasoning_tokens, 0);
-  assert.equal(output.usage.estimated_cost_usd, null, 'OpenCode\'s own cost field is not trusted (observed unreliable live) -- estimated_cost_usd stays null even though "raw" carries OpenCode\'s reported cost');
-  assert.equal(output.usage.raw.cost, 0, 'the verbatim OpenCode cost value is preserved in raw for anyone who wants to inspect it despite the reliability caveat');
-  assertResultSchema(output);
-});
-
-test('opencode-dispatch refuses to run unisolated when --isolate is requested against a non-git --cd', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode isolate-nongit '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const bin = path.join(dir, 'bin');
-  await fs.mkdir(bin);
-  const sentinel = path.join(dir, 'shim-was-invoked');
-  const fake = path.join(bin, 'fake.mjs');
-  // Sentinel proves the reviewer never launched, not just that its output was dropped.
-  await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
-writeFileSync(${JSON.stringify(sentinel)}, '');
-console.log(JSON.stringify({sessionID:'should-not-run', type:'step_start'}));
-`);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  const wrapper = process.platform === 'win32'
-    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
-  await fs.writeFile(shim, wrapper, { mode: 0o755 });
-
-  const target = path.join(dir, 'target');
-  await fs.mkdir(target);
-  await fs.writeFile(path.join(target, 'secret.txt'), 'must not be touched\n');
-
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  // Brief lives at <run-dir>/phase1/brief.txt per phase-1-independent-passes.md, so
-  // the dispatcher's briefDir/../worktree resolves to <run-dir>/worktree, not a path
-  // outside this test's own mkdtemp dir shared with every other run.
-  const phase1 = path.join(dir, 'phase1');
-  await fs.mkdir(phase1);
-  const brief = path.join(phase1, 'brief.txt');
-  await fs.writeFile(brief, 'fixture prompt');
-  const args = [script, '--brief', brief, '--cd', target, '--isolate'];
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-  env.PATH = bin + path.delimiter + realGitDir();
-  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
-  assert.equal(result.status, 1, result.stderr);
-
-  const output = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
-  assert.equal(output.status, 'error');
-  assert.match(output.error, /not a git repository/);
-  assert.equal(output.isolated, false);
-  assert.equal(output.worktreePath, null);
-  assertResultSchema(output);
-  assert.ok('touchedFilesNote' in output, 'touchedFiles is null here; touchedFilesNote must explain why');
-  await assert.rejects(fs.access(sentinel), 'the reviewer process must never launch when isolation fails closed');
-  assert.equal(await fs.readFile(path.join(target, 'secret.txt'), 'utf8'), 'must not be touched\n');
-});
-
-test('opencode-dispatch refuses to run unisolated when --isolate worktree setup fails', async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode isolate-setupfail '));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const bin = path.join(dir, 'bin');
-  await fs.mkdir(bin);
-  const sentinel = path.join(dir, 'shim-was-invoked');
-  const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
-writeFileSync(${JSON.stringify(sentinel)}, '');
-console.log(JSON.stringify({sessionID:'should-not-run', type:'step_start'}));
-`);
-  const shim = path.join(bin, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
-  const wrapper = process.platform === 'win32'
-    ? '@echo off\r\n"' + process.execPath + '" "' + fake + '" %*\r\n'
-    : '#!/bin/sh\nexec "' + process.execPath + '" "' + fake + '" "$@"\n';
-  await fs.writeFile(shim, wrapper, { mode: 0o755 });
-
-  // A git repo with no commits: `git worktree add ... HEAD` has no HEAD to
-  // resolve, so worktree setup fails deterministically without a fake shim.
-  const target = path.join(dir, 'target');
-  await fs.mkdir(target);
-  spawnSync('git', ['init', '-q'], { cwd: target });
-
-  const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-  const phase1 = path.join(dir, 'phase1');
-  await fs.mkdir(phase1);
-  const brief = path.join(phase1, 'brief.txt');
-  await fs.writeFile(brief, 'fixture prompt');
-  const args = [script, '--brief', brief, '--cd', target, '--isolate'];
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-  env.PATH = bin + path.delimiter + realGitDir();
-  const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000 });
-  assert.equal(result.status, 1, result.stderr);
-
-  const output = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
-  assert.equal(output.status, 'error');
-  assert.match(output.error, /worktree setup failed/);
-  assert.equal(output.isolated, false);
-  assert.equal(output.worktreePath, null);
-  assertResultSchema(output);
-  await assert.rejects(fs.access(sentinel), 'the reviewer process must never launch when isolation fails closed');
-});
-
-test(
-  'opencode-dispatch reports isolated:true/worktreePath truthfully when isolation succeeds but the dispatch itself fails afterward',
-  { skip: process.platform !== 'win32' && 'this dispatch-failure trigger (a % in the brief path) is win32-specific; POSIX has no equivalent forced-reject path here' },
-  async (t) => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opencode isolate-then-fail '));
-    t.after(() => fs.rm(dir, { recursive: true, force: true }));
-
-    // A real commit, so worktree setup (which needs a HEAD) succeeds.
-    const target = path.join(dir, 'target');
-    await fs.mkdir(target);
-    spawnSync('git', ['init', '-q'], { cwd: target });
-    await fs.writeFile(path.join(target, 'tracked.txt'), 'content\n');
-    spawnSync('git', ['add', '.'], { cwd: target });
-    spawnSync('git', ['-c', 'user.email=t@t.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: target });
-
-    const script = fileURLToPath(new URL('../opencode-dispatch.mjs', import.meta.url));
-    // Brief at <run-dir>/phase1/brief.txt so briefDir/../worktree stays inside dir.
-    const phase1 = path.join(dir, 'phase1');
-    await fs.mkdir(phase1);
-    // "%" in the brief path: readBrief()/checkCdExists() run BEFORE isolation and don't
-    // care about the character, but spawnCli's assertWin32Safe rejects it on every arg,
-    // including -f <briefPath> -- so this throws synchronously INSIDE runOpencode's
-    // try/catch, AFTER isolation has already succeeded. That ordering is the regression:
-    // a hardcoded isolated:false written before isolation was even attempted would pass
-    // this test only by accident; only a live read of isolated/worktreePath is correct.
-    const brief = path.join(phase1, 'bri%ef.txt');
-    await fs.writeFile(brief, 'fixture prompt');
-    const args = [script, '--brief', brief, '--cd', target, '--isolate'];
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
-    env.PATH = realGitDir();
-    // Unlike every sibling test here, this one runs a REAL `git worktree add` before its forced
-    // failure; under concurrent load that alone can take well over 15s, and a timed-out spawnSync
-    // reports status:null (a signal kill), not a real assertion failure.
-    const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 60000 });
-    assert.equal(result.status, 1, `signal=${result.signal} ${result.stderr}`);
-    assert.match(result.stderr, /unsafe to pass through cmd\.exe/);
-
-    const output = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
-    assert.equal(output.status, 'error');
-    assertResultSchema(output);
-    assert.equal(output.isolated, true, 'isolation genuinely succeeded before the spawn failed; must be reported true');
-    assert.ok(output.worktreePath, 'worktreePath must be the real path, not null, once isolation succeeded');
+  env.REVIEW_ANSWER_GRACE_MS = '1000';
+  // Without a job object, the path a sandbox that refuses one (and POSIX) takes: an orphan holding the output is only warned about.
+  env.REVIEW_SEAT_JOB = 'off';
+  const run = async (name, prompt, timeout) => {
+    const folder = path.join(dir, name);
+    await fs.mkdir(folder);
+    const brief = path.join(folder, 'brief.txt');
+    await fs.writeFile(brief, prompt);
+    const r = spawnSync(process.execPath, [script, '--brief', brief, '--cd', dir, '--sandbox', 'read-only', '--timeout', timeout, '--final-message-out', path.join(folder, 'answer.md')], { env, encoding: 'utf8', timeout: 60000 });
+    const fakePid = Number((await fs.readFile(pidFile, 'utf8')).trim());
+    let alive = true;
+    try { process.kill(fakePid, 0); } catch { alive = false; }
+    if (alive) process.kill(fakePid);
+    return { r, folder, alive, output: JSON.parse(await fs.readFile(path.join(folder, 'result.json'), 'utf8')) };
+  };
+  // --timeout is only a backstop: without the stop the run ends timed-out, not completed.
+  const done = await run('answered', 'fixture prompt', '20');
+  assert.equal(done.r.status, 0, done.r.stderr);
+  assert.match(done.r.stderr, /still running 1 s after its final answer; it was stopped and the answer kept/);
+  assert.equal(done.output.status, 'completed');
+  assert.equal(done.output.stoppedAfterAnswer, true);
+  assertResultSchema(done.output);
+  assert.equal(await fs.readFile(path.join(done.folder, 'answer.md'), 'utf8'), 'the answer');
+  assert.equal(done.alive, false, 'the real node process behind the shim was stopped');
+  assert.equal(done.output.stopIncomplete, undefined);
+  // Closing round 1 F3: stopped after its answer while a process outside its tree still holds the output.
+  try {
+    const held = await run('held', 'held prompt', '40');
+    assert.equal(held.r.status, 0, held.r.stderr);
+    assert.match(held.r.stderr, /still running 1 s after its final answer; it was stopped and the answer kept/);
+    assert.equal(held.output.status, 'completed');
+    assert.equal(held.output.stopIncomplete, true);
+  } finally {
+    try { process.kill(Number(await fs.readFile(`${pidFile}.held`, 'utf8'))); } catch { /* already gone */ }
   }
-);
+  // A process that left the tree and holds the output open cannot be stopped: the run says so instead of a clean stop.
+  const leaky = await run('orphan', 'orphan prompt', '30');
+  assert.equal(leaky.r.status, 0, leaky.r.stderr);
+  // Linux round: codex had exited, so nothing is killed and the text does not say it was stopped.
+  assert.match(leaky.r.stderr, /codex exec exited after its final answer, but its output was still open 1 s later: a process it started may still be running/);
+  assert.doesNotMatch(leaky.r.stderr, /was still running/);
+  assert.equal(leaky.output.status, 'completed');
+  assert.equal(leaky.output.stopIncomplete, true);
+  // Closing round 4: no answer and an exit with the output held open ends as an error soon, with --timeout 0.
+  const noAnswer = await run('orphan-silent', 'orphan silent prompt', '0');
+  assert.equal(noAnswer.r.status, 1, noAnswer.r.stderr);
+  assert.match(noAnswer.r.stderr, /codex exec exited without an answer, but its output stayed open/);
+  assert.notEqual(noAnswer.output.status, 'completed');
+  assert.equal(noAnswer.output.stopIncomplete, true);
+  // Closing round 5: the same when a finite --timeout falls due inside that wait: not a timeout, still warned.
+  // 4 s: due inside the 5 s exit wait, with room for a slow fake start on a loaded host.
+  const noAnswerTimed = await run('orphan-silent-timed', 'orphan silent prompt', '4');
+  assert.equal(noAnswerTimed.r.status, 1, noAnswerTimed.r.stderr);
+  assert.match(noAnswerTimed.r.stderr, /codex exec exited without an answer, but its output stayed open/);
+  assert.notEqual(noAnswerTimed.output.status, 'timed-out');
+  assert.notEqual(noAnswerTimed.output.status, 'completed');
+  assert.equal(noAnswerTimed.output.stopIncomplete, true);
+  // Closing round 3: a timeout due before the grace ends, on a codex that already exited, ends as answered, nothing killed.
+  env.REVIEW_ANSWER_GRACE_MS = '20000';
+  const early = await run('orphan-early', 'orphan prompt', '6');
+  env.REVIEW_ANSWER_GRACE_MS = '1000';
+  assert.equal(early.r.status, 0, early.r.stderr);
+  assert.match(early.r.stderr, /codex exec exited after its final answer, but its output was still open/);
+  assert.equal(early.output.status, 'completed');
+  const silent = await run('silent', 'silent prompt', '4');
+  assert.equal(silent.r.status, 1, silent.r.stderr);
+  assert.equal(silent.output.status, 'timed-out');
+  assert.equal(silent.output.stoppedAfterAnswer, undefined);
+});
 
 test('dispatcher writes a full result.json schema on a codex error path (nonexistent --cd)', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dispatch cd-error '));
@@ -1039,7 +858,7 @@ test('dispatcher writes a full result.json schema on a codex error path (nonexis
   const missingCd = path.join(dir, 'does-not-exist');
   const args = [script, '--brief', brief, '--cd', missingCd, '--sandbox', 'read-only',
     '--model', 'gpt-fixture', '--effort', 'high'];
-  const result = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 15000 });
+  const result = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 60000 });
   assert.equal(result.status, 1, result.stderr);
   const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
   assert.equal(output.status, 'error');
@@ -1059,7 +878,7 @@ test('dispatcher stamps deterministic timing fields on result.json, never leaves
   const missingCd = path.join(dir, 'does-not-exist');
   const beforeMs = Date.now();
   const args = [script, '--brief', brief, '--cd', missingCd, '--sandbox', 'read-only'];
-  const result = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 15000 });
+  const result = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 60000 });
   const afterMs = Date.now();
   assert.equal(result.status, 1, result.stderr);
   const output = JSON.parse(await fs.readFile(path.join(dir, 'result.json'), 'utf8'));
@@ -1076,7 +895,7 @@ test('dispatcher stamps deterministic timing fields on result.json, never leaves
 
 test('an argument error in any single-command script ends with the error line and never prints the full help', () => {
   const dir = path.dirname(fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url)));
-  for (const [script, prefix] of [['codex-dispatch.mjs', 'relay'], ['opencode-dispatch.mjs', 'relay'], ['build-manifest.mjs', 'build-manifest.mjs'], ['preflight.mjs', 'preflight.mjs']]) {
+  for (const [script, prefix] of [['codex-dispatch.mjs', 'relay'], ['preflight.mjs', 'preflight.mjs']]) {
     const r = spawnSync(process.execPath, [path.join(dir, script), '--bogus-flag'], { encoding: 'utf8', timeout: 30000 });
     assert.equal(r.status, 2, script);
     const lines = r.stderr.trimEnd().split('\n');
@@ -1084,6 +903,10 @@ test('an argument error in any single-command script ends with the error line an
     assert.equal(lines.at(-2), 'Run with --help for every option.', script);
     assert.ok(lines.length <= 3, `${script}: ${lines.length} lines on stderr`);
   }
+  // The manifest step is a review-run command: its argument error is its one line.
+  const manifest = spawnSync(process.execPath, [path.join(dir, 'review-run.mjs'), 'manifest', '--bogus-flag'], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(manifest.status, 2);
+  assert.equal(manifest.stderr, 'build-manifest: unrecognized argument: --bogus-flag\n');
 });
 
 test('codex-dispatch reports writes to a file that was already dirty, inside an untracked folder and under an ignored folder in a git --cd [slow]', async (t) => {
@@ -1106,7 +929,7 @@ test('codex-dispatch reports writes to a file that was already dirty, inside an 
   await fs.mkdir(path.join(target, 'build'));
   await fs.writeFile(path.join(target, 'build', 'o.txt'), 'o\n');
   const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
+  await fs.writeFile(fake, MCP_LIST + `import { writeFileSync } from 'node:fs';
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 writeFileSync(${JSON.stringify(path.join(target, 'a.txt'))}, 'three\\n');
@@ -1124,7 +947,7 @@ console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', t
   const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
   env.PATH = bin + path.delimiter + realGitDir();
-  const result = spawnSync(process.execPath, [script, '--brief', brief, '--cd', target], { env, encoding: 'utf8', timeout: 20000 });
+  const result = spawnSync(process.execPath, [script, '--brief', brief, '--cd', target], { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(await fs.readFile(path.join(phase1, 'result.json'), 'utf8'));
   assert.deepEqual(output.touchedFiles, ['a.txt', 'build/new.txt', 'u/new.txt']);
@@ -1138,7 +961,7 @@ test('codex-dispatch --detach: a worker killed with SIGKILL leaves no running co
   await Promise.all([fs.mkdir(bin), fs.mkdir(target), fs.mkdir(phase1)]);
   const pidFile = path.join(dir, 'pid');
   const fake = path.join(bin, 'fake.mjs');
-  await fs.writeFile(fake, `import { writeFileSync } from 'node:fs';
+  await fs.writeFile(fake, MCP_LIST + `import { writeFileSync } from 'node:fs';
 console.log(JSON.stringify({type:'thread.started', thread_id:'t-orphan'}));
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 setInterval(() => {}, 1000);
@@ -1155,7 +978,7 @@ setInterval(() => {}, 1000);
   const script = fileURLToPath(new URL('../codex-dispatch.mjs', import.meta.url));
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
   env.PATH = bin + path.delimiter + realGitDir() + path.delimiter + '/bin' + path.delimiter + '/usr/bin';
-  const started = spawnSync(process.execPath, [script, '--brief', brief, '--cd', target, '--detach'], { env, encoding: 'utf8', timeout: 20000 });
+  const started = spawnSync(process.execPath, [script, '--brief', brief, '--cd', target, '--detach'], { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(started.status, 0, started.stderr);
   for (let i = 0; i < 100 && !child; i++) {
     child = await fs.readFile(pidFile, 'utf8').then(Number, () => null);
@@ -1164,16 +987,16 @@ setInterval(() => {}, 1000);
   assert.ok(child, 'the fake codex never started');
   const result = path.join(phase1, 'result.json');
   let running;
-  for (let i = 0; i < 50 && !running?.childPid; i++) {
+  for (let i = 0; i < 50 && (!running?.childPid || !running?.threadId); i++) {
     running = JSON.parse(await fs.readFile(result, 'utf8'));
-    if (!running.childPid) await new Promise((r) => setTimeout(r, 100));
+    if (!running.childPid || !running.threadId) await new Promise((r) => setTimeout(r, 100));
   }
   assert.equal(running.childPid, child, 'the running record names the codex child');
   assert.equal(running.threadId, 't-orphan', 'and still carries the thread it started');
   process.kill(running.workerPid, 'SIGKILL');
   for (let i = 0; i < 50 && alive(running.workerPid); i++) await new Promise((r) => setTimeout(r, 100));
   assert.ok(alive(child), 'precondition: killing the worker alone leaves codex running');
-  const waited = spawnSync(process.execPath, [script, '--wait', result, '--max-wait', '10'], { env, encoding: 'utf8', timeout: 20000 });
+  const waited = spawnSync(process.execPath, [script, '--wait', result, '--max-wait', '10'], { env, encoding: 'utf8', timeout: 60000 });
   assert.equal(waited.status, 1);
   assert.match(waited.stdout, /has been stopped/);
   assert.match(waited.stdout, /resume thread t-orphan with --session/);

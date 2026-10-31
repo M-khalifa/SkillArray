@@ -11,24 +11,23 @@
 import { promises as fs, appendFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import readline from 'node:readline';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildChildEnv as buildChildEnvShared } from './env-filter.mjs';
 import { hashWriteInventory, diffInventories, DEPENDENCIES_NOTE } from './snapshot-utils.mjs';
 import { createDetachHandlers, DEFAULT_MAX_WAIT_S, retryDeadline, processStartToken } from './detach-utils.mjs';
-import { findChildThreads, findThreadRollout, rolloutModel } from './rollout-utils.mjs';
-import { isMainModule } from './path-utils.mjs';
+import { findChildThreads, findThreadRollout, rolloutEffort, rolloutModel } from './rollout-utils.mjs';
+import { GIT_C_LOCALE, gitRepoFromProbe, isMainModule } from './path-utils.mjs';
 import {
-  assertWin32Safe,
-  winQuote,
-  posixKillTree,
   killTree as killTreeShared,
   spawnCli,
   preserveEarlierResult,
   completedRunRefusal,
   writeFinalMessage,
+  answerGraceMs,
+  atomicWriteJson,
 } from './spawn-utils.mjs';
+import { runCli, installSignalForwarding as installSignalForwardingShared } from './cli-run.mjs';
 
 // Provisional -- see the --timeout default-assignment comment in parseArgs.
 const DEFAULT_TIMEOUT_S = 1800;
@@ -46,7 +45,7 @@ const CODEX_ENV_ALLOWLIST = [
   'CODEX_HOME',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
   'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
-  'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
+  'NODE_EXTRA_CA_CERTS', 'NODE_USE_SYSTEM_CA', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
 ];
 
 // Thin wrapper over the shared filter: fixes in codex's own credential-locator
@@ -61,25 +60,8 @@ function killTree(child, options = {}) {
   return killTreeShared(child, { log, ...options });
 }
 
-const SIGNAL_EXIT_CODE = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
-
-// detached:true (for posixKillTree's group-kill) moves the child out of this
-// process's controlling-terminal group, so Ctrl+C no longer reaches it
-// directly; without this, an interrupted dispatcher orphans the reviewer.
-// onSignal tells the runner a stop is under way: the child's close must not resolve a run that the exit below ends.
-function installSignalForwarding(child, { proc = process, killTreeFn = killTree, exit = (code) => process.exit(code), onSignal = () => {} } = {}) {
-  const handlers = {};
-  for (const sig of Object.keys(SIGNAL_EXIT_CODE)) {
-    handlers[sig] = () => {
-      onSignal();
-      log(`received ${sig}, terminating reviewer process`);
-      killTreeFn(child, { waitForGroup: true }).finally(() => exit(SIGNAL_EXIT_CODE[sig]));
-    };
-    proc.once(sig, handlers[sig]);
-  }
-  return () => {
-    for (const [sig, handler] of Object.entries(handlers)) proc.off(sig, handler);
-  };
+function installSignalForwarding(child, options = {}) {
+  return installSignalForwardingShared(child, { killTreeFn: killTree, exit: (code) => process.exit(code), log, ...options });
 }
 
 const USAGE = `codex-dispatch.mjs — dispatch a brief to Codex CLI ("codex exec") and capture the result as JSON.
@@ -127,13 +109,18 @@ Optional:
                          1800 (30 minutes) -- a provisional value, not derived from measured
                          run durations; result.json's durationMs field exists precisely so
                          this default can be re-derived from real data once runs accumulate.
+                         A codex still running 30 s after its final answer (REVIEW_ANSWER_GRACE_MS
+                         overrides) is stopped the same way and the run is "completed" with
+                         "stoppedAfterAnswer": true and a WARNING. When its output stays open (a
+                         process it started left the tree), or codex had already exited with its
+                         output still open, result.json also has "stopIncomplete": true.
   --env-mode <mode>      "filtered" (default) or "inherit". "filtered" passes the spawned
                          codex process only a base OS allowlist, codex's own credential-locator
                          variables (CODEX_HOME; auth itself is file-based under HOME/USERPROFILE,
                          also allowlisted), the proxy and CA variables (HTTP_PROXY, HTTPS_PROXY,
-                         ALL_PROXY, NO_PROXY in both cases, NODE_EXTRA_CA_CERTS, SSL_CERT_FILE,
-                         SSL_CERT_DIR, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE), and anything named in
-                         --env-passthrough -- excluding
+                         ALL_PROXY, NO_PROXY in both cases, NODE_EXTRA_CA_CERTS, NODE_USE_SYSTEM_CA,
+                         SSL_CERT_FILE, SSL_CERT_DIR, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE), and
+                         anything named in --env-passthrough -- excluding
                          everything else in this process's environment (AWS_*, GITHUB_TOKEN,
                          database passwords, etc.) that the REVIEWED repository's own code could
                          otherwise read if codex executes a command against it. "inherit" passes
@@ -183,15 +170,19 @@ Optional:
   --replace-completed    Run even though the --final-message-out file already exists. Without
                          it the dispatcher refuses (exit 2) before starting, so a duplicate
                          call never replaces a seat's finished answer.
-  --keep-user-extensions Start the seat with the user's Codex sub-agents, plugins, apps and
-                         skills catalog. By default every call (fresh and resumed) passes
+  --keep-user-extensions Start the seat with the user's Codex sub-agents, plugins, apps,
+                         skills catalog and MCP servers (outside the read-only sandbox). By default every call (fresh and resumed) passes
                          -c agents.enabled=false, features.multi_agent=false,
                          features.plugins=false, features.apps=false,
                          features.skill_search=false and skills.max_context_tokens=1: a seat
                          is one reviewer, and a spawned agent's tokens are billed but never
                          appear in "usage" (one seat started a 3-level chain that used 6.2M
-                         input tokens more than its result.json showed). The user's
-                         config.toml still loads, so its sandbox settings keep working.
+                         input tokens more than its result.json showed). Every MCP server
+                         "codex mcp list --json" reports as enabled is also passed as
+                         -c mcp_servers.<name>.enabled=false: such a server (node_repl,
+                         cua_repl) runs outside the read-only sandbox. If that list cannot
+                         be read, nothing is started. The user's config.toml still loads,
+                         so its sandbox settings keep working.
                          result.json "configOverrides" lists what was passed ([] with this flag).
                          "childThreads" lists every agent thread this call spawned, found in
                          CODEX_HOME/sessions ([] when none; null when the scan failed), each
@@ -235,11 +226,14 @@ Output:
     effortRequested string|null --effort as passed, unverified against the actual runtime.
     modelResolved  string|null  The model in the thread's rollout turn_context; null when the
                                  rollout is missing or has none (see selectionNote).
-    effortResolved null         Always null: no source reports the effective effort.
+    effortResolved string|null  The effort in the same turn_context ("high", "medium", ...);
+                                 "codex-default (not reported)" when no --effort was passed and the
+                                 rollout has none (Codex records no effort on its default); null when
+                                 the rollout is missing.
     selectionNote  string       States the modelResolved/effortResolved limitation above.
     isolated       false        Always false: Codex's read-only guarantee is its own
                                  --sandbox flag, not a worktree. Present so this shares a
-                                 schema with opencode-dispatch.mjs's result.json.
+                                 schema with claude-dispatch.mjs's result.json.
     worktreePath   null         Always null, same reason as isolated.
     isolationNote  null         Always null, same reason as isolated.
     webAccess      boolean      true when --web was passed (codex was launched with the
@@ -267,9 +261,8 @@ Output:
                                  is NOT assumed to be a subset of, or additive with,
                                  input_tokens; no derived/combined total is computed here.
                                  "raw" is codex's own turn.completed.usage object verbatim.
-                                 estimated_cost_usd is always null: no price table is embedded
-                                 in this dispatcher, cost is computed downstream from an
-                                 explicit, versioned price file.
+                                 estimated_cost_usd is always null: no price table ships with
+                                 the skill, so cost is reported in tokens only.
                                  usage is CUMULATIVE for the whole codex thread: a resumed
                                  call reports everything the thread has used so far.
     usage_delta   object        This call's own cost. A fresh thread: the same numbers as usage
@@ -380,7 +373,7 @@ function parseArgs(argv) {
         break;
       case '--isolate':
         throw new RelayError(
-          '--isolate is opencode-dispatch.mjs only; Codex has its own real read-only ' +
+          '--isolate is not a codex-dispatch option; Codex has its own real read-only ' +
             'sandbox (--sandbox read-only) and does not need a disposable worktree'
         );
       default:
@@ -432,21 +425,37 @@ function log(msg) {
 }
 
 // For the small git probes below; the codex exec run itself streams via spawnCli too (see runCodex).
-function runCapture(cmd, args, cwd) {
+function runCapture(cmd, args, cwd, env = process.env, timeoutMs = Number(process.env.REVIEW_PROBE_TIMEOUT_MS) || 120000) {
   return new Promise((resolve) => {
-    const child = spawnCli(cmd, args, { cwd });
+    const child = spawnCli(cmd, args, { cwd, env });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    const done = (value) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
+    // A probe that never answers (a hung "codex mcp list") would keep this process, and a detached worker, alive forever.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      Promise.resolve(killTreeShared(child)).finally(() => done({ code: -1, stdout, stderr: `${stderr}${cmd} ${args.slice(-3).join(' ')} did not finish in ${Math.round(timeoutMs / 1000)} s; it was stopped`, timedOut: true }));
+    }, timeoutMs);
     child.stdout.on('data', (d) => (stdout += d.toString('utf8')));
     child.stderr.on('data', (d) => (stderr += d.toString('utf8')));
-    child.on('error', (err) => resolve({ code: -1, stdout, stderr: String(err) }));
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    // After a timeout the kill closes the child too: the timeout result is the one reported.
+    child.on('error', (err) => { if (!timedOut) done({ code: -1, stdout, stderr: String(err) }); });
+    child.on('close', (code) => { if (!timedOut) done({ code, stdout, stderr }); });
   });
 }
 
 async function isGitRepo(cwd) {
-  const res = await runCapture('git', ['rev-parse', '--git-dir'], cwd);
-  return res.code === 0;
+  // No git at all: the target is read as a plain folder (content hashes), as before; only a repository git refuses to open
+  // is an error. "git --version" tells the two apart in any language.
+  if ((await runCapture('git', ['--version'], cwd)).code !== 0) return false;
+  const res = await runCapture('git', ['rev-parse', '--git-dir'], cwd, { ...process.env, ...GIT_C_LOCALE });
+  try {
+    return gitRepoFromProbe(res, cwd);
+  } catch (err) {
+    throw new RelayError(err.message);
+  }
 }
 
 async function gitStatusPorcelain(cwd) {
@@ -540,6 +549,15 @@ async function checkCdExists(cdPath) {
 // A review seat is one reviewer: no spawned sub-agents (their tokens never reach this thread's
 // usage), and none of the user's plugins, apps or skills catalog. Each key is in Codex's config
 // reference; the user's config.toml still loads, so its sandbox settings keep working.
+export const CODEX_DEFAULT_EFFORT = 'codex-default (not reported)';
+
+// The effort a seat ran with: the rollout's own, else (Codex writes none on its default) a marker when none was asked for;
+// null only when the rollout could not be read.
+export function resolvedEffort(rolloutText, effortRequested) {
+  if (rolloutText === null) return null;
+  return rolloutEffort(rolloutText) ?? (effortRequested ? null : CODEX_DEFAULT_EFFORT);
+}
+
 const SEAT_CONFIG_OVERRIDES = [
   'agents.enabled=false',
   'features.multi_agent=false',
@@ -549,7 +567,32 @@ const SEAT_CONFIG_OVERRIDES = [
   'skills.max_context_tokens=1',
 ];
 
-function buildCodexArgs({ cd, session, sandbox, skipGitRepoCheck, forceSkipGitCheck, model, effort, web, userExtensions = false }) {
+// The user's MCP servers run outside the Codex sandbox (a node_repl or cua_repl server runs code with the user's own rights,
+// and a server can hold a key), so a review seat starts with every configured server off. Codex has no switch for all of
+// them: each is turned off by name, from "codex mcp list --json" (an array of { name, enabled, ... }).
+export function mcpOffOverrides(listJson) {
+  let list;
+  try {
+    list = JSON.parse(String(listJson ?? '').replace(/^\uFEFF/, ''));
+  } catch (err) {
+    throw new RelayError(`"codex mcp list --json" did not print JSON (${err.message})`);
+  }
+  if (!Array.isArray(list)) throw new RelayError('"codex mcp list --json" did not print a list of servers');
+  const names = list.filter((s) => s && s.enabled !== false).map((s) => String(s?.name ?? ''));
+  const bad = names.find((n) => !/^[A-Za-z0-9_-]+$/.test(n));
+  if (bad !== undefined) throw new RelayError(`the Codex MCP server name "${bad}" cannot be turned off by a -c override (only letters, digits, _ and -)`);
+  return names.map((n) => `mcp_servers.${n}.enabled=false`);
+}
+
+// Listed under the seat's own overrides: a plugin's server is already off with features.plugins=false, and Codex rejects an
+// enabled=false override for a server that only a plugin defines ("invalid transport").
+async function listMcpOverrides(cd) {
+  const r = await runCapture('codex', [...SEAT_CONFIG_OVERRIDES.flatMap((o) => ['-c', o]), 'mcp', 'list', '--json'], cd);
+  if (r.code !== 0) throw new RelayError(`"codex mcp list --json" exited ${r.code}: ${r.stderr.trim().split(/\r?\n/).slice(-1)[0] ?? ''}`);
+  return mcpOffOverrides(r.stdout);
+}
+
+function buildCodexArgs({ cd, session, sandbox, skipGitRepoCheck, forceSkipGitCheck, model, effort, web, userExtensions = false, mcpOverrides = [] }) {
   const args = [];
   if (web) args.push('--search');
   args.push('exec');
@@ -560,90 +603,46 @@ function buildCodexArgs({ cd, session, sandbox, skipGitRepoCheck, forceSkipGitCh
   }
   if (model) args.push('--model', model);
   if (effort) args.push('-c', `model_reasoning_effort=${effort}`);
-  if (!userExtensions) for (const o of SEAT_CONFIG_OVERRIDES) args.push('-c', o);
+  if (!userExtensions) for (const o of [...SEAT_CONFIG_OVERRIDES, ...mcpOverrides]) args.push('-c', o);
   if (skipGitRepoCheck || forceSkipGitCheck) args.push('--skip-git-repo-check');
   args.push('--json', '-');
   return args;
 }
 
-function runCodex(options) {
+// The codex adapter: its --json events carry the thread, the agent's messages, the usage, web calls and failures.
+async function runCodex(options) {
   const { briefText, cd, timeout, envMode, envPassthrough } = options;
-  return new Promise((resolve, reject) => {
-    const args = buildCodexArgs(options);
-    const env = buildChildEnv({ envMode, envPassthrough });
-
-    let child;
-    try {
-      child = spawnCli('codex', args, { cwd: cd, env });
-    } catch (err) {
-      reject(new RelayError(`failed to spawn "codex": ${err.message}`));
-      return;
-    }
-
-    let stopping = false;
-    const uninstallSignalForwarding = installSignalForwarding(child, { onSignal: () => { stopping = true; } });
-    if (options.onSpawn) options.onSpawn(child);
-
-    child.on('error', (err) => {
-      uninstallSignalForwarding();
-      reject(new RelayError(`failed to spawn "codex": ${err.message}`));
-    });
-
-    let threadId = null;
-    let finalMessage = null;
-    let usage = null;
-    let stderrBuf = '';
-    let timedOut = false;
-    let settled = false;
-    const badLines = [];
-    const codexErrors = [];
-    const webCalls = [];
-
-    const rl = readline.createInterface({ input: child.stdout });
-
-    let timer = null;
-    // The caller exits right after this resolves, so a timed-out run waits for the whole process group to be killed.
-    let killing = null;
-    if (timeout) {
-      timer = setTimeout(() => {
-        timedOut = true;
-        killing = killTree(child, { waitForGroup: true }).catch((err) => log(`tree kill failed: ${err.message}`));
-        // killTree can silently fail to reach the real process (a missing
-        // taskkill, a process that ignores the signal). Resolve on a grace
-        // period regardless, so --timeout always bounds wall-clock time
-        // rather than only bounding it when the kill happens to work.
-        setTimeout(() => {
-          killing.finally(() => {
-            if (settled || stopping) return;
-            settled = true;
-            rl.close();
-            resolve({ code: null, threadId, finalMessage, usage, stderr: stderrBuf, badLines, timedOut, codexErrors, webCalls });
-          });
-        }, 5000);
-      }, timeout * 1000);
-    }
-    rl.on('line', (line) => {
+  const state = { threadId: null, finalMessage: null, usage: null, badLines: [], codexErrors: [], webCalls: [] };
+  // The same stderr, written as it arrives, so a sequencer can count failures while the seat still runs.
+  if (options.liveStderrPath) {
+    try { writeFileSync(options.liveStderrPath, ''); } catch (err) { log(`could not start ${options.liveStderrPath}: ${err.message}`); }
+  }
+  const run = await runCli({
+    command: 'codex', args: buildCodexArgs(options), cwd: cd, env: buildChildEnv({ envMode, envPassthrough }), input: briefText,
+    timeoutS: timeout, log, exit: (code) => process.exit(code), onSpawn: options.onSpawn ?? (() => {}),
+    onStderr: (chunk) => {
+      if (!options.liveStderrPath) return;
+      try { appendFileSync(options.liveStderrPath, chunk); } catch { /* live log is best effort; the full stderr is saved at the end */ }
+    },
+    onLine: (line) => {
       const trimmed = line.trim();
-      if (!trimmed) return;
+      if (!trimmed) return false;
       let evt;
       try {
         evt = JSON.parse(trimmed);
       } catch {
-        badLines.push(trimmed);
-        return;
+        state.badLines.push(trimmed);
+        return false;
       }
       if (evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
-        threadId = evt.thread_id;
-        if (options.onThreadStarted) options.onThreadStarted(threadId);
-      } else if (
-        evt.type === 'item.completed' &&
-        evt.item &&
-        evt.item.type === 'agent_message' &&
-        typeof evt.item.text === 'string'
-      ) {
-        finalMessage = evt.item.text;
+        state.threadId = evt.thread_id;
+        if (options.onThreadStarted) options.onThreadStarted(state.threadId);
+      } else if (evt.type === 'item.completed' && evt.item && evt.item.type === 'agent_message' && typeof evt.item.text === 'string') {
+        state.finalMessage = evt.item.text;
       } else if (evt.type === 'turn.completed' && evt.usage && typeof evt.usage === 'object') {
-        usage = evt.usage;
+        state.usage = evt.usage;
+        // A codex that keeps running after its answer (it can hang after its Stop hook) is stopped, and the answer kept.
+        return state.finalMessage !== null && state.finalMessage.trim() !== '';
       } else if (evt.type === 'item.completed' && evt.item && evt.item.type === 'web_search') {
         // Shape observed from codex 0.156: {query, action: {type, query? | queries?, url?}, results: [{url, ...}]}.
         // A batched call lists every query in action.queries; its top-level query is a shortened "..." summary.
@@ -651,7 +650,7 @@ function runCodex(options) {
         const queries = Array.isArray(it.action?.queries)
           ? it.action.queries.filter((q) => typeof q === 'string' && q !== '')
           : [it.action?.query || it.query].filter((q) => typeof q === 'string' && q !== '');
-        webCalls.push({
+        state.webCalls.push({
           action: it.action?.type ?? null,
           queries,
           url: it.action?.url ?? null,
@@ -659,40 +658,12 @@ function runCodex(options) {
         });
       } else if (evt.type === 'error' || evt.type === 'turn.failed') {
         const text = describeCodexError(evt.type === 'error' ? evt.message : evt.error?.message);
-        if (text && !codexErrors.includes(text)) codexErrors.push(text);
+        if (text && !state.codexErrors.includes(text)) state.codexErrors.push(text);
       }
-    });
-
-    // The same stderr, written as it arrives, so a sequencer can count failures while the seat still runs.
-    if (options.liveStderrPath) {
-      try { writeFileSync(options.liveStderrPath, ''); } catch (err) { log(`could not start ${options.liveStderrPath}: ${err.message}`); }
-    }
-    child.stderr.on('data', (d) => {
-      stderrBuf += d.toString('utf8');
-      if (options.liveStderrPath) {
-        try { appendFileSync(options.liveStderrPath, d); } catch { /* live log is best effort; the full stderr is saved at the end */ }
-      }
-    });
-
-    // Without this, a codex process dying before it reads a large brief crashes the
-    // whole script via an unhandled stdin error, skipping writeErrorResult() entirely.
-    child.stdin.on('error', (err) => {
-      log(`stdin write failed: ${err.message}`);
-    });
-    child.stdin.write(briefText);
-    child.stdin.end();
-
-    child.on('close', (code) => {
-      uninstallSignalForwarding();
-      if (timer) clearTimeout(timer);
-      if (settled || stopping) return;
-      settled = true;
-      Promise.resolve(killing).finally(() => {
-        rl.close();
-        resolve({ code, threadId, finalMessage, usage, stderr: stderrBuf, badLines, timedOut, codexErrors, webCalls });
-      });
-    });
-  });
+      return false;
+    },
+  }).catch((err) => { throw new RelayError(err.message); });
+  return { ...state, ...run };
 }
 
 // codex --json reports a failed turn on stdout ("error" / "turn.failed" events); its message is
@@ -739,11 +710,7 @@ function composeRunError(prefix, codexResult, stderrLog = null) {
 // between cached_input_tokens and input_tokens (e.g. that one is a subset of
 // the other) -- codex's own event does not disclose that, so the fields are
 // recorded exactly as reported, with no derived/combined total computed here.
-// "raw" keeps codex's own event verbatim: opencode-dispatch.mjs's equivalent
-// function normalizes a differently-named field set (cache.read/cache.write
-// vs. codex's cached_input_tokens/cache_write_input_tokens), so the raw copy
-// is what lets a reader recover the exact original shape from either CLI
-// without needing to trust the normalization was lossless.
+// "raw" keeps codex's own event verbatim, so a reader can recover the exact original shape.
 function buildUsageField(rawUsage) {
   if (!rawUsage) {
     return { source: 'unavailable' };
@@ -800,16 +767,8 @@ function checkSessionIdentity({ session, observedThreadId }) {
   return null; // confirmed: session identity is sound
 }
 
-async function atomicWriteJson(filePath, data) {
-  const dir = path.dirname(filePath);
-  const tmpPath = path.join(dir, `.result.json.tmp-${process.pid}`);
-  const payload = JSON.stringify(data, null, 2) + '\n';
-  await fs.writeFile(tmpPath, payload, 'utf8');
-  await fs.rename(tmpPath, filePath);
-}
-
 // Every result.json write from either dispatcher carries these keys (plus its
-// own session-id key: threadId here, sessionId in opencode-dispatch.mjs), so
+// own session-id key: threadId here, sessionId in claude-dispatch.mjs), so
 // review-protocol.md's manifest fields always exist regardless of which
 // runtime dispatched a seat. touchedFilesNote and error are conditional.
 //
@@ -856,6 +815,7 @@ function runningRecord(args, { startedAt, threadId = null, worker = null, child 
 
 const { runDetach, runWait, runWaitRetry, runJob } = createDetachHandlers({
   scriptPath: fileURLToPath(import.meta.url), dispatch, runningRecord, atomicWriteJson, RelayError, log,
+  workerEnvNames: ['PATH', 'CODEX_HOME', 'REVIEW_SEAT_JOB'],
 });
 
 async function main() {
@@ -980,6 +940,13 @@ async function dispatch(argv, { worker = null } = {}) {
   let touchedFilesNote;
   try {
     gitTracked = await isGitRepo(cdAbs);
+  } catch (err) {
+    // A repository git refuses to open is not reviewed as a plain folder.
+    log(err.message);
+    await writeErrorResult(err.message);
+    process.exit(1);
+  }
+  try {
     try {
       // Content hashes see a write to a file that was already dirty, to a new file inside an untracked folder and to an
       // ignored one, none of which a change in `git status` shows.
@@ -1007,17 +974,25 @@ async function dispatch(argv, { worker = null } = {}) {
   let lastThreadId = null;
   const writeRunningResult = (threadId) => {
     lastThreadId = threadId;
-    runningWrite = atomicWriteJson(resultPath, runningRecord(args, { startedAt, threadId, worker, child }))
+    // Chained: the spawn and thread-start writes share one temp file, so two at once collide on its rename.
+    runningWrite = runningWrite.then(() => atomicWriteJson(resultPath, runningRecord(args, { startedAt, threadId, worker, child })))
       .catch((err) => log(`could not write the in-progress result.json: ${err.message}`));
   };
 
   let codexResult;
+  let mcpOverrides = [];
   try {
+    if (!args.userExtensions) {
+      mcpOverrides = await listMcpOverrides(cdAbs).catch((err) => {
+        throw new RelayError(`${err.message}; a seat runs with every MCP server off, so nothing was started (update the Codex CLI until "codex mcp list --json" works)`);
+      });
+    }
     codexResult = await runCodex({
+      mcpOverrides,
       onThreadStarted: writeRunningResult,
       onSpawn: (spawned) => {
         if (!worker) return;
-        child = { childPid: spawned.pid, childStartToken: processStartToken(spawned.pid), childStartedAt: new Date().toISOString() };
+        child = { childPid: spawned.pid, childStartToken: processStartToken(spawned.pid), childStartedAt: new Date().toISOString(), ...(spawned.reviewRunId ? { childRunId: spawned.reviewRunId } : {}) };
         writeRunningResult(lastThreadId);
       },
       liveStderrPath: path.join(briefDir, 'result.stderr.live.log'),
@@ -1076,7 +1051,7 @@ async function dispatch(argv, { worker = null } = {}) {
     threadId: codexResult.threadId, touchedFiles,
     modelRequested: args.model, effortRequested: args.effort,
     modelResolved: null, effortResolved: null,
-    selectionNote: 'modelResolved comes from the thread rollout (turn_context), null when it is missing; the JSON event stream does not verify effective effort.',
+    selectionNote: 'modelResolved and effortResolved come from the thread rollout (turn_context), null when it is missing.',
     // Codex's read-only guarantee is its own --sandbox flag, not a worktree;
     // these stay constant so both dispatchers' result.json feed the same manifest fields.
     isolated: false, worktreePath: null, isolationNote: null,
@@ -1102,25 +1077,47 @@ async function dispatch(argv, { worker = null } = {}) {
   baseFields.usage_delta = buildUsageDelta(baseFields.usage, {
     session: args.session, threadId: codexResult.threadId, previous,
   });
-  baseFields.configOverrides = args.userExtensions ? [] : [...SEAT_CONFIG_OVERRIDES];
+  baseFields.configOverrides = args.userExtensions ? [] : [...SEAT_CONFIG_OVERRIDES, ...mcpOverrides];
   // Spawned agents bill the same account but are not in "usage"; list them so the cost is not hidden.
   const sessionsDir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
   baseFields.childThreads = await findChildThreads(codexResult.threadId, startedAtMs, sessionsDir).catch((err) => {
     log(`could not scan ${sessionsDir} for spawned agents: ${err.message}`);
     return null;
   });
-  baseFields.modelResolved = await findThreadRollout(codexResult.threadId, sessionsDir)
-    .then(async (file) => (file ? rolloutModel(await fs.readFile(file, 'utf8')) : null))
+  const rolloutText = await findThreadRollout(codexResult.threadId, sessionsDir)
+    .then(async (file) => (file ? fs.readFile(file, 'utf8') : null))
     .catch((err) => {
       log(`could not read the model from the rollout in ${sessionsDir}: ${err.message}`);
       return null;
     });
+  baseFields.modelResolved = rolloutText === null ? null : rolloutModel(rolloutText);
+  baseFields.effortResolved = resolvedEffort(rolloutText, baseFields.effortRequested);
   if (baseFields.childThreads?.length > 0) {
     const input = baseFields.childThreads.reduce((s, c) => s + (c.usage?.input_tokens ?? 0), 0);
     log(`WARNING: codex spawned ${baseFields.childThreads.length} agent thread(s) using ${input} more input tokens, not counted in "usage"; see childThreads`);
   }
 
   if (codexResult.codexErrors.length > 0) baseFields.codexErrors = codexResult.codexErrors;
+  // The Windows job object: what the CLI left running and was stopped, or why no job could be used.
+  if (codexResult.leftoversStopped) baseFields.leftoversStopped = codexResult.leftoversStopped;
+  if (codexResult.jobRefused !== undefined) baseFields.jobRefused = codexResult.jobRefused;
+  if (codexResult.exitedOutputOpen) {
+    baseFields.stopIncomplete = true;
+    log('WARNING: codex exec exited without an answer, but its output stayed open: a process it started may still be running; check the process list');
+  }
+  if (codexResult.stoppedAfterAnswer) {
+    baseFields.stoppedAfterAnswer = true;
+    if (codexResult.exitedBeforeStop) {
+      baseFields.stopIncomplete = true;
+      log(`WARNING: codex exec exited after its final answer, but its output was still open ${codexResult.stoppedAtTimeout ? 'when its --timeout ended' : `${answerGraceMs() / 1000} s later`}: a process it started may still be running; check the process list. The answer was kept`);
+    } else {
+      log(`WARNING: codex exec was still running ${codexResult.stoppedAtTimeout ? 'when its --timeout ended' : `${answerGraceMs() / 1000} s`} after its final answer; it was stopped and the answer kept`);
+      if (codexResult.stopIncomplete) {
+        baseFields.stopIncomplete = true;
+        log('WARNING: its output stayed open after the stop: a process it started may still be running; check the process list');
+      }
+    }
+  }
   // With --web, every web search the seat ran, so a TRUST-BOUNDARY hit can be checked against it.
   if (args.web) baseFields.webCalls = codexResult.webCalls;
   let stderrLog = null;
@@ -1254,12 +1251,9 @@ export {
   parsePorcelainRecords,
   parsePorcelainPaths,
   diffTouchedFiles,
-  assertWin32Safe,
-  winQuote,
   checkSessionIdentity,
   parseArgs,
   RelayError,
-  posixKillTree,
   installSignalForwarding,
   RESULT_REQUIRED_KEYS,
   codexReadOnly,

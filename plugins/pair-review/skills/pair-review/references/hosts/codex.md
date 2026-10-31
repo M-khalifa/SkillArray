@@ -29,7 +29,7 @@ from Codex, and Codex started from Claude Code, inherit each other's markers.
   "seatA": {"provider": "openai", "runtime": "codex", "model": "gpt-5.6-sol", "effort": null, "transport": "native"},
   "seatB": {"provider": "openai", "runtime": "codex", "model": "gpt-5.6-terra", "effort": null, "transport": "native"},
   "auditor": {"provider": "openai", "runtime": "codex", "model": "gpt-5.6-sol", "effort": null, "transport": "native"},
-  "flags": {"auditDepth": "light", "falsification": false, "mode": "collaborate"}
+  "flags": {"falsification": false, "mode": "collaborate"}
 }
 ```
 
@@ -65,7 +65,7 @@ agent's file plus `--native-done`. You do the spawning with the Codex agent tool
    a seat after the exchange began. Then `phase2 --wait --native-done A,B`.
 5. `audit --prepare`; spawn the auditor with a new `spawn_agent`, `fork_turns: none`, only the anonymous
    audit inputs; then `audit --finish --native-done auditor`.
-6. Manifest: `build-manifest --run-dir "<run-dir>"` copies `host`, `support` and `host_status`;
+6. Manifest: `review-run manifest --run-dir "<run-dir>"` copies `host`, `support` and `host_status`;
    `--seat-transcript A=<rollout file>` (and `B=`, `auditor=`) records each agent's usage and the model in
    its rollout. `~/.codex/sessions/<year>/<month>/<day>/rollout-*-<thread id>.jsonl` is the file; the
    orchestrator thread's `findChildThreads` locates the spawned ones by `agent_path`.
@@ -79,7 +79,7 @@ a native agent stays addressable by task name (shown once with a probe agent: on
 | Property | Native Codex (trial) |
 |---|---|
 | Source edits | a prompt rule plus the snapshot-hash check at every phase boundary; no sandbox stops an edit (the same as a native Claude seat on Claude Code) |
-| Model identity | `build-manifest` reads the rollout `turn_context` model: the model the thread was configured with. `review-run --wait` prints "requested ids differ; effective distinctness unverified" because no result.json exists yet; the manifest gives the later, better figure |
+| Model identity | `review-run manifest` reads the rollout `turn_context` model: the model the thread was configured with. `review-run --wait` prints "requested ids differ; effective distinctness unverified" because no result.json exists yet; the manifest gives the later, better figure |
 | Usage | the rollout's token counters |
 | `readOnly` in the manifest | not recorded for a native seat |
 
@@ -103,5 +103,5 @@ a native agent stays addressable by task name (shown once with a probe agent: on
 ## Orchestrator cost
 
 `CODEX_THREAD_ID` is the thread ID in the orchestrator's rollout file name. Record it with
-`build-manifest --seat-transcript orchestrator=<rollout>@<start>/<end>` (ISO times). An `--ephemeral` run
+`review-run manifest --seat-transcript orchestrator=<rollout>@<start>/<end>` (ISO times). An `--ephemeral` run
 writes no rollout, so a review is never run that way.

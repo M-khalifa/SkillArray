@@ -1,0 +1,5 @@
+{"phase":"phase1","mode":"phase1","seat":"A","skill":"cross-review","version":"1.1.0","at":"2026-10-20T13:16:56.760Z"}
+{"phase":"phase1","mode":"phase1","seat":"B","skill":"cross-review","version":"1.1.0","at":"2026-10-20T13:16:59.181Z"}
+{"phase":"phase2","mode":"delta","seat":null,"skill":"cross-review","version":"1.1.0","at":"2026-10-20T13:43:44.818Z"}
+{"phase":"phase2","mode":"delta","seat":null,"skill":"cross-review","version":"1.1.0","at":"2026-10-20T13:43:45.331Z"}
+{"phase":"phase3","mode":"auditor","seat":null,"skill":"cross-review","version":"1.1.0","at":"2026-10-20T13:49:28.108Z"}

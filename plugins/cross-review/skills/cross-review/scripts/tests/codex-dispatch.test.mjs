@@ -2,6 +2,7 @@
 // Run: node --test scripts/tests/codex-dispatch.test.mjs
 // (name the file -- the directory form `node --test scripts/tests/` reports a spurious failure)
 import { test } from 'node:test';
+import { assertWin32Safe, posixKillTree } from '../spawn-utils.mjs';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
@@ -13,12 +14,10 @@ import {
   parsePorcelainRecords,
   parsePorcelainPaths,
   diffTouchedFiles,
-  assertWin32Safe,
   checkSessionIdentity,
   parseArgs,
   buildCodexArgs,
   RelayError,
-  posixKillTree,
   installSignalForwarding,
   RESULT_REQUIRED_KEYS,
   codexReadOnly,
@@ -27,7 +26,21 @@ import {
   buildChildEnv,
   buildUsageField,
   buildUsageDelta,
+  mcpOffOverrides,
+  resolvedEffort,
+  CODEX_DEFAULT_EFFORT,
 } from '../codex-dispatch.mjs';
+
+test('Linux round F9: the resolved effort is the rollout\'s own; with none and no --effort it is the Codex-default marker, never a silent null', () => {
+  const line = (o) => JSON.stringify(o);
+  const withEffort = [line({ type: 'session_meta', payload: { id: 't' } }), line({ type: 'turn_context', payload: { model: 'gpt-6-sol', effort: 'high' } })].join('\n');
+  const noEffort = [line({ type: 'session_meta', payload: { id: 't' } }), line({ type: 'turn_context', payload: { model: 'gpt-5.6-luna', reasoning_effort: null } })].join('\n');
+  assert.equal(resolvedEffort(withEffort, 'high'), 'high');
+  assert.equal(resolvedEffort(noEffort, null), CODEX_DEFAULT_EFFORT);
+  assert.equal(CODEX_DEFAULT_EFFORT, 'codex-default (not reported)');
+  assert.equal(resolvedEffort(noEffort, 'medium'), null, 'an asked-for effort the rollout does not confirm stays unknown');
+  assert.equal(resolvedEffort(null, null), null, 'no rollout: unknown');
+});
 
 // assertWin32Safe only throws on win32; skip the throwing tests elsewhere.
 const IS_WIN32 = process.platform === 'win32';
@@ -206,10 +219,10 @@ test('parseArgs: a well-formed --session with a real value still parses correctl
   assert.equal(args.session, 'thread-123');
 });
 
-test('parseArgs: --isolate is rejected with a message pointing at opencode-dispatch.mjs and --sandbox read-only, not a bare "unrecognized argument"', () => {
+test('parseArgs: --isolate is rejected with a message pointing at --sandbox read-only, not a bare "unrecognized argument"', () => {
   assert.throws(
     () => parseArgs(['--brief', 'b.txt', '--cd', '.', '--isolate']),
-    /opencode-dispatch\.mjs only.*--sandbox read-only/s
+    /not a codex-dispatch option.*--sandbox read-only/s
   );
 });
 
@@ -432,6 +445,39 @@ test('installSignalForwarding: SIGINT and SIGTERM trigger killTree on the child 
   }
 });
 
+test('closing round 3: a stop signal never signals a CLI that already exited (its pid may be reused), and still kills one that has not', async () => {
+  const cases = [[{}, true], [{ exitCode: null, signalCode: null }, true], [{ exitCode: 0 }, false], [{ exitCode: 1 }, false], [{ exitCode: null, signalCode: 'SIGKILL' }, false]];
+  for (const [fields, expectKill] of cases) {
+    const proc = new EventEmitter();
+    const child = Object.assign(new EventEmitter(), { pid: 4194301 }, fields);
+    const killed = [];
+    const exited = [];
+    installSignalForwarding(child, { proc, killTreeFn: (c) => { killed.push(c); return Promise.resolve(); }, exit: (c) => exited.push(c) });
+    proc.emit('SIGINT');
+    await new Promise((r) => setImmediate(r));
+    assert.equal(killed.length, expectKill ? 1 : 0, JSON.stringify(fields));
+    assert.deepEqual(exited, [130], JSON.stringify(fields));
+  }
+});
+
+test('installSignalForwarding: a second signal during the kill (Ctrl-C again) is caught and ignored, never left to Node\'s default handler', async () => {
+  const proc = new EventEmitter();
+  const child = fakeChild();
+  const killed = [];
+  const exited = [];
+  let release;
+  const pending = new Promise((r) => { release = r; });
+  installSignalForwarding(child, { proc, killTreeFn: (c) => { killed.push(c); return pending; }, exit: (c) => exited.push(c) });
+  proc.emit('SIGINT');
+  assert.equal(proc.listenerCount('SIGINT'), 1, 'still caught while the kill runs');
+  proc.emit('SIGINT');
+  proc.emit('SIGTERM');
+  release();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(killed, [child], 'one kill');
+  assert.deepEqual(exited, [130], 'one exit, with the first signal\'s code');
+});
+
 test('installSignalForwarding: uninstall removes the listeners, a later signal does nothing', async () => {
   const proc = new EventEmitter();
   const child = fakeChild();
@@ -443,14 +489,6 @@ test('installSignalForwarding: uninstall removes the listeners, a later signal d
   proc.emit('SIGINT');
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(killed, []);
-});
-
-const HAS_OPENCODE = fs.access(new URL('../opencode-dispatch.mjs', import.meta.url)).then(() => true, () => false);
-
-test('RESULT_REQUIRED_KEYS: codex and opencode dispatchers share the same result.json schema (minus their own session-id key)', async (t) => {
-  if (!(await HAS_OPENCODE)) return t.skip('opencode-dispatch.mjs is not in this skill folder');
-  const { RESULT_REQUIRED_KEYS: opencodeKeys } = await import('../opencode-dispatch.mjs');
-  assert.deepEqual([...RESULT_REQUIRED_KEYS].sort(), [...opencodeKeys].sort());
 });
 
 test('buildChildEnv: envMode "inherit" returns undefined, matching Node spawn()\'s own full-inheritance default', () => {
@@ -476,8 +514,17 @@ test('buildChildEnv: envMode "filtered" keeps CODEX_HOME, codex\'s own credentia
   assert.equal(env.CODEX_HOME, '/custom/.codex');
 });
 
+test('mcpOffOverrides: one override per enabled server; a server already off is skipped; bad output or an unsafe name is refused', () => {
+  assert.deepEqual(mcpOffOverrides(JSON.stringify([{ name: 'node_repl', enabled: true }, { name: 'open-brain' }, { name: 'off', enabled: false }])),
+    ['mcp_servers.node_repl.enabled=false', 'mcp_servers.open-brain.enabled=false']);
+  assert.deepEqual(mcpOffOverrides('[]'), []);
+  assert.throws(() => mcpOffOverrides('not json'), /did not print JSON/);
+  assert.throws(() => mcpOffOverrides('{"servers":[]}'), /did not print a list/);
+  assert.throws(() => mcpOffOverrides(JSON.stringify([{ name: 'a.b' }])), /cannot be turned off/);
+});
+
 test('buildChildEnv: envMode "filtered" keeps the proxy and CA variables a Claude seat keeps', () => {
-  const names = ['HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'];
+  const names = ['HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS', 'NODE_USE_SYSTEM_CA', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'];
   const env = buildChildEnv({ envMode: 'filtered', platform: 'linux', sourceEnv: { PATH: '/usr/bin', GITHUB_TOKEN: 'x', ...Object.fromEntries(names.map((n) => [n, `v-${n}`])) } });
   for (const n of names) assert.equal(env[n], `v-${n}`, n);
   assert.ok(!('GITHUB_TOKEN' in env));
@@ -618,6 +665,104 @@ test('retryDeadline: reads a 12-hour clock time as today, or tomorrow when it is
   assert.deepEqual(retryDeadline('10:51 A.M.', now), new Date(2026, 8, 28, 10, 51));
   for (const text of [null, '', '15:06', '13:06 PM', '3:66 PM', '0:30 AM', 'Sep 29th, 2026 3:06 PM', 'in 5 days']) {
     assert.equal(retryDeadline(text, now), null, JSON.stringify(text));
+  }
+});
+
+test('flake fix: retryDeadline reads the clock time from when the record was written, so a deadline read after midnight or a day later lands on the right day', () => {
+  const written = new Date(2026, 8, 28, 23, 50).toISOString();
+  assert.deepEqual(retryDeadline('11:59 PM', new Date(2026, 8, 29, 0, 1), { after: written }), new Date(2026, 8, 28, 23, 59), 'read two minutes after midnight: passed, not tomorrow night');
+  assert.deepEqual(retryDeadline('4:00 AM', new Date(2026, 8, 29, 16, 30), { after: written }), new Date(2026, 8, 29, 4, 0), 'read the next afternoon: passed, not tomorrow');
+  assert.deepEqual(retryDeadline('12:05 AM', new Date(2026, 8, 28, 23, 55), { after: written }), new Date(2026, 8, 29, 0, 5), 'a time after midnight is still ahead');
+  assert.deepEqual(retryDeadline('11:50 PM', new Date(2026, 8, 29, 0, 1), { after: new Date(2026, 8, 28, 23, 50, 40).toISOString() }), new Date(2026, 8, 28, 23, 50), 'the same minute as the record is not pushed a day');
+  assert.deepEqual(retryDeadline('3:06 PM', new Date(2026, 8, 28, 13, 30), { after: 'not a date' }), new Date(2026, 8, 28, 15, 6), 'an unreadable record time falls back to now');
+  const nearMidnight = new Date(2026, 9, 29, 0, 1).toISOString();
+  assert.deepEqual(retryDeadline('11:47 PM', new Date(2026, 9, 29, 0, 5), { after: nearMidnight }), new Date(2026, 9, 28, 23, 47), 'written just after midnight: the limit that ended just before it, not tonight');
+  assert.deepEqual(retryDeadline('11:47 PM', new Date(2026, 9, 29, 20, 0), { after: nearMidnight }), new Date(2026, 9, 28, 23, 47), 'the same record read the next evening');
+  assert.deepEqual(retryDeadline('11:47 PM', new Date(2026, 9, 29, 0, 5), { after: new Date(2026, 9, 28, 23, 58).toISOString() }), new Date(2026, 9, 28, 23, 47), 'written just before midnight');
+  assert.deepEqual(retryDeadline('12:00 AM', new Date(2026, 8, 29, 12, 0, 3), { after: new Date(2026, 8, 29, 11, 59, 59).toISOString() }), new Date(2026, 8, 30, 0, 0), 'a reset 12 hours ahead of the write is still ahead');
+  assert.deepEqual(retryDeadline('12:05 AM', new Date(2026, 8, 29, 12, 10), { after: new Date(2026, 8, 29, 11, 50).toISOString() }), new Date(2026, 8, 30, 0, 5), 'an older record read from its start time: still ahead');
+});
+
+test('flake fix: retryDeadline on the autumn DST night does not move a reset in the repeated hour a day later', () => {
+  const zone = process.env.TZ;
+  process.env.TZ = 'America/Chicago';
+  try {
+    // 2026-11-01 01:00-01:59 happens twice there; 07:10Z is 01:10 CST, the second pass.
+    const after = '2026-11-01T07:10:00.000Z';
+    assert.equal(retryDeadline('1:00 AM', new Date('2026-11-01T07:15:00.000Z'), { after }).toISOString(), '2026-11-01T07:00:00.000Z');
+    // 01:30 is ambiguous here; the first pass (40 minutes before the write) wins, so the worst case is an early retry.
+    assert.equal(retryDeadline('1:30 AM', new Date('2026-11-01T07:15:00.000Z'), { after }).toISOString(), '2026-11-01T06:30:00.000Z');
+    // The spring change skips 02:00-02:59: a time in that gap is reached when the clock jumps to 03:00 CDT.
+    assert.equal(retryDeadline('2:30 AM', new Date('2026-03-08T07:00:00.000Z'), { after: '2026-03-08T07:00:00.000Z' }).toISOString(), '2026-03-08T08:00:00.000Z');
+    // The hour before the write starts in the last minute before the jump: its first whole minute is already 03:00 CDT.
+    for (const after of ['2026-03-08T08:59:00.001Z', '2026-03-08T08:59:30.000Z', '2026-03-08T09:00:00.000Z']) {
+      assert.equal(retryDeadline('2:30 AM', new Date(after), { after }).toISOString(), '2026-03-08T08:00:00.000Z', after);
+      assert.equal(retryDeadline('2:30 AM', new Date(Date.parse(after) + 11 * 3600000)).toISOString(), '2026-03-08T08:00:00.000Z', `${after} without a record time`);
+    }
+    process.env.TZ = 'Europe/London';
+    assert.equal(retryDeadline('1:30 AM', new Date('2026-03-29T01:59:30.000Z'), { after: '2026-03-29T01:59:30.000Z' }).toISOString(), '2026-03-29T01:00:00.000Z');
+  } finally {
+    if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
+  }
+});
+
+test('flake fix: retryDeadline across both DST changes in four zones returns the printed local time, at most 25 hours after the write', () => {
+  const zone = process.env.TZ;
+  // Each zone's spring and autumn change in 2026, as UTC instants.
+  const changes = {
+    'America/Chicago': ['2026-03-08T08:00:00Z', '2026-11-01T07:00:00Z'],
+    'Europe/London': ['2026-03-29T01:00:00Z', '2026-10-25T01:00:00Z'],
+    'America/Santiago': ['2026-09-06T04:00:00Z', '2026-04-05T03:00:00Z'],
+    'Australia/Lord_Howe': ['2026-10-03T15:30:00Z', '2026-04-04T15:00:00Z'],
+  };
+  try {
+    for (const [tz, instants] of Object.entries(changes)) {
+      process.env.TZ = tz;
+      for (const change of instants) {
+        // The local clock of every minute from 6 hours before the change to 34 hours after it, read once.
+        const start = Date.parse(change) - 6 * 3600000;
+        const clocks = Array.from({ length: 40 * 60 }, (_, i) => { const d = new Date(start + i * 60000); return d.getHours() * 60 + d.getMinutes(); });
+        const writes = [];
+        for (let w = -4 * 60; w <= 4 * 60; w += 20) writes.push(Date.parse(change) + w * 60000);
+        // Written under a minute before change + 1 hour: the hour before the write starts just before the change.
+        writes.push(Date.parse(change) + 3600000 - 30000, Date.parse(change) + 3600000 - 1);
+        for (const ms of writes) {
+          const after = new Date(ms);
+          const firstIndex = Math.ceil((ms - 3600000 - start) / 60000);
+          for (let c = 0; c < 24 * 60; c += 15) {
+            const h = Math.floor(c / 60), mm = c % 60;
+            const text = `${h % 12 || 12}:${String(mm).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
+            const at = retryDeadline(text, after, { after: after.toISOString() });
+            const where = `${tz} written ${after.toISOString()} "${text}"`;
+            // Expected: the first minute from an hour before the write that shows the time, or that a forward jump
+            // (the spring change, under 12 hours) from the minute before it skips the time over.
+            let expected = null;
+            for (let i = firstIndex; i < clocks.length && start + i * 60000 < ms - 3600000 + 27 * 3600000; i++) {
+              const step = (clocks[i] - clocks[i - 1] + 1440) % 1440;
+              const gap = (c - clocks[i - 1] + 1440) % 1440;
+              if (clocks[i] === c || (step > 1 && step < 720 && gap > 0 && gap < step)) { expected = start + i * 60000; break; }
+            }
+            assert.ok(expected !== null && expected - ms <= 25 * 3600000, `${where}: no expected minute within 25 hours`);
+            assert.equal(at?.getTime(), expected, `${where} -> ${at?.toISOString()}, expected ${new Date(expected).toISOString()}`);
+          }
+        }
+      }
+    }
+  } finally {
+    if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
+  }
+});
+
+test('flake fix: retryDeadline on the 23-hour spring DST day does not move a passed limit to tonight', () => {
+  const zone = process.env.TZ;
+  process.env.TZ = 'America/Chicago';
+  try {
+    // 2026-03-08 is the spring change there: written at 00:01 CST (06:01 UTC), the day has 23 hours.
+    const after = '2026-03-08T06:01:00.000Z';
+    assert.equal(retryDeadline('11:47 PM', new Date('2026-03-08T06:05:00.000Z'), { after }).toISOString(), '2026-03-08T05:47:00.000Z', 'the limit that ended at 23:47 the evening before');
+    assert.equal(retryDeadline('4:00 AM', new Date('2026-03-08T06:05:00.000Z'), { after }).toISOString(), '2026-03-08T09:00:00.000Z', 'a reset after the change is that morning, in daylight time');
+  } finally {
+    if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
   }
 });
 

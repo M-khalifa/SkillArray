@@ -18,6 +18,12 @@ const steps = [
   { label: "repository parity validation", cwd: root, cmd: node, args: ["scripts/validate-repository.mjs"] },
   { label: "install check (Claude Code and Codex layouts)", cwd: root, cmd: node, args: ["scripts/install-check.mjs"] },
   {
+    label: "repository script test suite",
+    cwd: root,
+    cmd: node,
+    args: ["--test", "scripts/tests/compare-baseline.test.mjs", "scripts/tests/install-check.test.mjs"],
+  },
+  {
     label: "pair-review package validation",
     cwd: path.join(root, "plugins/pair-review/skills/pair-review"),
     cmd: node,
@@ -53,7 +59,7 @@ const steps = [
     label: "benchmark scorer test suite",
     cwd: root,
     cmd: node,
-    args: ["--test", "bench/tests/score.test.mjs"],
+    args: ["--test", "bench/tests/score.test.mjs", "bench/tests/outcomes.test.mjs", "bench/tests/case-from-run.test.mjs"],
   },
   {
     // Provider-independent orchestration tests only, exercised against

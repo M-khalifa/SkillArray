@@ -1,0 +1,5 @@
+{"phase":"phase1","mode":"phase1","seat":"A","skill":"pair-review","version":"1.1.0","at":"2026-10-17T05:27:36.107Z"}
+{"phase":"phase1","mode":"phase1","seat":"B","skill":"pair-review","version":"1.1.0","at":"2026-10-17T05:27:36.614Z"}
+{"phase":"phase2","mode":"delta","seat":null,"skill":"pair-review","version":"1.1.0","at":"2026-10-17T06:06:55.677Z"}
+{"phase":"phase2","mode":"delta","seat":null,"skill":"pair-review","version":"1.1.0","at":"2026-10-17T06:06:56.089Z"}
+{"phase":"phase3","mode":"auditor","seat":null,"skill":"pair-review","version":"1.1.0","at":"2026-10-17T06:08:30.755Z"}

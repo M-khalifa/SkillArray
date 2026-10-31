@@ -3,7 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
 import { buildChildEnv } from './env-filter.mjs';
-import { completedRunRefusal, preserveEarlierResult, processTable, treeGroups } from './spawn-utils.mjs';
+import { completedRunRefusal, preserveEarlierResult, processTable, psBinary, stopMarkedProcesses, treeGroups } from './spawn-utils.mjs';
 
 export const DEFAULT_MAX_WAIT_S = 540;
 export const START_TOLERANCE_MS = 10000;
@@ -45,7 +45,7 @@ export function processStartMs(pid) {
     const ms = res.status === 0 ? Date.parse((res.stdout || '').trim()) : NaN;
     return Number.isNaN(ms) ? null : ms;
   }
-  const res = spawnSync('ps', ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, timeout: 20000 });
+  const res = spawnSync(psBinary(), ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8', windowsHide: true, env: { ...process.env, LC_ALL: 'C' }, timeout: 20000 });
   const m = res.status === 0 ? /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(res.stdout || '') : null;
   if (!m) return null;
   const seconds = ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]);
@@ -75,7 +75,7 @@ export function processStartToken(pid) {
     }
   }
   // TZ=UTC: lstart is local time text, so a reader in another time zone would see a different start token.
-  const res = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout: 20000 });
+  const res = spawnSync(psBinary(), ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', windowsHide: true, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout: 20000 });
   const text = res.status === 0 ? (res.stdout || '').trim() : '';
   return text ? `lstart:${text}` : null;
 }
@@ -99,7 +99,7 @@ function windowsChildren(pid) {
 // beside whatever dispatches the seat again. The dispatchers record the child's pid, start token and start time in
 // result.json; this stops that process tree, but only while the pid is still the process that was recorded (a reused
 // pid has a different start token, or on Windows, which has no token, a start time outside the worker tolerance).
-export function stopRecordedChild(rec, { kill = (pid, sig) => process.kill(pid, sig), readToken = processStartToken, readStart = processStartMs, killTree = taskkillTree, readChildren = windowsChildren, exists = processExists, readTable = processTable, platform = process.platform } = {}) {
+export function stopRecordedChild(rec, { kill = (pid, sig) => process.kill(pid, sig), readToken = processStartToken, readStart = processStartMs, killTree = taskkillTree, readChildren = windowsChildren, exists = processExists, readTable = processTable, markedStop = stopMarkedProcesses, platform = process.platform } = {}) {
   const pid = rec?.childPid;
   if (!Number.isInteger(pid) || pid <= 1) return false;
   if (platform === 'win32') {
@@ -115,19 +115,44 @@ export function stopRecordedChild(rec, { kill = (pid, sig) => process.kill(pid, 
     const orphans = readChildren(pid).filter((c) => c.startMs >= recorded - START_TOLERANCE_MS && c.startMs <= recorded + START_TOLERANCE_MS);
     return orphans.map((c) => killTree(c.pid)).some(Boolean);
   }
-  if (!rec.childStartToken) return false;
+  // Linux and macOS: what the CLI left anywhere carries its run id, unique to that CLI run, so it is stopped whoever holds the pid.
+  const marked = rec.childRunId ? markedStop(rec.childRunId, { platform, kill }) : [];
+  if (!rec.childStartToken) return marked.length > 0;
   // Identity from the start token, which a zombie still has: another token means another process holds the pid. No
   // token means nothing is signalled: a live pid is unproven, and once a gone pid's group empties its id can be handed
-  // to an unrelated group, which nothing left can tell apart. Tool commands the dead CLI left in its group stay running.
+  // to an unrelated group, which nothing left can tell apart. Tool commands the dead CLI left in its group stay running,
+  // except where the run id above found them (Linux and macOS).
   const token = readToken(pid);
-  if (token == null || token !== rec.childStartToken) return false;
+  if (token == null || token !== rec.childStartToken) return marked.length > 0;
   const table = readTable();
   const groups = [...new Set([pid, ...(table ? treeGroups(pid, table) : [])])];
   let stopped = false;
   for (const g of groups) {
     try { kill(-g, 'SIGKILL'); stopped = true; } catch { /* that group is already gone */ }
   }
-  return stopped;
+  return stopped || marked.length > 0;
+}
+
+// Whether the recorded worker is still that process: the recorded start token, or where none can be read, the recorded start time.
+export function recordedWorkerProven(rec, { readToken = processStartToken, readStart = processStartMs, exists = processExists } = {}) {
+  const pid = rec?.workerPid;
+  if (!Number.isInteger(pid) || pid <= 1 || !exists(pid)) return false;
+  const token = rec.workerStartToken ? readToken(pid) : null;
+  if (token != null) return token === rec.workerStartToken;
+  const recorded = Date.parse(rec.workerStartedAt ?? '');
+  const start = Number.isNaN(recorded) ? null : readStart(pid);
+  return start != null && Math.abs(start - recorded) <= START_TOLERANCE_MS;
+}
+
+// A seat's detached worker still alive (it may not have started the seat CLI yet) is killed with its process tree while proven.
+export function stopRecordedWorker(rec, { kill = (pid, sig) => process.kill(pid, sig), readToken = processStartToken, readStart = processStartMs, killTree = taskkillTree, exists = processExists, platform = process.platform } = {}) {
+  if (!recordedWorkerProven(rec, { readToken, readStart, exists })) return false;
+  const pid = rec.workerPid;
+  if (platform === 'win32') return killTree(pid);
+  // The worker leads its own process group (it is spawned detached).
+  try { kill(-pid, 'SIGKILL'); return true; } catch {
+    try { kill(pid, 'SIGKILL'); return true; } catch { return false; }
+  }
 }
 
 // A pid counts as the recorded worker only while it exists and, when a worker start time was recorded and
@@ -150,13 +175,31 @@ export function workerIsLive(pid, recordedStart, { readStart = processStartMs, r
   return true;
 }
 
-export function retryDeadline(text, now = new Date()) {
+// A provider prints a reset time that is ahead of its message, so the deadline is the first minute, within 27 hours from
+// `after` (when the record was written) less an hour, whose local clock shows that time, or a spring-skipped time when the
+// clock jumps past it. Without a record time the walk starts 12 hours before now.
+export function retryDeadline(text, now = new Date(), { after = null } = {}) {
   const m = /^\s*(\d{1,2}):(\d{2})\s*([AP])\.?M\.?\s*$/i.exec(text ?? '');
   if (!m || Number(m[1]) < 1 || Number(m[1]) > 12 || Number(m[2]) > 59) return null;
-  const at = new Date(now);
-  at.setHours((Number(m[1]) % 12) + (m[3].toUpperCase() === 'P' ? 12 : 0), Number(m[2]), 0, 0);
-  if (now - at > 12 * 3600 * 1000) at.setDate(at.getDate() + 1);
-  return at;
+  const target = ((Number(m[1]) % 12) + (m[3].toUpperCase() === 'P' ? 12 : 0)) * 60 + Number(m[2]);
+  const written = after == null ? NaN : Date.parse(after);
+  const from = Number.isNaN(written) ? new Date(now).getTime() : written;
+  const earliest = from - (Number.isNaN(written) ? 12 : 1) * 3600 * 1000;
+  // Steps through real time and reads the local clock, so midnight and both daylight-saving changes need no special case;
+  // a time the spring change skips is reached when the clock jumps past it.
+  const first = Math.ceil(earliest / 60000) * 60000;
+  // The minute before the first one, so a jump onto the first minute is seen.
+  const before = new Date(first - 60000);
+  let prev = before.getHours() * 60 + before.getMinutes();
+  for (let t = first; t < earliest + 27 * 3600 * 1000; t += 60000) {
+    const at = new Date(t);
+    const clock = at.getHours() * 60 + at.getMinutes();
+    const step = (clock - prev + 1440) % 1440;
+    const gap = (target - prev + 1440) % 1440;
+    if (clock === target || (step > 1 && step < 720 && gap > 0 && gap < step)) return at;
+    prev = clock;
+  }
+  return null;
 }
 
 // Dispatcher callbacks preserve each provider's result schema and error type.
@@ -195,7 +238,7 @@ export function createDetachHandlers({ scriptPath, dispatch, runningRecord, atom
     const powershell = process.env.REVIEW_DETACH_POWERSHELL || (process.env.SystemRoot
       ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
       : 'powershell.exe');
-    const res = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true });
+    const res = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
     const m = /^(\d+) (\d+)\s*$/.exec((res.stdout || '').trim());
     if (res.status !== 0 || !m || m[1] !== '0') {
       throw new RelayError(`could not start the detached worker through WMI: ${(res.stderr || res.stdout || '').trim() || res.error?.message || `exit ${res.status}`}`);
@@ -259,13 +302,18 @@ export function createDetachHandlers({ scriptPath, dispatch, runningRecord, atom
         }
       }
       if (rec && rec.status !== 'running') {
-        waitExit(`relay: finished with status "${rec.status}"${rec.threadId ? `, threadId ${rec.threadId}` : ''}\n`, rec.status === 'completed' ? 0 : 1);
+        // The first line of the error says why (a crash, a timeout, a usage limit), so the caller's FAILED line can tell them apart.
+        const why = rec.status !== 'completed' && typeof rec.error === 'string' && rec.error.trim() ? `: ${rec.error.trim().split(/\r?\n/).slice(0, 2).join(' | ').slice(0, 160)}` : '';
+        waitExit(`relay: finished with status "${rec.status}"${rec.threadId ? `, threadId ${rec.threadId}` : ''}${why}\n`, rec.status === 'completed' ? 0 : 1);
       }
       if (rec && rec.workerPid && !workerIsLive(rec.workerPid, rec.workerStartedAt, { recordedToken: rec.workerStartToken })) {
+        // The worker may have finished between the read and the liveness check; it writes its final record before it exits.
+        const again = await fs.readFile(resultPath, 'utf8').then((t) => JSON.parse(t.charCodeAt(0) === 0xfeff ? t.slice(1) : t)).catch(() => null);
+        if (again && again.status !== 'running') continue;
         const stopped = stopRecordedChild(rec);
         waitExit(
           `relay: worker ${rec.workerPid} is gone but result.json still says "running"` +
-            (stopped ? '; the seat process it had started was still running and has been stopped with the process groups it led (a process it had moved out of its own tree cannot be found)' : '') +
+            (stopped ? '; the seat process it had started was still running and has been stopped with the process groups it led' + (rec.childRunId && process.platform !== 'win32' ? '' : ' (a process it had moved out of its own tree cannot be found)') : '') +
             (rec.threadId ? `; resume thread ${rec.threadId} with --session` : rec.sessionId ? `; resume session ${rec.sessionId} with --session` : '; no thread was started, so dispatch again') +
             `. Its log: ${rec.workerLog ?? WORKER_LOG}\n`,
           1
@@ -296,7 +344,7 @@ export function createDetachHandlers({ scriptPath, dispatch, runningRecord, atom
       throw new RelayError(`cannot read ${resultPath}: ${err.message}`);
     }
     if (rec.status !== 'rate-limited') throw new RelayError(`${resultPath} has status "${rec.status}", not "rate-limited"; there is no limit to wait for`);
-    const deadline = retryDeadline(rec.retryAfter);
+    const deadline = retryDeadline(rec.retryAfter, new Date(), { after: rec.finishedAt ?? rec.startedAt });
     if (!deadline) throw new RelayError(`retryAfter ${JSON.stringify(rec.retryAfter)} is not a plain clock time such as "3:06 PM"; wait until then yourself`);
     const resume = rec.threadId ? `resume thread ${rec.threadId} with --session, or start a new dispatch` : 'no thread was started, so dispatch again';
     const began = Date.now();

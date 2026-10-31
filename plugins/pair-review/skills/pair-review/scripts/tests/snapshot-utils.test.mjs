@@ -50,7 +50,14 @@ test('hashInventory: a file or folder name that is not valid UTF-8 (UTF-16 on Wi
   // Linux takes any bytes; Windows stores a lone surrogate, which Node spells as the WTF-8 bytes ED A0 80.
   const bad = process.platform === 'win32' ? [Buffer.from([0xed, 0xa0, 0x80]), Buffer.from([0xed, 0xa0, 0x81])] : [Buffer.from([0xe9]), Buffer.from([0xea])];
   const at = (...parts) => Buffer.concat([Buffer.from(dir + path.sep), ...parts.flatMap((p, i) => (i ? [Buffer.from(path.sep), p] : [p]))]);
-  await writeFile(at(Buffer.concat([Buffer.from('caf'), bad[0], Buffer.from('.txt')])), 'one');
+  try {
+    await writeFile(at(Buffer.concat([Buffer.from('caf'), bad[0], Buffer.from('.txt')])), 'one');
+  } catch (err) {
+    // macOS APFS refuses such a name (EILSEQ), so no tree there can hold one.
+    if (err.code !== 'EILSEQ') throw err;
+    t.skip('this file system refuses a name that is not valid UTF-8');
+    return;
+  }
   await writeFile(at(Buffer.concat([Buffer.from('caf'), bad[1], Buffer.from('.txt')])), 'two');
   await mkdir(at(bad[0]));
   await writeFile(at(bad[0], Buffer.from('inner.txt')), 'three');

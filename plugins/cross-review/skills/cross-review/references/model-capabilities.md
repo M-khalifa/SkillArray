@@ -4,7 +4,7 @@
 
 - Claude-harness seat
 - Codex seat
-- OpenCode seats
+- Snapshot worktree (Claude CLI seats)
 - Reporting
 
 Do not ship a fixed model catalog as an entitlement list. Model names, supported
@@ -66,39 +66,13 @@ Sources: [Codex CLI reference](https://developers.openai.com/codex/cli/reference
 and [configuration reference](https://developers.openai.com/codex/config-reference).
 Run local CLI help before dispatch; no release-specific model default is assumed.
 
-## OpenCode seats
+## Snapshot worktree (Claude CLI seats)
 
-OpenCode is an explicit bridge for configured providers such as Google, xAI,
-Mistral, Moonshot, DeepSeek, or OpenRouter, plus vendors OpenCode itself bundles
-(e.g. a provider literally named `opencode`, confirmed via `opencode models`).
-Run `opencode models` during setup and use only the provider/model IDs it
-advertises. Do not assume a configured credential, or silently substitute
-OpenCode when the user selected another runtime.
-
-**No CLI-level read-only sandbox flag exists for OpenCode, verified.** `opencode
-run --help` (v1.18.25) has no `--sandbox`/`--read-only` flag; the closest option
-is `--auto` (auto-approve permissions), which is the opposite of a restriction,
-not a safety mechanism, and is never passed by this skill. OpenCode's permission
-model is per-agent/config-based, not a dispatch-time flag this skill's
-dispatcher can force directly. `opencode-dispatch.mjs`'s `--isolate` instead
-redirects the run into a disposable `git worktree` copy of the target: real
-prevention, since edits land there rather than in the reviewed source. This is
-what `review-protocol.md`'s read-only guarantee actually rests on for an
-OpenCode seat; the dispatcher itself refuses to run at all (hard stop, `status:
-"error"`) if `--isolate` was requested and isolation cannot be set up (target
-not a git repo, or worktree setup fails), rather than silently falling back to
-running unisolated. `touchedFiles` remains a secondary, detection-after-the-fact
-check on top of that, not the primary guarantee. Treat any non-empty
-`touchedFiles` from an OpenCode seat as a real incident requiring investigation,
-not a benign log line. `git worktree add` still writes bookkeeping under the
-target's own `.git/worktrees/`: housekeeping, not a source write, and never
-visible in the target's `git status`; Phase 3 cleanup removes it.
-
-`--isolate` requires `--cd` to be a git repository ROOT; a subdirectory is
-refused outright rather than silently isolating a wrong, partially-copied
-worktree (untracked files under the subdirectory would land at the wrong
-depth relative to a full-repo worktree, and files outside it would never be
-copied or fingerprinted at all).
+A Claude CLI seat has no enforced read-only shell, so `claude-dispatch.mjs` runs it in a disposable `git worktree`
+snapshot of the target: edits land there rather than in the reviewed source, and `touchedFiles` is a second check on
+top of that. Treat any non-empty `touchedFiles` as a real incident. `git worktree add` still writes bookkeeping under
+the target's own `.git/worktrees/`: housekeeping, not a source write, and never visible in the target's `git status`;
+Phase 3 cleanup removes it.
 
 Reusing a worktree across phases (same `--cd`, same run directory) is gated on
 a fingerprint of the target snapshot (repo toplevel, `HEAD` sha, a sha256 of
@@ -115,7 +89,7 @@ correct for what it does (nothing is silently mis-copied), but it is also a real
 blind spot: the fingerprint hashes nothing ABOUT that nested repo either, so an
 edit to a tracked file inside it, or a commit inside it, between phases is
 invisible to drift detection — same class of gap as the gitignored-file blind
-spot above, not something this dispatcher currently detects or refuses.
+spot below, not something this dispatcher currently detects or refuses.
 
 The fingerprint is also computed BEFORE the worktree copy runs, not after: a
 write to the target between the fingerprint read and the copy completing is not
@@ -137,14 +111,6 @@ dispatcher's own interrupted build: it writes `<path>.snapshot-building` before
 `git worktree add` and removes it after the marker, so a build stopped in between is
 rebuilt on the next run when the folder is still a detached worktree of the target. Anything else is removed by hand
 (`git worktree remove --force <path>` from the target); the refusal says so.
-
-An OpenCode seat's declared `provider` must prefix its `model` ID (case-insensitively,
-e.g. `google` with `google/gemini-3-pro`); a mismatch is rejected outright rather than
-silently accepted, since `provider` is otherwise a free-standing label dispatch never
-uses to route. This still does not close every gap: an aggregator provider (e.g.
-`openrouter/anthropic/claude-...`) can satisfy the prefix check while still routing to
-another seat's vendor underneath — using an aggregator for cross-vendor validation is
-the user's responsibility, not something this check can detect.
 
 ## Reporting
 

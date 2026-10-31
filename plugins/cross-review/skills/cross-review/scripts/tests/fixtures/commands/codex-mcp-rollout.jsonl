@@ -1,0 +1,5 @@
+{"timestamp":"2026-10-15T22:38:30Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"text(await tools.exec_command({cmd:\"git status\"}))"}}
+{"timestamp":"2026-10-15T22:38:31Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","status":"failed","exit_code":-1}}}
+{"timestamp":"2026-10-15T22:38:40Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","server":"node_repl","tool":"js","status":"completed","error":null}}}
+{"timestamp":"2026-10-15T22:38:50Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","server":"node_repl","tool":"js","status":"failed","error":null}}}
+{"timestamp":"2026-10-15T22:39:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","server":"node_repl","tool":"js","status":"completed","error":null}}}

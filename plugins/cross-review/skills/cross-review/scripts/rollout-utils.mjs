@@ -1,6 +1,5 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 
 const TOKEN_KEYS = ['input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens', 'total_tokens'];
 
@@ -83,14 +82,6 @@ export function rolloutUsage(text, { start = null, end = null } = {}) {
   return usageField(delta);
 }
 
-export async function readRolloutUsage(file, window = {}) {
-  return rolloutUsage(await fs.readFile(file, 'utf8'), window);
-}
-
-function defaultSessionsDir(env) {
-  return path.join(env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
-}
-
 // The model a thread ran, from the last turn_context line; null when the rollout has none.
 export function rolloutModel(text) {
   let model = null;
@@ -104,15 +95,32 @@ export function rolloutModel(text) {
   return model;
 }
 
+// The reasoning effort the thread's last turn ran with (turn_context.effort), or null; "default" in the request leaves it to Codex.
+export function rolloutEffort(text) {
+  let effort = null;
+  for (const line of text.split('\n')) {
+    if (!line.includes('"turn_context"')) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event.type === 'turn_context' && typeof event.payload?.effort === 'string' && event.payload.effort) effort = event.payload.effort;
+    } catch {}
+  }
+  return effort;
+}
+
 // Shell commands a thread tried, one CommandExecution item each, in the window [start, end) (ms or null); failed = not
 // completed or a non-zero exit (a sandbox spawn failure is "failed", exit -1). No items while an exec_command or shell call
 // exists is unknown (null), not 0: a spawned child thread can run commands without writing items.
+// Calls to a tool server (McpToolCall items, such as a node_repl script) are not shell commands; they are counted apart
+// as scripts, so a seat that ran code that way is not reported as having only read the target.
 export function rolloutCommands(text, { start = null, end = null } = {}) {
   let tried = 0;
   let failed = 0;
+  let scripts = 0;
+  let scriptsFailed = 0;
   let shellCall = false;
   for (const line of (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split('\n')) {
-    if (!line.includes('CommandExecution') && !line.includes('"response_item"')) continue;
+    if (!line.includes('CommandExecution') && !line.includes('McpToolCall') && !line.includes('"response_item"')) continue;
     let event;
     try { event = JSON.parse(line); } catch { continue; }
     if (!event || typeof event !== 'object') continue;
@@ -122,18 +130,18 @@ export function rolloutCommands(text, { start = null, end = null } = {}) {
     if (event.type === 'event_msg' && p.type === 'item_completed' && p.item?.type === 'CommandExecution') {
       tried++;
       if (p.item.status !== 'completed' || p.item.exit_code !== 0) failed++;
+    } else if (event.type === 'event_msg' && p.type === 'item_completed' && p.item?.type === 'McpToolCall') {
+      scripts++;
+      if (p.item.status !== 'completed' || p.item.error) scriptsFailed++;
     } else if (event.type === 'response_item' && (p.type === 'local_shell_call' || /^(?:shell|exec_command|shell_command)$/.test(p.name ?? '') || String(p.input ?? p.arguments ?? '').includes('exec_command'))) {
       shellCall = true;
     }
   }
-  return tried === 0 && shellCall ? null : { tried, failed };
+  if (tried === 0 && shellCall) return null;
+  return scripts > 0 ? { tried, failed, scripts, scriptsFailed } : { tried, failed };
 }
 
-// Filename suffix and session_meta.id must both match the orchestrator's thread.
-export async function findOrchestratorRollout({ env = process.env, sessionsDir = defaultSessionsDir(env) } = {}) {
-  return findThreadRollout(env.CODEX_THREAD_ID, sessionsDir);
-}
-
+// Filename suffix and session_meta.id must both match the thread.
 export async function findThreadRollout(threadId, sessionsDir) {
   if (typeof threadId !== 'string' || !threadId) return null;
   for (const year of (await fs.readdir(sessionsDir).catch(() => [])).sort()) {

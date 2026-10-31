@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Stamps deterministic fields onto an orchestrator-authored manifest.json
 // skeleton: a run_id, and sha256 content hashes of the task packet, Phase 1
 // outputs, Phase 2 outputs, verifier files, and findings.json.
@@ -14,7 +13,7 @@
 //
 // Each reviewer's own timing (startedAt/finishedAt/durationMs/timeoutS) and
 // token/cost fields already live in that seat's own result.json (see
-// codex-dispatch.mjs/opencode-dispatch.mjs's RESULT_REQUIRED_KEYS); this
+// the dispatchers' RESULT_REQUIRED_KEYS); this
 // script does not duplicate them onto the manifest, it leaves them where
 // the dispatcher that owns that data already wrote them. A harness seat (a
 // Claude subagent) has no result.json, so --seat-transcript sums its token use from
@@ -28,95 +27,16 @@ import { fileURLToPath } from 'node:url';
 import { rolloutUsage, rolloutModel, rolloutCommands, findThreadRollout } from './rollout-utils.mjs';
 import { findAgentTranscripts, findSessionTranscripts, transcriptCommands } from './native-agent.mjs';
 import { readRunDescriptor } from './run-descriptor.mjs';
-import { comparablePath, isMainModule } from './path-utils.mjs';
+import { comparablePath } from './path-utils.mjs';
+import { parseSeatFile } from './seat-file.mjs';
+import { makeIo, refuseDirectRun, runStep as runStepWith } from './step-io.mjs';
 
 class RelayError extends Error {}
-
-function printUsageAndExit(code) {
-  process.stderr.write(
-    `Usage: node build-manifest.mjs --in <manifest.json> --out <manifest.json>\n` +
-      `  --task-packet <path> [--phase1 <path>]... [--phase2 <path>]...\n` +
-      `  [--verification <path>]... [--findings <findings.json>]\n` +
-      `  [--seat-transcript <A|B|auditor|verifier|orchestrator>=<transcript .jsonl | agent id>]...\n` +
-      `  [--seat-usage <A|B|auditor>=<final context tokens|unknown>,<duration ms|unknown>[,estimated]]...\n` +
-      `  [--reviewer-result <A|B|auditor|verifier-<n>>=<dispatcher result.json>]...\n` +
-      `  [--falsification <file written by audit-prep --breakdown-out>]\n\n` +
-      `--falsification fills falsification.breakdown and falsification.qualified_claims\n` +
-      `(the disputed HIGH/CRITICAL count) from audit-prep's breakdown file, so nobody\n` +
-      `retypes them. A value the body already sets is kept and a difference is reported\n` +
-      `as a WARNING; requested and verifiers_run are still authored, and a WARNING\n` +
-      `names either one the body leaves out.\n\n` +
-      `--reviewer-result fills reviewers[] seats A/B or actors[] auditor/verifier-<n> from a\n` +
-      `dispatcher result.json: model_requested/_resolved, effort_requested/_resolved,\n` +
-      `verification_note, host, transport, readOnly, isolated, worktreePath, isolationNote, webAccess, usage and\n` +
-      `duration_ms. A field the body already sets is never changed; null and the\n` +
-      `protocol example's placeholders (USER_SELECTED_OPENAI_MODEL, /abs/path/to/worktree,\n` +
-      `"No runtime identity metadata available") count as not set. A missing entry is\n` +
-      `created as {role}. provider and selection_source are still authored. A body value\n` +
-      `that differs from result.json is kept and reported as a WARNING. Repeat the flag\n` +
-      `for one role (Phase 1, exchange, redaction results): the files must agree on model,\n` +
-      `effort and isolation; duration_ms is summed; usage_per_call lists each call; usage\n` +
-      `is summed through usage_delta when every call has one, else last-taken for usageSemantics\n` +
-      `cumulative and summed for per-call; older files use threadId (an unstamped OpenCode result is one call).\n\n` +
-      `--run-dir <run-dir> copies run.json's host and per-actor support rows into the manifest as host, support and\n` +
-      `host_status (trial when any actor ran on a trial route); a value the body already sets is kept.\n\n` +
-      `skill_version is stamped from this skill's SKILL.md unless the body sets it.\n` +
-      `skill_versions ({phase1: ..., phase2: ..., phase3: ...}) is filled from\n` +
-      `skill-versions.jsonl in --out's folder, which build-brief appends to for every\n` +
-      `brief; a body value is kept, and a mid-run version change is a WARNING.\n\n` +
-      `--seat-transcript records a harness seat's real token use (a Claude subagent has\n` +
-      `no result.json): give its transcript, A=<path to agent-<id>.jsonl>, or just its\n` +
-      `agent id, A=a6674ae8f7845facb, which is looked up under ~/.claude/projects (or\n` +
-      `CLAUDE_CONFIG_DIR). Every API call's usage is summed once, the same way a Codex\n` +
-      `result.json counts, into seat_usage.A = {source: "transcript", calls,\n` +
-      `input_tokens, cache_creation_input_tokens, cache_read_input_tokens,\n` +
-      `total_input_tokens, max_context_tokens, models, duration_ms}; models counts the\n` +
-      `calls per resolved model id, the evidence of which model the seat really ran;\n` +
-      `output_tokens is null, since\n` +
-      `a transcript logs it before each reply is written. Repeat it for\n` +
-      `a seat that ran as several subagents. orchestrator=<session .jsonl> records the\n` +
-      `orchestrator's Claude session or Codex rollout (source: codex-rollout).\n` +
-      `Append @<ISO start>[/<ISO end>] (orchestrator=<session .jsonl>@2026-09-30T14:05:00Z/\n` +
-      `2026-09-30T15:00:00Z) to count only entries in that window, for one review in a session\n` +
-      `that ran several; without an end it runs to the end of the transcript.\n` +
-      `active_ms is the seat's working time: every\n` +
-      `gap between transcript entries except the wait after a final reply. It becomes\n` +
-      `duration_ms (duration_source "transcript") unless --seat-usage gives the same seat\n` +
-      `a ",clock" span; an estimated or harness figure is kept as duration_hand_ms.\n\n` +
-      `--seat-usage records numbers you have by hand, e.g. --seat-usage A=250000,1656000,\n` +
-      `as seat_usage.A = {final_context_tokens, duration_ms, source: "harness"}. The\n` +
-      `harness's totalTokens is the size of the seat's LAST call, not what it used, so\n` +
-      `it is stored as final_context_tokens; use --seat-transcript for consumption.\n` +
-      `Write "unknown" for a number you\n` +
-      `do not have (it is stored as null; both unknown gives source "unknown"), and append\n` +
-      `",clock" (source "clock") for spans you timed yourself, as the protocol asks for a\n` +
-      `Claude seat, or ",estimated" (source "estimated") for your own guess. When --in already\n` +
-      `has seat_usage (a rebuilt manifest), a role it lacks is added and a role it has is refused.\n\n` +
-      `Reads an orchestrator-authored manifest skeleton (topology, mode, reviewers,\n` +
-      `exchange, falsification -- see review-protocol.md's Manifest and final output\n` +
-      `section) from --in, adds a run_id and a sha256 "hashes" object computed from\n` +
-      `the given artifact files, and writes the result to --out. Never invents or\n` +
-      `overwrites any field the input manifest already set other than "run_id" and\n` +
-      `"hashes" -- refuses if either key already exists in the input, to avoid\n` +
-      `silently replacing a value someone else already computed.\n\n` +
-      `--extra-artifact <name>=<path> (repeatable) hashes a file the protocol does not\n` +
-      `name, such as an auditor's prose synthesis, into hashes.extra_artifacts.<name>.\n` +
-      `Record why it exists in the body; the hash only proves which bytes it was.\n\n` +
-      `Any of --task-packet/--phase1/--phase2/--verification/--findings may be\n` +
-      `omitted; the corresponding hash is then omitted from the output rather than\n` +
-      `fabricated as null, since "this artifact was not supplied" and "this artifact\n` +
-      `hashed to a known value" are different facts.\n` +
-      `--phase1/--phase2/--verification may repeat (one per seat/claim); each is\n` +
-      `hashed individually and reported keyed by its own filename, since a single\n` +
-      `combined hash across multiple files would not let a reader verify one file\n` +
-      `in isolation.\n`
-  );
-  process.exit(code);
-}
+const io = makeIo();
 
 function parseArgs(argv) {
   const args = {
-    in: null, out: null, taskPacket: null, runDir: null, init: false,
+    in: null, out: null, taskPacket: null, reviewRules: null, runDir: null, init: false,
     phase1: [], phase2: [], verification: [], findings: null, seatUsage: {}, seatTranscripts: {}, reviewerResults: {}, extraArtifacts: [],
     falsification: null,
   };
@@ -166,7 +86,6 @@ function parseArgs(argv) {
       if (!m) throw new RelayError(`--reviewer-result "${v}" must look like B=<path to result.json>`);
       (args.reviewerResults[m[1]] ??= []).push(m[2]);
     }
-    else if (a === '-h' || a === '--help') printUsageAndExit(0);
     else throw new RelayError(`unrecognized argument: ${a}`);
   }
   if (args.init && !args.runDir) throw new RelayError('--init needs --run-dir');
@@ -192,14 +111,50 @@ async function readJsonIfPresent(file) {
   }
 }
 
+// Null only when the file is absent: a file that is there but is not one JSON object ("null" included) stops the run instead
+// of being read as missing.
+async function readJsonOrAbsent(file) {
+  let text;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw new RelayError(`${file} cannot be read: ${err.message}`);
+  }
+  let data;
+  try {
+    data = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  } catch (err) {
+    throw new RelayError(`${file} is not valid JSON (${err.message}); fix or remove it, then rerun`);
+  }
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new RelayError(`${file} must hold one JSON object; fix it, then rerun`);
+  return data;
+}
+
 // The minimal valid body for a run, from run.json and the files the run left; the orchestrator adds only what it knows.
 // A fresh initBody value wins; the edited body fills what initBody leaves null or does not compute, one level deep.
+// initBody writes these exchange keys only while they apply, so an edited body's copy of one that no longer applies is dropped.
+const RUN_EXCHANGE_KEYS = ['seat_to_audit_label', 'incomplete_seats', 'reason', 'no_peer_claims'];
 function mergeEditedBody(edited, fresh) {
   const out = { ...edited };
+  // Written only while it applies: a seat file restored since --init is no longer missing.
+  if (!('missing_seat_files' in fresh)) delete out.missing_seat_files;
+  if (!('format_refused' in fresh)) delete out.format_refused;
+  if (!('blocked_no_findings' in fresh)) delete out.blocked_no_findings;
+  if (!('seat_format_notes' in fresh)) delete out.seat_format_notes;
   const plain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
   for (const [key, value] of Object.entries(fresh)) {
-    if (value === null || value === undefined) { if (!(key in edited)) out[key] = value; }
-    else if (plain(value) && plain(edited[key])) out[key] = { ...edited[key], ...value };
+    if (key === 'reviewers' && Array.isArray(value) && Array.isArray(edited[key])) {
+      // Entry by entry on role: a hand-added field stays, a value the run computes wins when it is not null.
+      const byRole = new Map(edited[key].filter(plain).map((e) => [e.role, e]));
+      const merged = value.map((f) => ({ ...(byRole.get(f.role) ?? {}), ...Object.fromEntries(Object.entries(f).filter(([, v]) => v !== null && v !== undefined)) }));
+      out[key] = [...merged, ...edited[key].filter((e) => !plain(e) || !value.some((f) => f.role === e.role))];
+    } else if (value === null || value === undefined) { if (!(key in edited)) out[key] = value; }
+    else if (plain(value) && plain(edited[key])) {
+      const kept = { ...edited[key] };
+      if (key === 'exchange') for (const k of RUN_EXCHANGE_KEYS) delete kept[k];
+      out[key] = { ...kept, ...value };
+    }
     else out[key] = value;
   }
   return out;
@@ -208,12 +163,43 @@ function mergeEditedBody(edited, fresh) {
 export async function initBody(descriptor, runDir) {
   const phase3 = path.join(runDir, 'phase3');
   const verifications = (await readdir(phase3).catch(() => [])).filter((f) => /^verification-.+[.]md$/.test(f));
-  const mapping = await readJsonIfPresent(path.join(runDir, 'phase3-private', 'seat-to-audit-label.json'));
-  const finished = await pathExists(path.join(phase3, 'findings.json'));
+  const mapping = await readJsonOrAbsent(path.join(runDir, 'phase3-private', 'seat-to-audit-label.json'));
+  // Only a findings.json that parses as a JSON object with its findings list is a finished audit; an empty, cut-off or
+  // empty-object file is not.
+  const findingsDoc = await readJsonIfPresent(path.join(phase3, 'findings.json'));
+  const finished = findingsDoc !== null && typeof findingsDoc === 'object' && !Array.isArray(findingsDoc) && Array.isArray(findingsDoc.findings);
   // exchange.mjs finish records which seats could not complete the exchange; a run that lost one is not a completed review.
-  const exchangeResult = await readJsonIfPresent(path.join(runDir, 'phase2', 'exchange-result.json'));
+  const exchangeResult = await readJsonOrAbsent(path.join(runDir, 'phase2', 'exchange-result.json'));
   const incompleteSeats = Array.isArray(exchangeResult?.incomplete) ? exchangeResult.incomplete : [];
+  // A run missing a seat's Phase 1 file, or holding one with no claim and no "## No findings" or no section heading
+  // (empty, cut off, a heading only inside a fence), is not a two-seat review. Any other format problem comes from a file
+  // written before the current rule (phase1 --wait refuses it in a new run): it is a note, not an incomplete review.
+  const missingSeatFiles = [];
+  const seatFormatNotes = {};
+  // review-run records a seat whose file was refused again after its one rewrite: that is a refusal, not an old file.
+  const formatRefused = await readJsonOrAbsent(path.join(runDir, 'phase1', 'format-refused.json'));
+  // A No findings seat that names a block is no clean pass; any seat's block is a caveat, also without review-run.
+  const blockedNoFindings = [];
+  const parsedBlind = {};
+  for (const role of ['A', 'B']) {
+    // The untouched Phase 1 copy once the exchange made one, else the working file.
+    const seatText = await readFile(path.join(runDir, 'phase1', 'original', `${role}-findings.md`), 'utf8')
+      .catch(() => readFile(path.join(runDir, 'phase1', `${role}-findings.md`), 'utf8')).catch(() => '');
+    const parsed = parseSeatFile(seatText, role, { sameShape: false });
+    if (parsed.section === null || (parsed.claims.length === 0 && parsed.section !== 'No findings')) missingSeatFiles.push(role);
+    else if (parsed.problems.length > 0 && !(formatRefused && typeof formatRefused === 'object' && role in formatRefused)) seatFormatNotes[role] = parsed.problems[0];
+    if (!missingSeatFiles.includes(role) && parsed.blocked) {
+      parsedBlind[role] = [`Blocked: ${parsed.blocked}`];
+      if (parsed.section === 'No findings') blockedNoFindings.push(role);
+    }
+  }
   const noPeerClaims = Array.isArray(exchangeResult?.no_peer_claims) ? exchangeResult.no_peer_claims : [];
+  // review-run audit --finish --accept-drift records a target that changed after Phase 1; the report shows it as a caveat.
+  const drift = await readJsonOrAbsent(path.join(phase3, 'drift-accepted.json'));
+  // review-run phase1 --wait records seats whose own lines say a read or command was blocked.
+  const blind = (await readJsonOrAbsent(path.join(runDir, 'seat-warnings-phase1.json')))?.blind ?? parsedBlind;
+  // review-run records a CLI seat or auditor whose output stayed open after it was stopped past its answer.
+  const stopIncomplete = await readJsonOrAbsent(path.join(runDir, 'stop-incomplete.json'));
   const family = descriptor.auditor.provider === descriptor.seatA.provider ? 'same-as-reviewer-A'
     : descriptor.auditor.provider === descriptor.seatB.provider ? 'same-as-reviewer-B' : 'other';
   return {
@@ -221,26 +207,42 @@ export async function initBody(descriptor, runDir) {
     falsification: { requested: descriptor.flags.falsification === true, verifiers_run: verifications.length },
     topology: descriptor.skill === 'cross-review' ? 'cross-vendor' : 'same-vendor',
     mode: descriptor.flags.mode,
-    status: finished && incompleteSeats.length === 0 ? 'completed' : 'incomplete',
+    status: finished && incompleteSeats.length === 0 && missingSeatFiles.length === 0 && blockedNoFindings.length === 0 && !formatRefused ? 'completed' : 'incomplete',
+    ...(missingSeatFiles.length > 0 ? { missing_seat_files: missingSeatFiles } : {}),
+    ...(blockedNoFindings.length > 0 ? { blocked_no_findings: blockedNoFindings } : {}),
+    ...(formatRefused ? { format_refused: formatRefused } : {}),
+    ...(Object.keys(seatFormatNotes).length > 0 ? { seat_format_notes: seatFormatNotes } : {}),
     protocol: 'review-protocol-v1.3',
     reviewers: [
-      { role: 'A', provider: descriptor.seatA.provider, selection_source: 'explicit' },
-      { role: 'B', provider: descriptor.seatB.provider, selection_source: 'explicit' },
+      // The requested model comes from run.json, so a native seat with no dispatcher result.json still records it.
+      { role: 'A', provider: descriptor.seatA.provider, model_requested: descriptor.seatA.model ?? null, selection_source: descriptor.seatA.selectionSource ?? 'explicit' },
+      { role: 'B', provider: descriptor.seatB.provider, model_requested: descriptor.seatB.model ?? null, selection_source: descriptor.seatB.selectionSource ?? 'explicit' },
     ],
     exchange: {
-      blinded: true,
+      // What ran: a blind exchange when exchange finish appended a seat's rebuttals (or, in a run older than that record,
+      // a rebuttal section is in a Phase 1 file); an auditor when it wrote its file or non-zero-claim findings exist.
+      // An older record has its counts but no appended list: its rebuttal sections decide, as with no record.
+      blinded: exchangeResult !== null && typeof exchangeResult === 'object' && Array.isArray(exchangeResult.appended)
+        ? exchangeResult.appended.length > 0
+        : (await Promise.all(['A', 'B'].map((role) => readFile(path.join(runDir, 'phase1', `${role}-findings.md`), 'utf8').catch(() => ''))))
+          .some((text) => /^## Rebuttals \(from [A-Z]\) of [A-Z] claims\s*$/m.test(text)),
       ...(mapping ? { seat_to_audit_label: mapping } : {}),
       auditor_model_family: family,
-      auditor: 'fresh-context',
+      auditor: (await readJsonIfPresent(path.join(phase3, 'findings.audit.json'))) !== null || (finished && findingsDoc.zero_claims !== true) ? 'fresh-context' : 'none',
       audit_depth: descriptor.flags.auditDepth,
       ...(incompleteSeats.length > 0 ? { incomplete_seats: incompleteSeats, reason: `the exchange finished without seat ${incompleteSeats.join(', ')}` } : {}),
       ...(noPeerClaims.length > 0 ? { no_peer_claims: noPeerClaims } : {}),
     },
+    ...(Array.isArray(drift?.accepted) && drift.accepted.length > 0 ? { drift_accepted: drift.accepted } : {}),
+    ...(blind && typeof blind === 'object' && Object.keys(blind).length > 0 ? { seat_blind_lines: blind } : {}),
+    ...(stopIncomplete && typeof stopIncomplete === 'object' && Object.keys(stopIncomplete).length > 0 ? { stop_incomplete: Object.keys(stopIncomplete) } : {}),
+    ...(descriptor.reviewRules ? { review_rules: { mode: descriptor.reviewRules.mode ?? null, changed_by_target: descriptor.reviewRules.changedByTarget === true, ...(descriptor.reviewRules.baseUnknown === true ? { base_unknown: true } : {}), files: descriptor.reviewRules.files ?? [] } } : {}),
   };
 }
 
 // With --run-dir, every input the run left is passed unless its own flag was given: the packet, both untouched Phase 1 files, both
-// peer views, the verification files, findings.json, the falsification breakdown and every completed dispatcher result.json.
+// peer views, the verification files, findings.json, the falsification breakdown and every completed dispatcher result.json
+// and result.attempt-<n>.json. An attempt that ended without completing is not counted.
 async function collectFromRun(args) {
   const runDir = path.resolve(args.runDir);
   let descriptor;
@@ -256,6 +258,7 @@ async function collectFromRun(args) {
     return null;
   };
   if (!args.taskPacket) args.taskPacket = await first(path.join(runDir, 'task-packet.md'));
+  if (descriptor.reviewRules) args.reviewRules = await first(path.join(runDir, 'review-rules.md'));
   // The untouched Phase 1 copies prove what each seat wrote before it saw its peer; the peer views are what each seat was shown.
   if (args.phase1.length === 0) for (const role of ['A', 'B']) { const f = await first(path.join(runDir, 'phase1', 'original', `${role}-findings.md`), path.join(runDir, 'phase1', `${role}-findings.md`)); if (f) args.phase1.push(f); }
   if (args.phase2.length === 0) for (const role of ['A', 'B']) { const f = await first(path.join(runDir, 'phase2', `peer-view-for-${role}.md`)); if (f) args.phase2.push(f); }
@@ -266,13 +269,20 @@ async function collectFromRun(args) {
   const completed = async (file) => (await readJsonIfPresent(file))?.status === 'completed';
   const explicit = new Set(Object.keys(args.reviewerResults));
   const collect = async (role, file) => { if (!explicit.has(role) && (await completed(file))) (args.reviewerResults[role] ??= []).push(file); };
+  // A retried call's earlier attempts (result.attempt-<n>.json, in number order), then its result.json.
+  const collectDir = async (role, dir) => {
+    for (const entry of (await readdir(dir).catch(() => [])).filter((name) => /^result\.attempt-\d+\.json$/.test(name)).sort((a, b) => Number(/\d+/.exec(a)[0]) - Number(/\d+/.exec(b)[0]))) {
+      await collect(role, path.join(dir, entry));
+    }
+    await collect(role, path.join(dir, 'result.json'));
+  };
   for (const role of ['A', 'B']) {
-    await collect(role, path.join(runDir, 'phase1', role, 'result.json'));
-    await collect(role, path.join(runDir, 'phase2', role, 'result.json'));
-    for (const entry of (await readdir(phase3).catch(() => [])).filter((name) => name.startsWith(`redact-${role}`)).sort()) await collect(role, path.join(phase3, entry, 'result.json'));
+    await collectDir(role, path.join(runDir, 'phase1', role));
+    await collectDir(role, path.join(runDir, 'phase2', role));
+    for (const entry of (await readdir(phase3).catch(() => [])).filter((name) => name.startsWith(`redact-${role}`)).sort()) await collectDir(role, path.join(phase3, entry));
   }
-  await collect('auditor', path.join(path.dirname(runDir), `${path.basename(runDir)}-audit-dispatch`, 'result.json'));
-  for (const entry of (await readdir(phase3).catch(() => [])).filter((name) => /^verifier-\d+$/.test(name)).sort()) await collect(entry, path.join(phase3, entry, 'result.json'));
+  await collectDir('auditor', path.join(path.dirname(runDir), `${path.basename(runDir)}-audit-dispatch`));
+  for (const entry of (await readdir(phase3).catch(() => [])).filter((name) => /^verifier-\d+$/.test(name)).sort()) await collectDir(entry, path.join(phase3, entry));
   if (!args.out) args.out = args.init ? path.join(phase3, 'manifest-body.json') : path.join(runDir, 'manifest.json');
   return descriptor;
 }
@@ -307,6 +317,7 @@ async function hashFileList(paths, flag) {
 async function buildHashes(args) {
   const hashes = {};
   if (args.taskPacket) hashes.task_packet = await hashFile(args.taskPacket, '--task-packet');
+  if (args.reviewRules) hashes.review_rules = await hashFile(args.reviewRules, 'review-rules.md');
   if (args.phase1.length > 0) hashes.phase1 = await hashFileList(args.phase1, '--phase1');
   if (args.phase2.length > 0) hashes.phase2 = await hashFileList(args.phase2, '--phase2');
   if (args.verification.length > 0) hashes.verifications = await hashFileList(args.verification, '--verification');
@@ -343,17 +354,18 @@ function sameEffort(field, value) {
 
 const IDENTITY_FIELDS = ['modelRequested', 'modelResolved', 'effortRequested', 'effortResolved', 'isolated', 'worktreePath', 'host', 'transport', 'readOnly'];
 
-// A field counts as known only when every call reports it; one missing call makes the sum unknown (null).
+// The calls that report numbers are summed; a call with none (a rate-limited or failed call) is not counted as zero but
+// named: the sum is then a lower bound (calls_without_usage). A field some reporting call lacks stays unknown (null).
 function sumUsages(usages, source) {
+  const numeric = (u) => u && typeof u === 'object' && u.source !== 'unavailable' && Object.values(u).some((v) => typeof v === 'number');
+  const known = usages.filter(numeric);
+  if (known.length === 0) return { source: 'unavailable', note: 'no call has usable usage numbers; see usage_per_call' };
   const sum = { source };
   const keys = new Set();
-  for (const u of usages) {
-    // A call without its own numbers makes any sum wrong; say so instead of counting it as zero.
-    const numeric = u && typeof u === 'object' && u.source !== 'unavailable' && Object.values(u).some((v) => typeof v === 'number');
-    if (!numeric) return { source: 'unavailable', note: 'a call has no usable usage numbers; see usage_per_call' };
-    for (const [k, v] of Object.entries(u)) if (typeof v === 'number') keys.add(k);
-  }
-  for (const k of keys) sum[k] = usages.every((u) => typeof u[k] === 'number') ? usages.reduce((s, u) => s + u[k], 0) : null;
+  for (const u of known) for (const [k, v] of Object.entries(u)) if (typeof v === 'number') keys.add(k);
+  for (const k of keys) sum[k] = known.every((u) => typeof u[k] === 'number') ? known.reduce((s, u) => s + u[k], 0) : null;
+  const missing = usages.length - known.length;
+  if (missing > 0) Object.assign(sum, { calls_without_usage: missing, note: `lower bound: ${missing} call(s) reported no usage; see usage_per_call` });
   return sum;
 }
 
@@ -365,9 +377,24 @@ const isUnstampedOpenCode = (r) => !r.usageSemantics && r.threadId == null && ty
 // usage before the review then counts only this review). Other cumulative results (explicit, or older files with no
 // usageSemantics and no usage_delta) take each thread's last total, and different threads add up. Results with no
 // threadId count as one thread.
+// One result alone: a cumulative thread total holds work from before this review, so its usable delta is counted instead.
+const ownUsage = (r) => (r.usageSemantics !== 'per-call' && hasUsableUsage(r.usage_delta) ? r.usage_delta : r.usage);
+
 function mergedUsage(results) {
+  if (results.length === 1) return ownUsage(results[0]);
+  // A call that reported no usage (rate-limited, failed) is left out before the merge is chosen and named: the rest is a lower bound.
+  const usable = results.filter((r) => hasUsableUsage(r.usage) || hasUsableUsage(r.usage_delta));
+  if (usable.length === 0) return results[results.length - 1].usage;
+  const missing = results.length - usable.length;
+  const merged = mergeUsable(usable);
+  if (missing === 0 || merged == null) return merged;
+  const total = (merged.calls_without_usage ?? 0) + missing;
+  return { ...merged, calls_without_usage: total, note: `lower bound: ${total} call(s) reported no usage; see usage_per_call` };
+}
+
+function mergeUsable(results) {
+  if (results.length === 1) return ownUsage(results[0]);
   const last = results[results.length - 1].usage;
-  if (results.length === 1) return last;
   const threads = new Set(results.map((r) => r.threadId ?? null));
   const everyDelta = results.every((r) => hasUsableUsage(r.usage_delta));
   if (!everyDelta && results.every((r) => !r.usageSemantics) && threads.size === 1 && !threads.has(null)) return last;
@@ -417,6 +444,13 @@ async function fillFalsification(existing, file, warnings) {
   return out;
 }
 
+// The earliest phase1 brief's write time (a native seat's brief-<seat>.txt or a CLI seat's <seat>/brief.txt), or null.
+async function firstBriefTime(runDir) {
+  const files = ['brief-A.txt', 'brief-B.txt', path.join('A', 'brief.txt'), path.join('B', 'brief.txt')].map((f) => path.join(runDir, 'phase1', f));
+  const times = (await Promise.all(files.map((f) => stat(f).then((s) => s.mtimeMs, () => null)))).filter((ms) => ms !== null);
+  return times.length > 0 ? Math.min(...times) : null;
+}
+
 async function fillReviewers(manifest, reviewerResults, warnings = [], collection = 'reviewers') {
   const reviewers = Array.isArray(manifest[collection]) ? manifest[collection].map((r) => ({ ...r })) : [];
   for (const [role, fileOrFiles] of Object.entries(reviewerResults)) {
@@ -444,8 +478,8 @@ async function fillReviewers(manifest, reviewerResults, warnings = [], collectio
       results.push(result);
     }
     // Every call of one seat must be the same model, effort and isolation; a mis-dispatched call
-    // must not disappear into a merged entry.
-    for (const key of IDENTITY_FIELDS) {
+    // must not disappear into a merged entry. Each auditor or verifier dispatch gets its own temporary worktree.
+    for (const key of IDENTITY_FIELDS.filter((k) => !(collection === 'actors' && k === 'worktreePath'))) {
       const values = [...new Set(results.map((r) => JSON.stringify(r[key] ?? null)))];
       if (values.length > 1) {
         throw new RelayError(`--reviewer-result ${role}: the result files disagree on ${key} (${values.join(' vs ')}); pass only calls of one seat`);
@@ -457,6 +491,7 @@ async function fillReviewers(manifest, reviewerResults, warnings = [], collectio
       reviewers.push(entry);
     }
     const merged = { ...results[0], usage: mergedUsage(results) };
+    if (collection === 'actors' && Object.hasOwn(results.at(-1), 'worktreePath')) merged.worktreePath = results.at(-1).worktreePath;
     for (const field of ['host', 'transport', 'readOnly']) merged[field] ??= null;
     if (merged.usage == null || (results.some((r) => r.usageSemantics) && (merged.usage.source === 'unavailable' || !Object.values(merged.usage).some(Number.isFinite)))) {
       merged.usage_reason = merged.usage?.note ?? merged.usage?.reason ?? 'dispatcher reported no usable usage numbers; see usage_per_call';
@@ -509,6 +544,10 @@ async function resultCommands(results) {
     if (!counted || (sum.source !== null && sum.source !== source)) return null;
     sum.tried += counted.tried;
     sum.failed += counted.failed;
+    if (counted.scripts) {
+      sum.scripts = (sum.scripts ?? 0) + counted.scripts;
+      sum.scriptsFailed = (sum.scriptsFailed ?? 0) + counted.scriptsFailed;
+    }
     sum.source = source;
   }
   return sum.source === null ? null : sum;
@@ -517,6 +556,7 @@ async function resultCommands(results) {
 // An agent id (the Agent tool's agentId) is looked up as <config>/projects/*/*/subagents/agent-<id>.jsonl, a Codex thread id as its rollout.
 async function resolveTranscript(role, value) {
   const found = await findAgentTranscripts(value);
+  if (found.length === 0) throw new RelayError(`--seat-transcript ${role}: no agent with id "${value}" under the Claude projects folder or the Codex sessions folder: check the id the Agent tool returned, or pass the .jsonl path`);
   if (found.length !== 1) {
     throw new RelayError(`--seat-transcript ${role}: agent id "${value}" matched ${found.length} transcripts under the Claude projects folder or the Codex sessions folder; pass the .jsonl path instead`);
   }
@@ -528,12 +568,18 @@ async function resolveTranscript(role, value) {
 async function transcriptUsage(role, files) {
   const calls = new Map();
   const used = [];
+  const read = [];
   const commands = { tried: 0, failed: 0, source: 'transcript' };
   let skipped = 0;
   let activeMs = 0;
   let timed = false;
   let since = null;
   let until = null;
+  // Of the copies of one session (the same file name in several project folders, with the same window) only the newest is counted.
+  const groups = new Map();
+  const starts = [];
+  const ends = [];
+  let bare = 0;
   for (const raw of files) {
     // "<transcript>@<ISO start>[/<ISO end>]" counts only entries in that window: one review in a
     // shared session. Without an end, it runs to the end of the transcript.
@@ -544,15 +590,35 @@ async function transcriptUsage(role, files) {
     if (at && !Number.isFinite(fromMs)) throw new RelayError(`--seat-transcript ${role}: "${at[1]}" after @ is not a date and time such as 2026-09-30T14:05:00Z`);
     if (at?.[2] && !Number.isFinite(toMs)) throw new RelayError(`--seat-transcript ${role}: "${at[2]}" after / is not a date and time such as 2026-09-30T15:00:00Z`);
     if (toMs !== null && toMs <= fromMs) throw new RelayError(`--seat-transcript ${role}: the end ${at[2]} is not after the start ${at[1]}`);
-    if (at) since = at[1];
-    if (at?.[2]) until = at[2];
+    if (at) starts.push({ ms: fromMs, text: at[1] });
+    else bare++;
+    if (at?.[2]) ends.push({ ms: toMs, text: at[2] });
     const file = await resolveTranscript(role, value);
-    let text;
-    try {
-      text = await readFile(file, 'utf8');
-    } catch (err) {
-      throw new RelayError(`--seat-transcript ${role}: failed to read "${file}": ${err.message}`);
+    const key = `${path.basename(file)}\0${fromMs ?? ''}\0${toMs ?? ''}`;
+    if (!groups.has(key)) groups.set(key, { fromMs, toMs, copies: [] });
+    groups.get(key).copies.push(file);
+  }
+  // The span from the earliest start to the latest end (of one instant spelled two ways, the last given); a bound is
+  // left out when a transcript was given without it.
+  if (bare === 0 && starts.length > 0) since = starts.reduce((min, s) => (s.ms <= min.ms ? s : min)).text;
+  if (ends.length > 0 && ends.length === files.length) until = ends.reduce((max, e) => (e.ms >= max.ms ? e : max)).text;
+  for (const { fromMs, toMs, copies } of groups.values()) {
+    // The copy with the latest entry, then the most lines, then the first given.
+    let best = null;
+    for (const copy of copies) {
+      let text;
+      try {
+        text = await readFile(copy, 'utf8');
+      } catch (err) {
+        throw new RelayError(`--seat-transcript ${role}: failed to read "${copy}": ${err.message}`);
+      }
+      const lines = text.split('\n').filter((line) => line.trim());
+      const latest = lines.reduce((max, line) => {
+        try { const ms = Date.parse(JSON.parse(line).timestamp); return ms > max ? ms : max; } catch { return max; }
+      }, -Infinity);
+      if (!best || latest > best.latest || (latest === best.latest && lines.length > best.lines)) best = { file: copy, text, latest, lines: lines.length };
     }
+    const { file, text } = best;
     let first;
     try { first = JSON.parse(text.replace(/^\uFEFF/, '').split('\n', 1)[0]); } catch {}
     if (first?.type === 'session_meta') {
@@ -575,7 +641,9 @@ async function transcriptUsage(role, files) {
     const claude = text.split('\n').some((line) => {
       try { const e = JSON.parse(line); return e.type === 'assistant' && e.message && typeof e.message === 'object'; } catch { return false; }
     });
-    if (!claude) throw new RelayError(`--seat-transcript ${role}: neither a Codex rollout (session_meta first line) nor a Claude session transcript; no API usage found in ${path.basename(file)}`);
+    if (!claude) throw new RelayError(`--seat-transcript ${role}: neither a Codex rollout (session_meta first line) nor a Claude session transcript; no API usage found in ${file}`);
+    used.push(path.basename(file));
+    read.push(file);
     // Working time: a gap counts only when it ends in the model's reply or a tool result, and not
     // while waiting after a final reply (stop_reason "end_turn" or a SubagentHandback tool call).
     // A gap that ends at a new prompt, an interrupt or a queued message was a wait.
@@ -595,7 +663,7 @@ async function transcriptUsage(role, files) {
       const entryAt = Date.parse(e?.timestamp);
       if (fromMs !== null && !(entryAt >= fromMs)) continue;
       if (toMs !== null && !(entryAt < toMs)) continue;
-      if (e?.type === 'assistant' && m?.id && m.usage && typeof m.usage === 'object') calls.set(`${file}\0${m.id}`, { usage: m.usage, model: typeof m.model === 'string' ? m.model : null });
+      if (e?.type === 'assistant' && m?.id && m.usage && typeof m.usage === 'object') calls.set(m.id, { usage: m.usage, model: typeof m.model === 'string' ? m.model : null });
       const at = entryAt;
       if (Number.isFinite(at)) {
         const content = Array.isArray(m?.content) ? m.content : [];
@@ -615,12 +683,11 @@ async function transcriptUsage(role, files) {
         }
       }
     }
-    used.push(path.basename(file));
-    const counted = transcriptCommands(text, { start: fromMs, end: toMs });
-    commands.tried += counted.tried;
-    commands.failed += counted.failed;
+    const tally = transcriptCommands(text, { start: fromMs, end: toMs });
+    commands.tried += tally.tried;
+    commands.failed += tally.failed;
   }
-  if (calls.size === 0) throw new RelayError(`--seat-transcript ${role}: no API usage found in ${used.join(', ')}; is it a subagent transcript?`);
+  if (calls.size === 0) throw new RelayError(`--seat-transcript ${role}: no API usage found in ${read.join(', ')}; is it a subagent transcript?`);
   const out = {
     source: 'transcript', transcripts: used, calls: calls.size,
     input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
@@ -662,8 +729,9 @@ async function transcriptUsage(role, files) {
 // skill_versions from <run-dir>/skill-versions.jsonl, which build-brief appends to for every brief:
 // {phase1: "1.8.13", phase2: "1.8.14", ...}, a list when one phase used several, and the skill name
 // in front when the run moved between skills. Null when the file is absent.
-// Completed dispatcher result.json files under the run dir (a dispatcher writes one next to each
-// brief) that no --reviewer-result names. Only a folder with phase1/ is treated as a run dir.
+// Completed dispatcher result.json and result.attempt-<n>.json files under the run dir (a dispatcher writes
+// one next to each brief), and in the auditor's <run-dir>-audit-dispatch beside it, that no --reviewer-result names.
+// Only a folder with phase1/ is treated as a run dir.
 async function unlistedResults(runDir, reviewerResults) {
   const passed = new Set(Object.values(reviewerResults).flat().map(comparablePath));
   const found = [];
@@ -677,7 +745,7 @@ async function unlistedResults(runDir, reviewerResults) {
     for (const e of entries) {
       const p = path.join(dir, e.name);
       if (e.isDirectory() && depth < 3) await walk(p, depth + 1);
-      else if (e.isFile() && e.name === 'result.json' && !passed.has(comparablePath(p))) {
+      else if (e.isFile() && /^result(?:\.attempt-\d+)?\.json$/.test(e.name) && !passed.has(comparablePath(p))) {
         try {
           if (JSON.parse(await readFile(p, 'utf8')).status === 'completed') found.push(p);
         } catch {
@@ -692,6 +760,7 @@ async function unlistedResults(runDir, reviewerResults) {
     return found;
   }
   await walk(runDir, 0);
+  await walk(path.join(path.dirname(runDir), `${path.basename(runDir)}-audit-dispatch`), 3);
   return found.sort();
 }
 
@@ -727,14 +796,45 @@ async function ownSkillVersion() {
   }
 }
 
+// --seat-transcript <role>=auto[@window]: this session's own transcript, named by the host's environment (Claude Code's
+// CLAUDE_CODE_SESSION_ID is the transcript's file name even after a resume; Codex's CODEX_THREAD_ID is a thread id). A session
+// that moved to another project folder has a file of that name in each; all with a reply are given, and the newest is counted.
+export async function resolveAutoTranscript(spec, env = process.env) {
+  const m = /^auto(@.*)?$/.exec(spec);
+  if (!m) return spec;
+  const window = m[1] ?? '';
+  if (env.CLAUDE_CODE_SESSION_ID) {
+    const files = await findSessionTranscripts(env.CLAUDE_CODE_SESSION_ID, env);
+    // A copy with no reply (a stub left in another project folder) is skipped while another copy has one.
+    const replied = [];
+    for (const file of files) {
+      const text = await readFile(file, 'utf8').catch(() => '');
+      if (text.includes('"assistant"') && text.split('\n').some((line) => {
+        try { const e = JSON.parse(line); return e.type === 'assistant' && e.message && typeof e.message === 'object'; } catch { return false; }
+      })) replied.push(file);
+    }
+    if (files.length > 0) return (replied.length > 0 ? replied : files).map((file) => `${file}${window}`);
+    throw new RelayError(`--seat-transcript ...=auto: no transcript <config>/projects/*/${env.CLAUDE_CODE_SESSION_ID}.jsonl for this Claude Code session; pass its path`);
+  }
+  if (env.CODEX_THREAD_ID) return `${env.CODEX_THREAD_ID}${window}`;
+  throw new RelayError("--seat-transcript ...=auto needs CLAUDE_CODE_SESSION_ID (Claude Code) or CODEX_THREAD_ID (Codex) in the environment: run review-run manifest from the orchestrator's own shell, or pass the transcript path");
+}
+
 async function run(args) {
   let initial = null;
+  for (const [role, specs] of Object.entries(args.seatTranscripts ?? {})) args.seatTranscripts[role] = (await Promise.all(specs.map((s) => resolveAutoTranscript(s)))).flat();
   if (args.runDir) {
     const descriptor = await collectFromRun(args);
     if (args.init) {
+      // --init writes no usage; a --seat-transcript given here (the orchestrator's own) is kept for the run without --init.
+      if (Object.keys(args.seatTranscripts).length > 0) {
+        const file = path.join(path.resolve(args.runDir), 'seat-transcripts.json');
+        const kept = await readJsonOrAbsent(file) ?? {};
+        await writeFile(file, `${JSON.stringify({ ...kept, ...args.seatTranscripts }, null, 2)}\n`, 'utf8');
+      }
       await mkdir(path.dirname(path.resolve(args.out)), { recursive: true });
       await writeFile(path.resolve(args.out), JSON.stringify(await initBody(descriptor, path.resolve(args.runDir)), null, 2) + String.fromCharCode(10), { flag: 'wx' });
-      process.stdout.write(`build-manifest: wrote the minimal body ${path.resolve(args.out)}; add what only you know, then run without --init\n`);
+      io.out(`build-manifest: wrote the minimal body ${path.resolve(args.out)}; add what only you know, then run without --init\n`);
       return null;
     }
     if (!args.in && descriptor) {
@@ -742,10 +842,11 @@ async function run(args) {
       // A body written with --init keeps what only the orchestrator added; the fields read from the run are recomputed
       // now, so a body written before the review finished cannot leave a stale status.
       const bodyPath = path.join(path.resolve(args.runDir), 'phase3', 'manifest-body.json');
-      const edited = await readJsonIfPresent(bodyPath);
-      if (edited && typeof edited === 'object') {
+      const edited = await readJsonOrAbsent(bodyPath);
+      if (edited) {
         initial = mergeEditedBody(edited, initial);
-        process.stderr.write(`build-manifest: kept the hand-added fields of ${bodyPath}\n`);
+        // stdout: on stderr PowerShell 5.1 shows this note as an error at exit 0.
+        io.out(`build-manifest: kept the hand-added fields of ${bodyPath}\n`);
       }
     }
   }
@@ -756,6 +857,11 @@ async function run(args) {
     } catch { /* none recorded */ }
     for (const role of ['A', 'B', 'auditor']) {
       if (agents && typeof agents[role] === 'string' && !(args.seatTranscripts[role]?.length > 0)) (args.seatTranscripts[role] ??= []).push(agents[role]);
+    }
+    // Transcripts given to --init; one given now for the same role wins.
+    const kept = await readJsonOrAbsent(path.join(args.runDir, 'seat-transcripts.json'));
+    for (const [role, specs] of Object.entries(kept ?? {})) {
+      if (Array.isArray(specs) && !(args.seatTranscripts[role]?.length > 0)) args.seatTranscripts[role] = specs.filter((s) => typeof s === 'string');
     }
   }
   let manifest = initial;
@@ -780,8 +886,22 @@ async function run(args) {
   }
 
   const seatUsage = { ...(args.seatUsage ?? {}) };
+  const warnings = [];
   for (const [role, files] of Object.entries(args.seatTranscripts ?? {})) {
-    const fromTranscript = await transcriptUsage(role, files);
+    let fromTranscript;
+    try {
+      fromTranscript = await transcriptUsage(role, files);
+    } catch (err) {
+      // The orchestrator's own cost is extra: its transcript with no usage in the window is a warning. A mistyped window or
+      // a file that is no transcript still stops.
+      if (role !== 'orchestrator' || !(err instanceof RelayError) || !/: no API usage found in .*; is it a subagent transcript\?$/.test(err.message)) throw err;
+      warnings.push(`seat_usage.orchestrator is not counted: ${err.message}`);
+      continue;
+    }
+    // A Codex rollout with no token events in the window is recorded as unknown (with its reason) and said here too.
+    if (role === 'orchestrator' && fromTranscript.total_tokens === null && fromTranscript.source === 'codex-rollout') {
+      warnings.push(`seat_usage.orchestrator is not counted: no token usage in ${fromTranscript.transcripts?.join(', ') ?? 'the rollout'} in that window`);
+    }
     // --seat-usage for the same seat still supplies the clock duration a transcript cannot give.
     const hand = seatUsage[role];
     // The transcript's own working time beats a hand figure unless that figure is a clock span:
@@ -808,7 +928,19 @@ async function run(args) {
   }
 
   const reviewerResults = args.reviewerResults ?? {};
-  const warnings = [];
+  // A window started from a late timestamp (run.json is rewritten late) silently drops most of the orchestrator's work.
+  const firstBrief = args.runDir ? await firstBriefTime(path.resolve(args.runDir)) : null;
+  for (const [role, u] of Object.entries(seatUsage)) {
+    if (firstBrief !== null && u?.counted_from && Date.parse(u.counted_from) > firstBrief + 60000) {
+      warnings.push(`seat_usage.${role} counts from ${u.counted_from}, but the first brief was written at ${new Date(firstBrief).toISOString()}: the work before it is not counted; pass @${new Date(firstBrief).toISOString()} (or earlier) as the start`);
+    }
+  }
+  // The orchestrator's own cost is counted only from its transcript: say which flag adds it. A body entry counts only with a number in it.
+  const bodyOrchestrator = bodyUsage?.orchestrator;
+  const bodyCounted = bodyOrchestrator !== null && typeof bodyOrchestrator === 'object' && !Array.isArray(bodyOrchestrator) && Object.values(bodyOrchestrator).some(Number.isFinite);
+  if (firstBrief !== null && !(args.seatTranscripts?.orchestrator?.length > 0) && !Object.hasOwn(seatUsage, 'orchestrator') && !bodyCounted) {
+    warnings.push(`seat_usage.orchestrator is not counted: no --seat-transcript orchestrator was given; to count this session's own cost, rerun review-run manifest with --seat-transcript orchestrator=auto@${new Date(firstBrief).toISOString()} (the first brief time; or the session .jsonl path with that @start)`);
+  }
   const seats = Object.fromEntries(Object.entries(reviewerResults).filter(([role]) => role === 'A' || role === 'B'));
   const actors = Object.fromEntries(Object.entries(reviewerResults).filter(([role]) => role !== 'A' && role !== 'B'));
   if (Object.keys(seats).length > 0) manifest.reviewers = await fillReviewers(manifest, seats, warnings);
@@ -856,10 +988,11 @@ async function run(args) {
       if (!Object.hasOwn(manifest, 'host_status')) manifest.host_status = descriptor.support.some((row) => row.status === 'trial') ? 'trial' : 'supported';
     }
   }
-  for (const file of await unlistedResults(path.dirname(path.resolve(args.out)), reviewerResults)) {
+  const hasPhase1 = args.runDir && (await stat(path.join(args.runDir, 'phase1')).then((s) => s.isDirectory(), () => false));
+  for (const file of await unlistedResults(hasPhase1 ? path.resolve(args.runDir) : path.dirname(path.resolve(args.out)), reviewerResults)) {
     warnings.push(`${file} is a completed call that was not passed to --reviewer-result (a session probe, an earlier attempt, or a seat call left out); its tokens and duration are not in this manifest`);
   }
-  for (const w of warnings) process.stderr.write(`build-manifest: WARNING: ${w}\n`);
+  for (const w of warnings) io.err(`build-manifest: WARNING: ${w}\n`);
 
   const hashes = await buildHashes(args);
   const stamped = { ...manifest, run_id: randomUUID(), hashes };
@@ -886,44 +1019,33 @@ async function run(args) {
   return stamped;
 }
 
-async function main() {
-  const argv = process.argv.slice(2);
-  if (argv.length === 0) printUsageAndExit(0);
+async function main(argv) {
   let args;
   try {
     args = parseArgs(argv);
   } catch (err) {
     if (err instanceof RelayError) {
-      // The error goes last and alone: the full help would scroll it off the screen.
-      process.stderr.write(`Run with --help for every option.\nbuild-manifest.mjs: ${err.message}\n`);
-      process.exit(2);
+      io.err(`build-manifest: ${err.message}\n`);
+      return 2;
     }
     throw err;
   }
   try {
     const stamped = await run(args);
-    if (stamped) process.stdout.write(`build-manifest: wrote ${args.out} (run_id ${stamped.run_id})\n`);
+    if (stamped) io.out(`build-manifest: wrote ${args.out} (run_id ${stamped.run_id})\n`);
+    return 0;
   } catch (err) {
     if (err instanceof RelayError) {
-      process.stderr.write(`build-manifest.mjs: ${err.message}\n`);
-      process.exit(1);
+      io.err(`build-manifest: ${err.message}\n`);
+      return 1;
     }
     throw err;
   }
 }
 
-const isDirectRun =
-  isMainModule(import.meta.url);
-if (isDirectRun) {
-  // A reader that stops early (head, Select-Object -First) closes the pipe: the rest of the output is dropped, the exit code stays.
-  process.stdout.on('error', (err) => {
-    if (err.code === 'EPIPE') return;
-    throw err;
-  });
-  main().catch((err) => {
-    process.stderr.write(`build-manifest.mjs: unexpected failure: ${err.stack || err}\n`);
-    process.exit(1);
-  });
-}
+// One manifest build in-process: { code, stdout, stderr }.
+const runStep = (argv) => runStepWith('build-manifest', io, main, argv);
 
-export { parseArgs, buildHashes, run, sha256, hashFile, RelayError };
+export { parseArgs, buildHashes, run, sha256, hashFile, RelayError, runStep, firstBriefTime };
+
+refuseDirectRun(import.meta.url, 'build-manifest.mjs');

@@ -23,8 +23,7 @@ test('pair-review takes two distinct models from one vendor: anthropic/claude or
   assert.deepEqual([c.reviewers.A.model, c.reviewers.B.model], ['gpt-5.6-sol', 'gpt-5.6-terra']);
   assert.throws(() => resolveConfig(null, 'pair-review', { ...openai, b: 'gpt-5.6-sol' }), /distinct/);
   assert.throws(() => resolveConfig(null, 'pair-review', { 'b-provider': 'openai', a: 'opus', b: 'gpt-5.6-sol' }), /one vendor/);
-  assert.throws(() => resolveConfig(null, 'pair-review', { 'a-provider': 'openai', 'b-provider': 'openai', 'a-runtime': 'opencode', a: 'openai/x', b: 'gpt-5.6-sol' }), /one vendor/);
-  assert.throws(() => resolveConfig(null, 'pair-review', { 'a-provider': 'google', 'a-runtime': 'opencode', 'b-provider': 'google', 'b-runtime': 'opencode', a: 'google/x', b: 'google/y' }), /one vendor/);
+  assert.throws(() => resolveConfig(null, 'pair-review', { 'a-provider': 'openai', 'b-provider': 'openai', 'a-runtime': 'opencode', a: 'openai/x', b: 'gpt-5.6-sol' }), /Invalid reviewer A/);
 });
 
 test('cross-review accepts selectable providers and requires adversarial mode', () => {
@@ -36,14 +35,8 @@ test('cross-review accepts selectable providers and requires adversarial mode', 
   assert.equal(c.reviewers.B.provider, 'openai');
   assert.equal(c.reviewers.B.runtime, 'codex');
   assert.throws(() => resolveConfig(c, 'cross-review', { mode: 'none' }), /mode/);
-  assert.throws(() => resolveConfig(c, 'cross-review', {
-    'b-provider': 'anthropic', 'b-runtime': 'opencode', b: 'anthropic/fable',
-  }), /different providers/);
-  const google = resolveConfig(c, 'cross-review', {
-    'b-provider': 'google', 'b-runtime': 'opencode', b: 'google/example-model',
-  });
-  assert.equal(google.reviewers.B.provider, 'google');
-  assert.equal(google.reviewers.B.runtime, 'opencode');
+  assert.throws(() => resolveConfig(c, 'cross-review', { 'b-provider': 'openai', 'b-runtime': 'opencode', b: 'openai/x' }), /Invalid reviewer B/);
+  assert.throws(() => resolveConfig(c, 'cross-review', { 'b-provider': 'google', b: 'google/example-model' }), /Invalid reviewer B/);
 });
 
 test('one-run overrides leave saved settings intact and clear stale effort', () => {
@@ -80,6 +73,15 @@ test('missing differs from corrupt or unsupported config', async (t) => {
   });
   await fs.writeFile(file, JSON.stringify({ version: 99 }));
   await assert.rejects(readConfig(file, 'pair-review'), /Unsupported/);
+  // Pair review F2: a file saved with the removed OpenCode runtime names the file and says reset, then setup.
+  await fs.writeFile(file, JSON.stringify({ version: 2, skill: 'pair-review', mode: 'collaborate', reviewers: {
+    A: { provider: 'anthropic', runtime: 'claude', model: 'opus', effort: 'default' },
+    B: { provider: 'openai', runtime: 'opencode', model: 'openai/gpt-5', effort: 'default' } } }));
+  await assert.rejects(readConfig(file, 'pair-review'), (err) => {
+    assert.ok(err.message.includes(file), err.message);
+    assert.match(err.message, /holds saved choices this version cannot use \(.+\); run reset, then setup/);
+    return true;
+  });
 });
 
 test('atomic save round-trips changes without touching another skill', async (t) => {
@@ -163,44 +165,6 @@ test('writeConfig rejects an undispatchable cross-review seat layout and writes 
   await assert.rejects(fs.stat(file), { code: 'ENOENT' });
 });
 
-test('an OpenCode seat whose model ID does not start with its declared provider is rejected, never silently dispatched to a different vendor', () => {
-  // B5 repro: provider "google" alongside a model ID that actually routes to Anthropic
-  // would defeat cross-vendor validation (A.provider !== B.provider looks satisfied).
-  assert.throws(() => resolveConfig(null, 'cross-review', {
-    a: 'opus', 'b-provider': 'google', 'b-runtime': 'opencode', b: 'anthropic/claude-opus-5',
-  }), /does not start with "google\//);
-  // Same provider label but the model ID disagrees with it -- also rejected.
-  assert.throws(() => resolveConfig(null, 'cross-review', {
-    a: 'opus', 'b-provider': 'anthropic', 'b-runtime': 'opencode', b: 'openai/gpt-6-astra',
-  }), /does not start with "anthropic\//);
-  // A bare model with no "/" at all under opencode is rejected, not treated as unprefixed-ok.
-  assert.throws(() => resolveConfig(null, 'cross-review', {
-    a: 'opus', 'b-provider': 'google', 'b-runtime': 'opencode', b: 'gemini-3-pro',
-  }), /does not start with "google\//);
-  // Provider/model agreeing (case-insensitively) is accepted.
-  const ok = resolveConfig(null, 'cross-review', {
-    a: 'opus', 'b-provider': 'google', 'b-runtime': 'opencode', b: 'Google/gemini-3-pro',
-  });
-  assert.equal(ok.reviewers.B.model, 'Google/gemini-3-pro');
-});
-
-test('an uncatalogued but well-formed provider is accepted only under the opencode runtime, and only for seat B', () => {
-  const c = resolveConfig(null, 'cross-review', {
-    a: 'opus', 'b-provider': 'groq', 'b-runtime': 'opencode', b: 'groq/llama',
-  });
-  assert.equal(c.reviewers.B.provider, 'groq');
-  const noRuntime = resolveConfig(null, 'cross-review', { a: 'opus', 'b-provider': 'groq', b: 'groq/llama' });
-  assert.equal(noRuntime.reviewers.B.runtime, 'opencode');
-  assert.throws(() => resolveConfig(null, 'cross-review', {
-    a: 'opus', 'b-provider': 'groq', 'b-runtime': 'claude', b: 'groq/llama',
-  }), /Invalid reviewer B/);
-  // Seat A has no dispatcher script; only the Claude harness can run it.
-  assert.throws(() => resolveConfig(null, 'cross-review', {
-    'a-provider': 'groq', 'a-runtime': 'opencode', a: 'groq/llama',
-    'b-provider': 'openai', b: 'gpt-6-astra',
-  }), /seat A to run on the Claude harness/);
-});
-
 test('cross review rejects seat B on the claude runtime and seat A on anything but the claude harness', () => {
   assert.throws(() => resolveConfig(null, 'cross-review', {
     a: 'opus', 'b-provider': 'anthropic', 'b-runtime': 'claude', b: 'sonnet',
@@ -211,30 +175,26 @@ test('cross review rejects seat B on the claude runtime and seat A on anything b
   }), /seat A to run on the Claude harness/);
 });
 
-test('a garbage-shaped or prototype-chain provider name is rejected even under the opencode runtime, and never crashes', () => {
-  for (const bad of ['x/y:z', '../../etc/passwd', 'Google', '', 'a b']) {
+test('a garbage-shaped or prototype-chain provider name is rejected and never crashes', () => {
+  for (const bad of ['x/y:z', '../../etc/passwd', 'Google', '', 'a b', 'groq']) {
     assert.throws(() => resolveConfig(null, 'cross-review', {
-      'a-provider': bad, 'a-runtime': 'opencode', a: 'm', 'b-provider': 'openai', b: 'gpt-6-astra',
+      'a-provider': bad, 'a-runtime': 'claude', a: 'm', 'b-provider': 'openai', b: 'gpt-6-astra',
     }), /Invalid reviewer A/, `expected "${bad}" to be rejected`);
   }
   for (const proto of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
-    assert.doesNotThrow(() => isSupportedPair(proto, 'opencode'));
+    assert.equal(isSupportedPair(proto, 'codex'), false);
     assert.throws(() => resolveConfig(null, 'cross-review', {
       'a-provider': proto, 'a-runtime': 'claude', a: 'm', 'b-provider': 'openai', b: 'gpt-6-astra',
     }), /Invalid reviewer A/, `expected "${proto}" under claude runtime to be rejected, not crash`);
   }
 });
 
-test('isSupportedPair truth table: catalog providers, the opencode bounded hatch, and prototype-chain keys', () => {
+test('isSupportedPair truth table: the two catalog providers on their own runtime, nothing else', () => {
   assert.equal(isSupportedPair('anthropic', 'claude'), true);
   assert.equal(isSupportedPair('openai', 'codex'), true);
-  assert.equal(isSupportedPair('google', 'opencode'), true);
-  assert.equal(isSupportedPair('opencode', 'opencode'), true);
   assert.equal(isSupportedPair('anthropic', 'codex'), false);
-  assert.equal(isSupportedPair('groq', 'opencode'), true);
+  for (const provider of ['openai', 'anthropic', 'google', 'groq']) assert.equal(isSupportedPair(provider, 'opencode'), false, provider);
   assert.equal(isSupportedPair('groq', 'claude'), false);
-  assert.equal(isSupportedPair('x/y:z', 'opencode'), false);
-  assert.equal(isSupportedPair('constructor', 'opencode'), true);
   assert.equal(isSupportedPair('constructor', 'claude'), false);
   assert.equal(isSupportedPair('toString', 'claude'), false);
   assert.equal(isSupportedPair(123, 'claude'), false);
@@ -247,7 +207,7 @@ test('catalog command exposes current OpenAI tiers and Fable', () => {
   assert.equal(result.status, 0, result.stderr);
   const value = JSON.parse(result.stdout);
   assert.deepEqual(value.providers.openai.models.map((model) => model.id), [
-    'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+    'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
     'gpt-5.5',
   ]);
   assert.ok(value.providers.anthropic.models.some((model) => model.id === 'fable'));
@@ -259,7 +219,7 @@ test('seats: the seats file is built from the resolved choices, native for the h
   assert.deepEqual(onClaudeCode.seatA, { provider: 'anthropic', runtime: 'claude', model: 'opus', effort: null, transport: 'native' });
   assert.deepEqual(onClaudeCode.seatB, { provider: 'openai', runtime: 'codex', model: 'gpt-5.6-terra', effort: 'high', transport: 'cli' });
   assert.deepEqual(onClaudeCode.auditor, onClaudeCode.seatA, 'the auditor repeats seat A');
-  assert.deepEqual(onClaudeCode.flags, { auditDepth: 'light', falsification: false, mode: 'adversarial' });
+  assert.deepEqual(onClaudeCode.flags, { falsification: false, mode: 'adversarial', repoOnly: false });
   assert.equal(buildSeats(cross, 'claude-code', { transport: 'cli' }).seatA.transport, 'cli');
   assert.equal(buildSeats(cross, 'claude-code', { transport: 'cli' }).seatB.transport, 'cli');
   const onCodex = buildSeats(cross, 'codex');
@@ -271,6 +231,33 @@ test('seats: the seats file is built from the resolved choices, native for the h
   assert.equal(buildSeats(pair, 'codex').flags.mode, 'collaborate');
   assert.throws(() => buildSeats(pair, 'gemini'), /--host must be claude-code or codex/);
   assert.throws(() => buildSeats(pair, 'codex', { transport: 'foreground' }), /--transport must be native or cli/);
+});
+
+test('Linux round F9: seats warns when a Codex CLI seat runs on the default effort, and not with an effort set', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'seats-effort '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const script = fileURLToPath(new URL('../review-config.mjs', import.meta.url));
+  const env = { ...process.env, REVIEW_SKILLS_CONFIG_DIR: dir };
+  const run = (...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env });
+  // pair-review needs one vendor (two Codex models); cross-review needs two.
+  const pair = path.basename(path.resolve(path.dirname(script), '..')) === 'pair-review';
+  const setup = pair
+    ? ['setup', '--a-provider', 'openai', '--a-runtime', 'codex', '--a', 'gpt-5.6-terra', '--b-provider', 'openai', '--b-runtime', 'codex', '--b', 'gpt-6-sol']
+    : ['setup', '--a', 'opus', '--b-provider', 'openai', '--b-runtime', 'codex', '--b', 'gpt-6-sol'];
+  assert.equal(run(...setup).status, 0, run(...setup).stderr);
+  const plain = run('seats', '--host', 'claude-code', '--transport', 'cli');
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.match(plain.stderr, /WARNING: seat B \(codex\) runs on Codex's default effort, which the rollout does not report; set one with --b-effort high/);
+  const set = run('seats', '--host', 'claude-code', '--transport', 'cli', ...(pair ? ['--a-effort', 'high'] : []), '--b-effort', 'high');
+  assert.equal(set.status, 0, set.stderr);
+  assert.doesNotMatch(set.stderr, /default effort/);
+  // Closing round 2: a native seat or auditor gets a one-line note about host-loaded instructions and memory; CLI ones do not.
+  assert.doesNotMatch(plain.stderr, /native agent/);
+  const native = run('seats', '--host', pair ? 'codex' : 'claude-code', '--b-effort', 'high');
+  assert.equal(native.status, 0, native.stderr);
+  assert.match(native.stderr, pair
+    ? /note: seat A, seat B, the auditor run as native agents and also see the host's own instructions and memory .*--transport cli/
+    : /note: seat A, the auditor run as native agents and also see the host's own instructions and memory .*--transport cli/);
 });
 
 test('seats CLI: --host is required, an output file is never overwritten, and the file passes the layout rules', async (t) => {
@@ -290,13 +277,24 @@ test('seats CLI: --host is required, an output file is never overwritten, and th
   assert.deepEqual([seats.seatA.model, seats.seatB.model, seats.auditor.model], ['opus', 'sonnet', 'opus']);
   const again = run('seats', '--host', 'claude-code', '--out', out);
   assert.notEqual(again.status, 0, 'an existing file is not overwritten');
-  assert.match(again.stderr, /already exists and is never overwritten: choose a new --out path/);
+  assert.match(again.stderr, /already exists: choose a new --out path, or add --replace to overwrite it/);
+  // Field feedback S9: --replace overwrites on purpose (switching a seat's transport before preflight).
+  const replaced = run('seats', '--host', 'claude-code', '--transport', 'cli', '--out', out, '--replace');
+  assert.equal(replaced.status, 0, replaced.stderr);
+  assert.equal(JSON.parse(await fs.readFile(out, 'utf8')).seatA.transport, 'cli', 'field feedback S9: the file was replaced');
   assert.equal(JSON.parse(run('seats', '--host', 'codex', '--transport', 'cli', '--b', 'haiku').stdout).seatB.model, 'haiku', 'one-run overrides apply');
+  // The manifest's selection_source comes from here: saved choices are "saved", a one-run override is "explicit".
+  assert.deepEqual([seats.seatA.selectionSource, seats.seatB.selectionSource], ['saved', 'saved']);
+  const override = JSON.parse(run('seats', '--host', 'claude-code', '--b', 'haiku').stdout);
+  assert.deepEqual([override.seatA.selectionSource, override.seatB.selectionSource], ['saved', 'explicit']);
+  // An effort override alone keeps the saved model.
+  const effortOnly = JSON.parse(run('seats', '--host', 'claude-code', '--b-effort', 'high').stdout);
+  assert.equal(effortOnly.seatB.selectionSource, 'saved');
 });
 
-test('seats: --repo-only sets flags.repoOnly, and is absent by default', async () => {
+test('seats: --repo-only sets flags.repoOnly, and is false by default (field: the web choice must be readable from the file)', async () => {
   const cross = resolveConfig(null, 'cross-review', { a: 'opus', b: 'gpt-5.6-terra', 'b-provider': 'openai', 'b-runtime': 'codex', 'b-effort': 'high' });
-  assert.equal('repoOnly' in buildSeats(cross, 'claude-code').flags, false);
+  assert.equal(buildSeats(cross, 'claude-code').flags.repoOnly, false);
   assert.equal(buildSeats(cross, 'claude-code', { repoOnly: true }).flags.repoOnly, true);
   assert.deepEqual(parseOptions(['seats', '--host', 'claude-code', '--repo-only', '--transport', 'cli']).options, { host: 'claude-code', 'repo-only': true, transport: 'cli' });
   assert.deepEqual(parseOptions(['seats', '--repo-only', '--host', 'codex']).options, { 'repo-only': true, host: 'codex' });
@@ -304,12 +302,11 @@ test('seats: --repo-only sets flags.repoOnly, and is absent by default', async (
   assert.throws(() => parseOptions(['resolve', '--repo-only']), /Unknown option: --repo-only/);
 });
 
-test('seats: --audit-depth sets flags.auditDepth, --mode sets the mode, --help lists them', () => {
+test('seats: there is no audit depth to choose (every audit is full), --mode sets the mode, --help lists them', () => {
   const cross = resolveConfig(null, 'cross-review', { a: 'opus', b: 'gpt-5.6-terra', 'b-provider': 'openai', 'b-runtime': 'codex', 'b-effort': 'high' });
-  assert.equal(buildSeats(cross, 'claude-code').flags.auditDepth, 'light');
-  assert.equal(buildSeats(cross, 'claude-code', { auditDepth: 'full' }).flags.auditDepth, 'full');
-  assert.throws(() => buildSeats(cross, 'claude-code', { auditDepth: 'deep' }), /--audit-depth must be light or full/);
-  assert.deepEqual(parseOptions(['seats', '--host', 'claude-code', '--audit-depth', 'full', '--mode', 'adversarial']).options, { host: 'claude-code', 'audit-depth': 'full', mode: 'adversarial' });
+  assert.equal(Object.hasOwn(buildSeats(cross, 'claude-code').flags, 'auditDepth'), false);
+  assert.throws(() => parseOptions(['seats', '--host', 'claude-code', '--audit-depth', 'full']), /Unknown option: --audit-depth/);
+  assert.deepEqual(parseOptions(['seats', '--host', 'claude-code', '--mode', 'adversarial']).options, { host: 'claude-code', mode: 'adversarial' });
   assert.equal(parseOptions(['seats', '--help']).command, '--help');
   assert.equal(parseOptions(['seats', '--host', 'codex', '-h']).command, '--help');
 });
@@ -336,6 +333,30 @@ test('seats --auditor puts the auditor on another model of seat A\'s provider; w
   assert.throws(() => buildSeats(config, 'claude-code', { auditorModel: 'two words' }), /one model id/);
   assert.equal(parseOptions(['seats', '--host', 'claude-code', '--auditor', 'sonnet']).options.auditor, 'sonnet');
   assert.throws(() => parseOptions(['resolve', '--auditor', 'sonnet']), /Unknown option/);
+});
+
+test('seats --env, --env-mode and --use-api-key write a per-actor env setting of names only; the auditor takes seat A\'s', async () => {
+  const { buildSeats, parseOptions, seatEnv } = await import('../review-config.mjs');
+  const config = { mode: 'adversarial', reviewers: { A: { provider: 'anthropic', runtime: 'claude', model: 'opus', effort: 'default' }, B: { provider: 'openai', runtime: 'codex', model: 'gpt-6.1-sol', effort: 'default' } } };
+  const { options } = parseOptions(['seats', '--host', 'claude-code', '--env', 'A=CLAUDE_CODE_USE_BEDROCK, AWS_REGION', '--env-mode', 'B=inherit', '--use-api-key', 'A', '--env', 'B=OPENAI_BASE_URL']);
+  assert.deepEqual(options.env, ['A=CLAUDE_CODE_USE_BEDROCK, AWS_REGION', 'B=OPENAI_BASE_URL']);
+  const env = seatEnv(options);
+  assert.deepEqual(env, { A: { pass: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_REGION'], apiKey: true }, B: { pass: ['OPENAI_BASE_URL'], mode: 'inherit' } });
+  const seats = buildSeats(config, 'claude-code', { transport: 'cli', env });
+  assert.deepEqual(seats.seatA.env, { pass: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_REGION'], apiKey: true });
+  assert.deepEqual(seats.seatB.env, { pass: ['OPENAI_BASE_URL'], mode: 'inherit' });
+  assert.deepEqual(seats.auditor.env, seats.seatA.env, 'the auditor runs on seat A\'s provider');
+  assert.deepEqual(buildSeats(config, 'claude-code', { transport: 'cli', env: { ...env, auditor: { mode: 'inherit' } } }).auditor.env, { mode: 'inherit' });
+  assert.equal(buildSeats(config, 'claude-code', { transport: 'cli' }).seatA.env, undefined);
+  // A native seat runs in the host's environment, so the setting is refused for it; an inherited auditor setting is dropped.
+  assert.throws(() => buildSeats(config, 'claude-code', { env }), /apply to a CLI actor only; A runs as a native agent/);
+  assert.equal(buildSeats(config, 'claude-code', { env: { B: env.B } }).auditor.env, undefined);
+  assert.throws(() => buildSeats(config, 'claude-code', { transport: 'cli', env: { B: { apiKey: true } } }), /--use-api-key B: ANTHROPIC_API_KEY is for a Claude CLI actor/);
+  assert.throws(() => seatEnv({ env: ['A=AWS_SECRET_ACCESS_KEY=abc'] }), /not a variable name \(names only, never NAME=value\)/);
+  assert.throws(() => seatEnv({ env: ['A=X', 'A=Y'] }), /--env given twice for A/);
+  assert.throws(() => seatEnv({ env: ['C=X'] }), /takes a role first: A, B or auditor/);
+  assert.throws(() => seatEnv({ 'env-mode': ['A=open'] }), /--env-mode takes ROLE=filtered or ROLE=inherit/);
+  assert.throws(() => parseOptions(['resolve', '--env', 'A=X']), /Unknown option/);
 });
 
 test('checklists: a user\'s own bug checklists are listed and read from the config directory, names cannot leave it', async (t) => {

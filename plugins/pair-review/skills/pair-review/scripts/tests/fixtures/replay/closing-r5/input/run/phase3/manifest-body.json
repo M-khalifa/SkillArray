@@ -1,0 +1,40 @@
+{
+  "source_write": null,
+  "falsification": {
+    "requested": false,
+    "verifiers_run": 0
+  },
+  "topology": "cross-vendor",
+  "mode": "adversarial",
+  "status": "completed",
+  "protocol": "review-protocol-v1.3",
+  "reviewers": [
+    {
+      "role": "A",
+      "provider": "anthropic",
+      "model_requested": "opus",
+      "selection_source": "saved"
+    },
+    {
+      "role": "B",
+      "provider": "openai",
+      "model_requested": "gpt-6.1-sol",
+      "selection_source": "saved"
+    }
+  ],
+  "exchange": {
+    "blinded": true,
+    "seat_to_audit_label": {
+      "A": "X",
+      "B": "Y"
+    },
+    "auditor_model_family": "same-as-reviewer-A",
+    "auditor": "fresh-context",
+    "audit_depth": "full"
+  },
+  "seat_blind_lines": {
+    "B": [
+      "Blocked: rg search: CommandNotFoundException (native search used); Git global-ignore configuration: Permission denied"
+    ]
+  }
+}

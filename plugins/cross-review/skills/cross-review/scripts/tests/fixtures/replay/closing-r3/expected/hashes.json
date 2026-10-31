@@ -1,0 +1,23 @@
+{
+  "step validate": "0efb13feee8da8819f0348f3e1a5624b4513e9f0d3d66a9c77fcbefd585077c0",
+  "step exchange prepare": "e945291505f57cd14827c9ed232b7834b90b77c4a5bf31efd0e1221eeb1a1d88",
+  "step exchange finish": "198c1fb27d8e8c7955d5346b4e88cc841bdfa2014ddedac35f59bd90b2b72dc7",
+  "step audit-prep": "999300235eff0c6bca8596ef1eb15e75c49a988ae23f1ae9a339cfbb065a954c",
+  "step translate": "de3e0c3105710c17430174c1edac6994ab0b980a23463c7c29193efa411cf95f",
+  "step scorecard": "3d19bb13056c504e83d5cb3f5d1974836a8acc9b346e6465fb5979e65fe856a0",
+  "step manifest": "85aef72793000a34b5aefd97a0e592975e0e439175fc2a9f981a21f75edde833",
+  "step report chat": "d11ea9ba15a64698d399b886b138808aab4e8ebbff0a73d5ed301ba7c4498ce0",
+  "step report chat all": "eb6c6ab1f36aa2a290bbc125c96ca46989c36e33c1658d0c24236e08123d36a2",
+  "phase1/A-findings.md": "8c1b3161331c317f8e5753180e599171e768b10243aae94ba3f865323e219be5",
+  "phase2/peer-view-for-A.md": "bc03af0cfc1c486d71f57514bcef71c8131bc02a5ae3950641bd3db2aff9baa3",
+  "phase1/B-findings.md": "41a5d409e5dbe64c34195f0ecd67e711b5a2afbb948f3b056a57178b42dcb510",
+  "phase2/peer-view-for-B.md": "1b2c42027da024ee5133eb6c5a9212209906f1619b3cea2e2f8d97803a29aacf",
+  "phase2/exchange-result.json": "89b8922aed739cc3beaa7ba8370b39e9ad14a6aa296256bfee04b55b7d1948c1",
+  "audit-input/X-findings.md": "abc83a72aeef74f2e4f557cf79e7eed847d415ae895d7b7ca3f92fa55f97a68b",
+  "audit-input/Y-findings.md": "83c16e38c6307ce752ba2b5eb54469724037751ea72f6cb7cfa31e7af2331d40",
+  "phase3/falsification-breakdown.json": "bbd7fe472143df85cde6f27af01e4ce0ac633b7c7aebe07eb77a31e3147cf69c",
+  "phase3/findings.json": "f3a8e803053f48990b25f28437740923d388f48a104d24922a74868ad825102b",
+  "phase3/scorecard.md": "c17b55f244f2f3a9e38132fad7cba4dee078c880cdd4398b68e5393f143de19a",
+  "manifest.json": "9beadb0abd6b1bd47b16a3a4ab3cc49cb67d8714021145cd73f21ba62a65d261",
+  "report.md": "8179af5544afab9923536a4666cc1e6161db13670c0d03ae78d789747775b398"
+}

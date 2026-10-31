@@ -1,0 +1,77 @@
+{
+  "skill": "cross-review",
+  "skillDir": "C:\\Users\\dev\\.claude\\skills\\cross-review",
+  "targetDir": "@@TARGET_JSON@@",
+  "host": "claude-code",
+  "flags": {
+    "auditDepth": "full",
+    "falsification": false,
+    "mode": "adversarial",
+    "repoOnly": true
+  },
+  "fingerprint": {
+    "head": "ea0b739e8bc727cbe052c89b9478f31d675aacef",
+    "diffSha256": "3dd4a947c3d8d3ab6de7b19f3dab8fe362bbc0628aaeb2422ec910eabc0325dc",
+    "untrackedSha256": "9a92d58f1543156df9450c7437ba5be04b8e78be4f8dd1a14d24c6ad3dc18f34",
+    "snapshotHash": "a092d57bfa03a88438e5a85478da029f84c28b2212133a6c4b82cdd77df62134"
+  },
+  "seatA": {
+    "role": "A",
+    "effort": "high",
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@\\phase1\\seat-A",
+    "provider": "anthropic",
+    "runtime": "claude",
+    "model": "fable",
+    "transport": "cli",
+    "selectionSource": "explicit"
+  },
+  "seatB": {
+    "role": "B",
+    "effort": "medium",
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@\\phase1\\seat-B",
+    "provider": "openai",
+    "runtime": "codex",
+    "model": "gpt-6-astra",
+    "transport": "cli",
+    "selectionSource": "explicit"
+  },
+  "auditor": {
+    "role": "auditor",
+    "effort": null,
+    "sessionId": null,
+    "resultPath": null,
+    "worktreePath": null,
+    "outputDir": "@@RUN_JSON@@-audit-input",
+    "provider": "anthropic",
+    "runtime": "claude",
+    "model": "opus",
+    "transport": "cli"
+  },
+  "verifiers": [],
+  "support": [
+    {
+      "role": "A",
+      "runtime": "claude",
+      "transport": "cli",
+      "status": "supported"
+    },
+    {
+      "role": "B",
+      "runtime": "codex",
+      "transport": "cli",
+      "status": "supported"
+    },
+    {
+      "role": "auditor",
+      "runtime": "claude",
+      "transport": "cli",
+      "status": "supported"
+    }
+  ]
+}

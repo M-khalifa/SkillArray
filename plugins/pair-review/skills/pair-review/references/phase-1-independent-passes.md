@@ -1,7 +1,7 @@
 # Phase 1 — Independent passes
 
 > **With `review-run` you do not need this file for the normal path.** SKILL.md's Quickstart lists the commands in order. Read it when a
-> step fails, a seat must be replaced or resumed by hand, a scan or validation stops the run, or you dispatch without the sequencer.
+> step fails, a seat must be replaced or resumed, or a scan or validation stops the run.
 
 ## Contents
 
@@ -28,8 +28,8 @@ directory; for a run that may last more than a day, put it and any source
 snapshot outside the temporary directory, since a temp cleaner such as
 Windows Storage Sense can delete files older than a day. Assign `<run-dir>/phase1/A-findings.md` and
 `<run-dir>/phase1/B-findings.md`; keep artifacts outside the reviewed
-source, and outside its git repository unless they sit in a git-ignored folder (preflight refuses that
-layout with a Claude CLI seat). Include a run ID in both agent names.
+source (preflight refuses a run folder inside the target, also in a git-ignored folder), and outside its git
+repository unless they sit in a git-ignored folder (preflight refuses that layout with a Claude CLI seat). Include a run ID in both agent names.
 
 When the target is your own change against a ticket, list in the packet the
 known deviations from its acceptance criteria, or write "none": an undisclosed
@@ -38,8 +38,9 @@ deviation is a finding the seats will spend a claim on.
 When the target itself names things like a peer label (a design draft calling
 its parsers "P0" and "P1"), declare a prefix for them as an outside checklist
 (phase-2-cross-examination.md, Outside checklists): write in the packet
-"the target's P0 and P1 are cited as DOC-P0 and DOC-P1", and pass `--checklist
-DOC` to every `scan`, `append-rebuttals`, `audit-prep` and `translate`.
+"the target's P0 and P1 are cited as DOC-P0 and DOC-P1", and add `DOC` to the
+seats file's `flags.checklists` (review-run passes it as `--checklist DOC` to
+every step that checks labels; give `review-run scan` the same `--checklist DOC`).
 Otherwise every bare "P1" in a seat's own words is a hard stop at audit-prep.
 
 When the target is a fix of an existing component, give the seats the
@@ -84,7 +85,7 @@ preflight with `--compact --out <evidence-dir>/preflight.json`, where
 because a name continued by a space cannot be told apart from a path back into
 the run directory), never inside it: the task packet cites these log paths and the auditor receives the packet, so a
 path inside the run directory would point the auditor at real-ID files
-(`build-brief.mjs --mode auditor --run-dir` refuses such a packet). The full
+(the auditor brief step of `review-run audit --finish` refuses such a packet). The full
 stdout and stderr of each command and the Tier 1 diff go to log files, and the
 JSON keeps each stream's byte count, sha256, last lines, the test-runner total
 line (`summary`), and every fail/error/not-ok line that is not a passing test.
@@ -104,8 +105,17 @@ caches) is visible there before any seat starts; clean it up or record it in
 the packet, or a seat can be blamed for a file the tests wrote. Gitignored
 output is not covered.
 
+A command with inner quotes or a path with spaces can be broken by the calling shell before pre-flight sees it
+(Windows PowerShell 5.1 drops the inner quotes of a native argument). Put such commands in a file, one per line,
+and pass `--exec-file <file>`: each line reaches the shell exactly as written. For another repository use `--exec-in-file <path> <file>` the same way.
+On Linux and macOS, pre-flight kills an `--exec` command's process group when the command exits, so a job it left running in
+the background stops with it; a process that left the group (`setsid`) is found by the run id it inherits and stopped too. On macOS the run id finds a job that is a non-Apple program (node, Homebrew python); an Apple system program (`/bin/sh`, `/bin/sleep`, `/usr/bin/perl`) hides its environment and is not found, and a process whose arguments hold the run id is matched too. On Windows each command runs in a job object: a background process it started, also one
+whose launcher has exited, is stopped when the command ends, named in a WARNING and listed as `leftoversStopped`. Still
+end such jobs inside the command itself. The job wrapper starts PowerShell first, which adds seconds to each command
+(5 to 7 on a busy machine); `--timeout` counts that time.
+
 With `--out`, pre-flight writes the JSON to the file and prints one summary line (hash, per-command exit codes,
-`targetChanged`). The commands are under `tier2.results[]` (`command`, `exitCode`, `timedOut`, `touchedFiles`, and
+`targetChanged`). The commands are under `tier2.results[]` (`command`, `exitCode`, `timedOut`, `timeoutS`, `touchedFiles`, and
 `stdout`/`stderr` with `log`, `sha256`, `tail`, `summary`, `matches` under `--compact`), next to `tier2.snapshotHash`.
 
 **Tests in a second repository.** `--exec-in <path> "<command>"` (repeatable) runs a Tier 2 command with `<path>` as
@@ -135,7 +145,9 @@ or tag, with no spaces), and
 `sourceSnapshots` records the stated repo and ref with the folder's content hash.
 Copy those lines into the packet too; the manifest's packet hash then covers them.
 Python caches in a snapshot are left out of its hash and reported; run Python
-there with `-B` so none are written.
+there with `-B` so none are written. `py_compile` and `compileall` write `__pycache__`
+even with `-B`, so a compile check run with `--exec` reports `targetChanged: true`:
+remove that folder before dispatch, or record it in the packet.
 
 Pre-flight also reports `reviewArtifactFiles` for `--cd` and each `--repo`:
 files that hold review output with real claim IDs (a past run's findings file
@@ -155,10 +167,16 @@ together with a narrower scope, cut the slower seat from 27.6 to 7.3 minutes
 and the whole run from about 55 to 25 minutes. Seats still run their own
 targeted checks.
 
+**Static analysis tools.** A linter, type checker or secret scanner the target already uses runs the same
+way, as a Tier 2 command (`--exec`): pre-flight never installs a tool, so name only tools on this host. Run a
+secret scanner only in its redacting mode (for example `gitleaks detect --redact`): its log goes into the packet
+and every brief, so an unredacted hit would copy the secret there. Tool output is a lead for the seats, not a
+finding: a seat still confirms each hit in the code.
+
 **Large targets: say where to start.** For a target of several thousand lines,
 list in the packet the files and functions that matter most, in order, with
 line ranges when known. A seat that reads whole files again and again pays for
-every pass: in one review of a 2,500-line collector and a 2,000-line parser, the
+every pass: in one review of a 2,500-line module and a 2,000-line module, the
 Codex seat used 9.7 million input tokens, 97% of them re-reads of text it had
 already seen. The seat still decides what else to read; the list is a start, not
 a limit on scope.
@@ -172,47 +190,45 @@ context; it is never the default, because its scoped-vs-full recall has not
 yet been benchmark-compared (see `bench/run-comparison.mjs`). If used, state
 in the task packet that this is a starting point, not the complete relevant
 context — both seats retain their full existing ability to read beyond it
-(codex/opencode via `--cd` filesystem access, pair-review via Read/Grep).
+(codex via `--cd` filesystem access, pair-review via Read/Grep).
 With no `--base` given, or against a non-git target, the builder returns
 `{packet: null, reason: "..."}` rather than guessing a scope; treat that the
 same as not using it at all.
 
 ## Start both seats
 
-Start both isolated reviewers concurrently using this harness's supported
-model/effort mechanism. Pass the protocol and task explicitly; do not
-assume subagents inherit this conversation. Build each brief with
-`node "<skill-dir>/scripts/build-brief.mjs" --mode phase1 --packet
-<task-packet> --seat A|B --out <brief file> --output-path
-<run-dir>/phase1/<seat>-findings.md`: it copies review-protocol.md's
-seat rules, findings schema, and web reviewer rules
-verbatim, and tells the seat to write its findings to its own file and
-reply only with counts; the orchestrator never retypes a seat's findings
-from a reply. Tell each seat to read its brief from the file. In Phase 1, neither seat may
-read the peer's file. Review only; no source edits or commits. Do not set
-a time or token limit on a seat: a seat stopped part-way is a failed pass
-that has to be rerun, which costs more than letting it finish. Apply a
-limit only when the user asks for one, and then treat an exceeded limit as
-an incomplete review for that seat, never as a completed one. Start both seats through the transport the host file
-names; a native seat gets full tools so it keeps web access. For a CLI seat,
-`node "<skill-dir>/scripts/review-run.mjs" phase1 --run-dir "<run-dir>" --start` builds both briefs
-from `run.json`, starts each CLI seat detached through its runtime's dispatcher, `claude-dispatch.mjs` or `codex-dispatch.mjs` (a Claude seat writes only into its
-own `phase1/seat-<role>/` folder; a Codex seat returns its answer as the final message and the dispatcher saves it) and prints the brief path of each native seat; `--wait` waits for
-both, copies each file-channel CLI seat's file to `phase1/<role>-findings.md`, compares the two resolved model IDs (Claude: `init`; Codex: the thread rollout)
-(native seats: the requested IDs, recorded as `family-distinct`) and stops if they are equal, then
-runs `validate`. When a CLI seat ended badly (an error, or a detached worker that died), the next
-`--wait` dispatches that seat again as a new session in the same worktree; it does not resume the
-failed session (to resume the recorded session, run the seat's dispatcher by hand with `--session`). The
-worktree is the one its failed attempt recorded. Both briefs carry review-protocol.md's "Web verification: reviewer
-rules" subsection (build-brief adds it unless the task says "repo-only
-review") — both pair-review seats come from one vendor, so this capability
-is symmetric between seats by construction, unlike cross-review's
-Codex/OpenCode asymmetry. While both run, report status about every 10
+Start both isolated reviewers at the same time, each on its selected model and effort. Pass
+the protocol and task explicitly; do not assume subagents inherit this conversation.
+`node "<skill-dir>/scripts/review-run.mjs" phase1 --run-dir "<run-dir>" --start` builds both
+briefs from `run.json` and the task packet. Each brief copies review-protocol.md's seat rules,
+findings schema and web reviewer rules verbatim (plus the repository's REVIEW.md rules when
+preflight wrote `<run-dir>/review-rules.md`), and tells the seat to write its findings to its own
+file and reply only with counts; the orchestrator never retypes a seat's findings from a reply.
+The brief step refuses a packet that points into the run folder. Tell each seat to read its brief
+from the file. In Phase 1, neither seat may read the peer's file. Review only; no source edits or
+commits. Do not set a time or token limit on a seat: a seat stopped part-way is a failed pass
+that has to be rerun, which costs more than letting it finish. Apply a limit only when the user
+asks for one, and then treat an exceeded limit as an incomplete review for that seat, never as a
+completed one.
+
+`phase1 --start` starts each CLI seat detached (a Claude seat writes only into its own
+`phase1/seat-<role>/` folder; a Codex seat returns its answer as the final message, which is saved
+for it) and prints the brief path of each native seat. Spawn each native seat through the transport
+the host file names, with full tools so it keeps web access. `--wait` waits for both, copies each
+file-channel CLI seat's file to `phase1/<role>-findings.md`, compares the two resolved model IDs
+(Claude: `init`; Codex: the thread rollout; native seats: the requested IDs, recorded as
+`family-distinct`) and stops if they are equal, then runs the completion gate below. When a CLI
+seat ended badly (an error, or a detached worker that died), the next `--wait` dispatches that seat
+again as a new session in the same worktree (the one its failed attempt recorded); it does not
+resume the failed session. Both briefs carry review-protocol.md's "Web verification: reviewer
+rules" subsection unless `run.json` `flags.repoOnly` is true (`review-config seats --repo-only`) —
+both pair-review seats come from one vendor, so this capability is symmetric between seats by
+construction. While both run, report status about every 10
 minutes or when the user asks: each seat's elapsed time and how many
 `## A<n>`/`## B<n>` headings its file holds so far (the brief asks each
 seat to add findings as it confirms them). A partial file is not a result;
 validate only after the seat replies "written". Record each seat's transcript or result for
-`build-manifest` as the host file says, and its duration for `--seat-usage`.
+`review-run manifest` as the host file says, and its duration for `--seat-usage`.
 
 **Cap cost.** The per-fetch cost was measured directly: a single trivial
 web-search turn under `codex exec --search` cost 12,758–13,454 tokens across
@@ -225,27 +241,22 @@ the seats used 3 to 5 queries and opened no pages under a raised cap of 8.
 
 ## Completion gate
 
-Wait for both independent passes to complete, AND
-`scripts/blind-relabel.mjs validate --phase1-dir <run-dir>/phase1
---target-dir <target-dir>` exits zero (with `--target-dir` it also rejects a
-claim ID a seat wrote inside an Evidence fence; add `--source-dir <repo>`
-for every other repository the packet names by path, and pass the same
-list to every later `scan`, `append-rebuttals` and `audit-prep`; add
-`--packet <task-packet>` so it warns about a claim citing a line past the
-end of the file; when the packet names an outside checklist, pass `--checklist <NAME>` to every
-`scan`, `append-rebuttals`, `audit-prep` and `translate`; when one
-seat finishes long before the other, `validate --seat A` gates that file
-early, and the full two-seat `validate` still runs once both exist), then copy both files to `<run-dir>/phase1/original/` (the manifest
-hashes these untouched copies; Phase 2 appends to the working files). A
-nonzero `validate` exit means at least one claim block is missing a
-recognized `Severity:`, `Basis:`, `Evidence strength:`, or non-empty
-`Evidence:` line — return the affected seat's file to that seat's OWN
-context for reformatting (restate the required field lines verbatim,
-change nothing else), same procedure as a `scan` redaction round, never a
-hand edit. A reviewer following the schema loosely (dropping the
-`Evidence:` label and going straight to prose) is common enough in
-practice to gate here, before it surfaces only much later as a `translate
---phase1-dir` refusal. A reviewer may return after
+A seat file must be in the strict format (`scripts/seat-file.mjs`: claim headings, exactly `## Checks performed` or only `## No findings`, and in that section exactly one `Blocked:` line; every claim has a `Same shape elsewhere:` line); `review-run phase1 --wait` returns a refused file to its seat once to rewrite (a CLI seat is resumed, a native seat gets a message file), and a file refused again makes the review INCOMPLETE (`phase1/format-refused.json`, shown by the manifest and the report). A `## No findings` seat that names a block is incomplete; a seat with claims and a block gets the "may have reviewed blind" caveat.
+
+Wait for both independent passes to complete. `review-run phase1 --wait` then runs `validate`
+on both seat files. It passes the target folder (so it also rejects a claim ID a seat wrote
+inside an Evidence fence), every repository in the seats file's `sourceDirs` (list there every
+other repository the packet names by path; every later step gets the same list), the task packet
+(so it warns about a claim citing a line past the end of the file) and the `flags.checklists`
+names. `review-run phase2 --start` copies both files to `<run-dir>/phase1/original/` before the
+exchange (the manifest hashes these untouched copies; Phase 2 appends to the working files). A
+failed `validate` means at least one claim block is missing a recognized `Severity:`, `Basis:`,
+`Evidence strength:`, or non-empty `Evidence:` line — return the affected seat's file to that
+seat's OWN context for reformatting (restate the required field lines verbatim, change nothing
+else), same procedure as a `scan` redaction round, never a hand edit. A reviewer following the
+schema loosely (dropping the `Evidence:` label and going straight to prose) is common enough in
+practice to gate here, before it surfaces only much later as a refusal of the translate step in
+`audit --finish`. A reviewer may return after
 its initial pass; resume it for the exchange. This avoids agents waiting
 indefinitely for a peer that has not been released by the orchestrator.
 Missing files may be recovered verbatim from a valid final response.
@@ -254,8 +265,8 @@ In a Claude pair both seats are Claude subagents with file-writing tools, so no 
 stops a source edit. In an OpenAI pair both seats run in Codex's `read-only` sandbox, which is enforced, and `touchedFiles` is still checked. For a Claude CLI seat `fileTools` are enforced and `shell` is prompt-only: a shell can
 still read the peer's files and write by absolute path, so the report says so and `touchedFiles` in
 each `result.json` is the check. After each phase (Phase 1, the exchange, and the
-auditor), run `scripts/preflight.mjs --cd <target-dir> --check-stale
-<snapshotHash>` with the hash from pre-flight. `stale: true` means something
+auditor), `review-run` checks the target against its Phase 1 fingerprint; to check it yourself, run
+`scripts/preflight.mjs --cd <target-dir> --check-stale <snapshotHash>` with the hash from pre-flight. `stale: true` means something
 changed the target during the review: stop, find the changed files, and
 report the run as incomplete; never continue on a changed target.
 
@@ -266,8 +277,8 @@ the unchecked scope; the peer's findings are not shown, so it is still the
 independent pass. Record it in the manifest as `coverage_rounds: 1`.
 
 A redaction made before the exchange (no peer has seen the file yet) is
-still part of the independent pass: re-run `validate`, then replace the
-`phase1/original/` copy. A redaction after the exchange leaves
+still part of the independent pass: `review-run phase2 --start` runs `validate` on both files
+again and then copies the corrected file to `phase1/original/`. A redaction after the exchange leaves
 `original/` alone, and the manifest notes it.
 
 ## Stalled or unavailable seats
@@ -276,7 +287,7 @@ Before replacing a stalled harness seat, resume it once with SendMessage
 ("continue and write your findings to the file"): a seat the stream watchdog
 stopped after writing only its header has resumed and finished that way, and a
 seat may be resumed more than once. A findings file that holds only the seat
-header is not a result: `validate --seat <A|B>` fails on it.
+header is not a result: the completion gate refuses it.
 
 **Replacing a stalled seat.** A harness seat that stops making progress in
 Phase 1 (the harness watchdog ends it, or it wrote nothing for a long time)
@@ -297,8 +308,8 @@ to the other skill when only that skill allows the new pairing (two models of on
 pair-review; two vendors: cross-review). Move the unused seat's
 folder out of `phase1/` and keep it, and build the new seat's brief with the
 skill that now runs the review, from the same task packet. A seat that is
-running or finished keeps its pass only when its brief differs from that
-skill's `build-brief` output for the same packet and seat in text that is not a
+running or finished keeps its pass only when its brief differs from the brief that
+skill's `review-run phase1 --start` builds for the same packet and seat in text that is not a
 rule (for example a new note on sizing the web cap); say which lines differ in
 the report. Any changed rule means that seat starts over too. Record
 `skill_versions` per phase and seat, the reason, and `"restarts"` on the

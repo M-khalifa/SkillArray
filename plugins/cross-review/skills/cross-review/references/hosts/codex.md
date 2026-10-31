@@ -42,7 +42,7 @@ from Codex, and Codex started from Claude Code, inherit each other's markers.
   "seatA": {"provider": "anthropic", "runtime": "claude", "model": "opus", "effort": null, "transport": "cli"},
   "seatB": {"provider": "openai", "runtime": "codex", "model": "gpt-5.6-terra", "effort": null, "transport": "native"},
   "auditor": {"provider": "anthropic", "runtime": "claude", "model": "opus", "effort": null, "transport": "cli"},
-  "flags": {"auditDepth": "light", "falsification": false, "mode": "adversarial"}
+  "flags": {"falsification": false, "mode": "adversarial"}
 }
 ```
 
@@ -72,7 +72,7 @@ to the preflight: its `--yes-paid` probe is a nested `codex exec`, which the Cod
    `phase2 --wait --native-done B`.
 5. `audit --prepare`, then `audit --finish`: the Claude CLI auditor is dispatched and waited on by the
    sequencer; no spawn is needed.
-6. `build-manifest --run-dir "<run-dir>"` copies `host`, `support` and `host_status`;
+6. `review-run manifest --run-dir "<run-dir>"` copies `host`, `support` and `host_status`;
    `--seat-transcript B=<rollout file>` records seat B's usage and model (the rollout is
    `~/.codex/sessions/<year>/<month>/<day>/rollout-*-<thread id>.jsonl`).
 
@@ -101,4 +101,4 @@ Observed on 2026-10-05 to 2026-10-07 (Windows, Codex CLI 0.160.x):
 ## Orchestrator cost
 
 `CODEX_THREAD_ID` is the thread ID in the orchestrator's rollout file name. Record it with
-`build-manifest --seat-transcript orchestrator=<rollout>@<start>/<end>` (ISO times).
+`review-run manifest --seat-transcript orchestrator=<rollout>@<start>/<end>` (ISO times).
