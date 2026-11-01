@@ -14,6 +14,13 @@ const WIN32_BASE_ENV_ALLOWLIST = [
 const POSIX_BASE_ENV_ALLOWLIST = ['PATH', 'HOME', 'USER', 'LANG', 'TERM', 'TMPDIR', 'SHELL'];
 // Prefix matches, checked case-sensitively against the exact env key.
 const POSIX_BASE_ENV_PREFIXES = ['LC_', 'XDG_'];
+// Proxy and certificate locations (no secrets): without them a command behind a corporate proxy cannot reach the network.
+// The same names the dispatchers allow for their CLIs.
+export const NETWORK_ENV_ALLOWLIST = [
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+  'NODE_EXTRA_CA_CERTS', 'NODE_USE_SYSTEM_CA', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
+];
 
 // Builds the env object to pass to a spawned child. 'inherit' returns
 // undefined (Node's spawn() default: full parent env). 'filtered' returns an

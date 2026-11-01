@@ -9,6 +9,7 @@ const realpathSync = jsRealpath.native;
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 // A packet path written through a variable ("$TMPDIR/run1/x", "${HOME}/x", "$env:TEMP\x", "%TEMP%\x"; the macOS default
 // run folder lives under TMPDIR), expanded from the environment so the run-folder and reach checks see the real path. On
@@ -100,10 +101,12 @@ export function linkSpellingOf(abs) {
 
 // The lexical and the real spelling of p, plus on macOS the link spelling of each, without duplicates: a path
 // given in its real /private form is also written as /tmp/... by a shell whose working folder came through the link.
-export function pathSpellingsOf(p, { platform = process.platform } = {}) {
-  const spellings = [path.resolve(p), realPath(p)];
+// Each also in its composed (NFC) and decomposed (NFD) Unicode form: macOS can store a name decomposed while a seat
+// quotes it composed, and both must be found and rewritten as the same folder.
+export function pathSpellingsOf(p, { platform = process.platform, real = realPath } = {}) {
+  const spellings = [path.resolve(p), real(p)];
   if (platform === 'darwin') spellings.push(...spellings.map(linkSpellingOf).filter(Boolean));
-  return [...new Set(spellings)];
+  return [...new Set(spellings.flatMap((s) => [s, s.normalize('NFC'), s.normalize('NFD')]))];
 }
 
 // Where the file system ignores letter case (Windows, macOS by default), so two spellings that differ only in case are one path.
@@ -261,13 +264,29 @@ export function nameBytes(entry) {
 // Run a "git rev-parse" repository probe with this environment: the C locale keeps git's messages in English.
 export const GIT_C_LOCALE = { LC_ALL: 'C', LANGUAGE: '' };
 
+// With core.fsmonitor=true in the user's config, every git command these scripts run on the target starts an fsmonitor
+// daemon that keeps running after the review. core.fsmonitor=false is added for every git child through GIT_CONFIG_COUNT,
+// only on git 2.36 or later: before that core.fsmonitor named a hook command, and "false" would be run as one.
+export function gitConfigNoFsmonitor(env = process.env, version = () => spawnSync('git', ['--version'], { encoding: 'utf8', windowsHide: true }).stdout) {
+  if (env.REVIEW_GIT_NO_FSMONITOR === '1') return env;
+  const m = /git version (\d+)\.(\d+)/.exec(String(version() ?? ''));
+  if (!m || Number(m[1]) < 2 || (Number(m[1]) === 2 && Number(m[2]) < 36)) return env;
+  const n = Number(env.GIT_CONFIG_COUNT) || 0;
+  Object.assign(env, { [`GIT_CONFIG_KEY_${n}`]: 'core.fsmonitor', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1), REVIEW_GIT_NO_FSMONITOR: '1' });
+  return env;
+}
+gitConfigNoFsmonitor();
+
 // Whether a "git rev-parse --git-dir" or "--is-inside-work-tree" probe found a repository. A folder outside any repository
 // (exit 128, "not a git repository") is false; any other failure, such as a repository git refuses to open (dubious ownership,
 // a newer format), throws: such a target is never reviewed as a plain folder.
 export function gitRepoFromProbe({ code, stdout = '', stderr = '' }, dir) {
   if (code === 0) return String(stdout).trim() !== 'false';
   if (code === 128 && /^fatal: not a git repository\b/m.test(String(stderr))) return false;
-  throw new Error(`git cannot open the repository at ${dir} (exit ${code}): ${String(stderr).trim().split(/\r?\n/).slice(-1)[0] ?? ''}`);
+  const lines = String(stderr).trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const fix = lines.find((l) => /safe\.directory/.test(l));
+  const reason = lines.find((l) => /^fatal:/.test(l)) ?? lines[0] ?? '';
+  throw new Error(`git cannot open the repository at ${dir} (exit ${code}): ${[reason, fix && fix !== reason ? `fix: ${fix}` : ''].filter(Boolean).join('; ')}`);
 }
 
 // `git diff` options that make the output independent of the user's git config: no colour, no

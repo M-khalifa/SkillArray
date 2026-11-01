@@ -7,7 +7,7 @@ import path from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { comparablePath, copyEntry, decodeFileUrls, expandPathVars, expandWorkingFolderForms, probeFoldsCase, setFoldsCase, isInsidePath, realPath, entrySha256, entryKey, entryPath, gitNames, gitRepoFromProbe, linkSpellingOf, nameBytes, pathSpellingsOf, scrubDir, foldsCase, continuesName } from '../path-utils.mjs';
+import { gitConfigNoFsmonitor, comparablePath, copyEntry, decodeFileUrls, expandPathVars, expandWorkingFolderForms, probeFoldsCase, setFoldsCase, isInsidePath, realPath, entrySha256, entryKey, entryPath, gitNames, gitRepoFromProbe, linkSpellingOf, nameBytes, pathSpellingsOf, scrubDir, foldsCase, continuesName } from '../path-utils.mjs';
 import { buildClaudeArgs } from '../claude-dispatch.mjs';
 import { scanText } from '../blind-relabel.mjs';
 import { computeSnapshotHash, runTier1, runTier2, runWithTimeout } from '../preflight.mjs';
@@ -90,6 +90,12 @@ test('gitRepoFromProbe: exit 0 is a repository unless git says "false", "not a g
   assert.equal(gitRepoFromProbe({ code: 0, stdout: 'false\n' }, 'x'), false, 'inside .git itself');
   assert.equal(gitRepoFromProbe({ code: 128, stderr: 'fatal: not a git repository (or any of the parent directories): .git\n' }, 'x'), false);
   assert.throws(() => gitRepoFromProbe({ code: 128, stderr: "fatal: detected dubious ownership in repository at '/r'\n" }, '/r'), /git cannot open the repository at \/r \(exit 128\): fatal: detected dubious ownership/);
+  // git's full message: the reason first, the safe.directory command last; both are kept.
+  assert.throws(() => gitRepoFromProbe({ code: 128, stderr: "fatal: detected dubious ownership in repository at '/r'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /r\n" }, '/r'),
+    /dubious ownership in repository at '\/r'; fix: git config --global --add safe\.directory \/r$/);
+  // A warning git prints before the fatal line is not the reason.
+  assert.throws(() => gitRepoFromProbe({ code: 128, stderr: "warning: unable to access '/h/.config/git/attributes'\nfatal: detected dubious ownership in repository at '/r'\n" }, '/r'),
+    /\(exit 128\): fatal: detected dubious ownership/);
 });
 
 test('a repository git refuses to open (here a newer format version) fails preflight and the identity scan instead of being read as a plain folder [slow]', async (t) => {
@@ -531,4 +537,28 @@ test('Linux round linux-r1 F3: the run folder\'s own file system decides letter 
   assert.equal(scrubDir(lower, run).count, process.platform === 'win32' ? 1 : 0, 'Windows paths always fold; elsewhere a case-sensitive run folder does not');
   setFoldsCase(null);
   assert.equal(foldsCase(), process.platform === 'win32' || process.platform === 'darwin', 'no run value: the platform default');
+});
+test('git calls of these scripts turn off fsmonitor through GIT_CONFIG_COUNT on git 2.36 or later, after any count already set', () => {
+  const v = (s) => () => s;
+  assert.deepEqual(gitConfigNoFsmonitor({}, v('git version 2.35.1')), {}, 'before 2.36 core.fsmonitor names a hook: left alone');
+  assert.deepEqual(gitConfigNoFsmonitor({}, v('')), {}, 'no git: left alone');
+  const env = gitConfigNoFsmonitor({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' }, v('git version 2.52.0.windows.1'));
+  assert.equal(env.GIT_CONFIG_COUNT, '2');
+  assert.equal(env.GIT_CONFIG_KEY_1, 'core.fsmonitor');
+  assert.equal(env.GIT_CONFIG_VALUE_1, 'false');
+  assert.equal(env.GIT_CONFIG_KEY_0, 'a.b', 'the existing entry is kept');
+  assert.equal(gitConfigNoFsmonitor(env, v('git version 2.52.0')).GIT_CONFIG_COUNT, '2', 'a child that imports this again adds nothing');
+});
+
+test('a run folder stored decomposed (NFD) and quoted composed (NFC), or the other way, is the same folder: both spellings are rewritten', () => {
+  // "Revue" + a combining acute accent: the decomposed form of "Revué".
+  const nfd = path.join(os.tmpdir(), `Revue${String.fromCharCode(0x301)}-run`);
+  const nfc = nfd.normalize('NFC');
+  assert.notEqual(nfc, nfd, 'the two forms differ as strings');
+  const spellings = pathSpellingsOf(nfd, { real: (p) => path.resolve(p) });
+  assert.ok(spellings.includes(nfc) && spellings.includes(nfd));
+  for (const quoted of [nfc, nfd]) {
+    const out = scrubDir(`see ${path.join(quoted, 'phase1', 'x.md')}`, nfd);
+    assert.equal(out.count, 1, quoted === nfc ? 'composed quote' : 'decomposed quote');
+  }
 });

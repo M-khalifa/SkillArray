@@ -793,10 +793,12 @@ async function assertSeatsRan(desc, report) {
     const failures = execFailureCount(stderr);
     const { blocked, section } = parseSeatFile(findings, role);
     const incomplete = 'This is an incomplete seat, not a clean result: fix the cause, keep the run folder, and run the seat again in a new run; do not continue with one seat\'s verdict as a two-seat review';
+    // The next: line says the same as the message: a new run, never a rerun of this --wait (it would stop the same way).
+    const newRun = (message) => Object.assign(new StepError(`seat ${role}`, message), { next: `fix what blocked seat ${role}, then start a new run with the same packet (preflight --host ... --run-dir <a new run folder>); keep ${desc.runDir} as it is` });
     if (section === 'No findings') {
-      if (blocked) throw new StepError(`seat ${role}`, `wrote "No findings" but says it was blocked ("Blocked: ${blocked.slice(0, 160)}"). ${incomplete}`);
+      if (blocked) throw newRun(`wrote "No findings" but says it was blocked ("Blocked: ${blocked.slice(0, 160)}"). ${incomplete}`);
       const failed = String(stderr).match(SEAT_EXEC_FAILED_RE);
-      if (failed) throw new StepError(`seat ${role}`, `wrote "No findings" but its stderr shows "${failed[0].trim()}" (it could not run commands). ${incomplete}`);
+      if (failed) throw newRun(`wrote "No findings" but its stderr shows "${failed[0].trim()}" (it could not run commands). ${incomplete}`);
     }
     if (failures > 0) report.lines.push(`warning: seat ${role} logged ${failures} exec_command failure(s) in its stderr; its sandbox was unstable, so its verdict may rest on fewer checks than it states`);
     if (blocked) {

@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Fixes for four of the 1.2.0 Known issues:
+
+- With `core.fsmonitor=true` in your Git config, the review's own git commands no longer start fsmonitor daemons
+  that keep running after the run (git 2.36 or later; older git is left as it was).
+- `preflight --exec` in the default filtered environment now passes the proxy and CA variables, as the dispatchers do.
+- After a "No findings" seat with a `Blocked:` line, the `next:` line now says to start a new run, as the message does.
+- A run folder stored with a decomposed (NFD) name and quoted composed (NFC), or the other way, is found and
+  rewritten as the same folder. Not yet verified on a Mac.
+
+Also: installing through the Codex plugin marketplace is tested (Codex CLI 0.165.0, Windows: both plugins install
+and Codex lists both skills); the README shows the three commands.
+
+Also: a target git refuses to open now shows git's reason (the `fatal:` line, such as "detected dubious ownership")
+with its `safe.directory` command, not the command alone. On a Codex host the target must be inside the folder Codex was
+started in, as the run folder already had to be: the Codex host file and the README now say so.
+
+New: `references/worked-example-packet.md`, a filled task packet from a real second-round review with what makes it
+work, and the quick recheck recipe; linked from the packet template.
+
 ## 1.2.0 - 2026-10-28
 
 Fixes from field runs on real collectors, from self-reviews on Windows, macOS and Linux, and from five rounds of the skills

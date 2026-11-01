@@ -59,6 +59,10 @@ in it that is not ignored. Start Codex one level above the repository, or ignore
 never edits the target's `.gitignore`. When `codex doctor` shows a failed sandbox row, add `--skip-codex-doctor`
 to the preflight: its `--yes-paid` probe is a nested `codex exec`, which the Codex sandbox blocks.
 
+The target must be inside the folder Codex was started in too. Outside that folder the sandbox cannot write the run
+folder (`EPERM` on `run.json`) and its git refuses the repository with `fatal: detected dubious ownership` (seen in
+four Codex sessions on Windows, 2026-10-20 to 2026-11-01).
+
 ## The sequence
 
 1. `phase1 --start` starts seat A (Claude CLI, detached) and prints seat B's brief path and output path.

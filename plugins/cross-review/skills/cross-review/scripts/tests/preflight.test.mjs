@@ -249,6 +249,22 @@ test('Tier 2 --exec runs the given command through a filtered environment: a sec
   assert.equal(result.tier2.results[0].stdout, 'absent');
 });
 
+test('Tier 2 --exec in the filtered environment keeps the proxy and CA variables, as the dispatchers do [slow]', async (t) => {
+  const dir = await makeGitRepo(t);
+  const saved = { HTTPS_PROXY: process.env.HTTPS_PROXY, NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS };
+  process.env.HTTPS_PROXY = 'http://proxy.example:8080';
+  process.env.NODE_EXTRA_CA_CERTS = 'corp-ca.pem';
+  t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  const result = await run({
+    cd: dir,
+    exec: [`node -e "process.stdout.write((process.env.HTTPS_PROXY || 'none') + ' ' + (process.env.NODE_EXTRA_CA_CERTS || 'none'))"`],
+    timeout: 30,
+    envMode: 'filtered',
+    envPassthrough: [],
+  });
+  assert.equal(result.tier2.results[0].stdout, 'http://proxy.example:8080 corp-ca.pem');
+});
+
 test('Tier 2 --exec with --env-mode inherit passes the secret through (the escape hatch, opt-in only) [slow]', async (t) => {
   const dir = await makeGitRepo(t);
   const originalEnv = process.env.PREFLIGHT_TEST_SECRET;

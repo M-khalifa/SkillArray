@@ -6,35 +6,30 @@ production-readiness pass, kept design-only per that pass's own scope split.
 
 ## Verified current state
 
-- Effort is not a fixed named tier today. `review-config.mjs` validates
-  `effort` against `EFFORT = /^[a-z][a-z0-9_-]*$/` — any lowercase token, not
-  an enum of `low`/`default`/`high`. A model's own accepted effort values
-  (e.g. Codex's) are what actually constrain it; SkillArray does not define
-  the vocabulary.
-- The Falsification pass's canonical request phrase is "deep verify disputed
-  high-severity findings" (`review-protocol.md` line 266, identical in both
-  packages), and its selection rule is mechanical: every claim with
-  `Severity` HIGH or CRITICAL AND a rebuttal `Action` of `DISPUTE` (from the
-  real, pre-relabel Phase 2 files — never the auditor's `Peer response`
-  field, which does not exist yet at that point). See
-  `phase-3-scorecard.md`'s Falsification pass section.
-- Per-process cancellation exists today: `installSignalForwarding` +
-  `posixKillTree` in `codex-dispatch.mjs` (mirrored in
-  `opencode-dispatch.mjs`) forward SIGINT/SIGTERM to a single dispatched
-  child and kill its process tree (SIGTERM then SIGKILL). This is scoped to
-  one dispatcher process, not a whole review — there is no run-level
-  "cancel this entire review" command today.
-- No target/base/scope selector exists. Grepped both SKILL.md files: the
-  only occurrence of "scope" is free text in the task packet ("Give both
-  seats the same task packet: scope, current source snapshot..." —
-  `pair-review/SKILL.md` line 71). There is no `--base`, `--diff`, or
-  structured path-scoping mechanism.
-- Seat resume is real and already documented, not a gap: `pair-review/SKILL.md`
-  step 5 states "A reviewer may return after its initial pass; resume it for
-  the exchange. This avoids agents waiting indefinitely for a peer that has
-  not been released by the orchestrator." This is resume-per-seat across
-  Phase 1 → Phase 2, not resume of an entire interrupted review.
-- No run-level status command exists while a review is mid-flight.
+Checked against the code on 2026-11-01 (1.2.0 plus the Unreleased changes).
+
+- Effort is not a fixed named tier. `review-config.mjs` validates `effort` against
+  `EFFORT = /^[a-z][a-z0-9_-]*$/`, any lowercase token; a model's own accepted values constrain it.
+- The Falsification pass's request phrase is "deep verify disputed high-severity findings" (SKILL.md, both skills),
+  and its selection rule is mechanical: every claim with `Severity` HIGH or CRITICAL AND a rebuttal `Action` of
+  `DISPUTE` (`phase-3-scorecard.md`, Falsification pass). There is no cap on how many verifiers it starts
+  (no `max_verifiers` in the scripts).
+- A lighter mode partly exists: pair-review's mode `none` skips the Phase 2 exchange; the fresh auditor still runs
+  (`review-run.mjs` `skipsPhase2`). cross-review has no such mode.
+- Cancel exists per CLI process only: `installSignalForwarding` (shared in `cli-run.mjs`, used by
+  `claude-dispatch.mjs` and `codex-dispatch.mjs`) forwards SIGINT/SIGTERM and kills the child's process tree. There is
+  no command that cancels a whole review.
+- Status exists: `review-run status --run-dir <a> [--run-dir <b>]` prints each run's step and each seat's progress and
+  runs nothing.
+- Resume partly exists: `review-run` keeps its state in the run folder, and a CLI seat that stopped part way (a
+  reboot, a crash, a killed worker) is dispatched again by the next `--wait` of its phase, alone. A native seat is
+  resumed by its agent id. Not shown: resuming when the orchestrator session itself is lost and a native seat's agent
+  is gone.
+- Scope: `preflight --base <commit>` lists the work committed since that commit, as evidence for the task packet.
+  There is still no structured path or diff scope; the packet's Scope section is free text.
+- Cost: the manifest records each seat's token usage, so a tier can be priced from real runs.
+- Background: CLI seats run detached and `--wait` exits 3 while a seat runs; the orchestrator reruns it. The user's
+  own session still has to stay open to drive the phases.
 
 ## Proposed tiers
 
@@ -43,7 +38,9 @@ no Phase 3 auditor, no Falsification pass. Cheapest and fastest, but this is
 not "SkillArray with steps skipped" — it is two independent single-model
 opinions with no evidence cross-check, no identity blinding, and no
 canonical-finding deduplication. It should be labeled and reported as such,
-not as a lighter version of the full protocol's guarantees.
+not as a lighter version of the full protocol's guarantees. pair-review's mode `none` is the nearest thing today: it
+skips the exchange but keeps the fresh auditor, so its findings are still checked. Decide whether FAST is `none`
+itself, or `none` without the auditor, before building anything.
 
 **STANDARD** — the current, full three-phase protocol as shipped in 1.2.0:
 independent Phase 1, blind Phase 2 exchange, Phase 3 fresh-context
@@ -64,9 +61,9 @@ upper bound.
 | Control | Status |
 |---|---|
 | `max_verifiers` | New. Bounds Falsification pass fan-out under DEEP; today there is no cap on how many verifier subagents a single run can spawn. |
-| `timeout` | Partially exists (`--timeout` on both dispatchers) but defaults to unbounded. See the separate security/timeout design work (Phase F) — not redesigned here. |
+| `timeout` | Exists: `flags.timeoutS` in run.json bounds CLI seats (0, the default, is no limit); a native seat is bounded by `--max-wait` on the orchestrator side. |
 | `max_duration` | New. A run-level wall-clock budget distinct from any single dispatcher's `--timeout`. |
-| `target`/`base` | New; confirmed absent today (see above). A DEEP or FAST mode that assumes a diff-scoped target without this existing would be scoping by convention, not by mechanism — flagged as a real gap, not something a mode can silently paper over. |
+| `target`/`base` | Partly exists: `preflight --base` lists committed work for the packet; the review itself is not scoped to a diff. A mode that assumes a diff-scoped target would be scoping by convention, not by mechanism. |
 | `paths`/`scope` | New structured version of what is today free text in the task packet. |
 | `profile` | Already exists — `review-profiles.md`'s Code/Architecture/Document lenses, selected per target. |
 | `execution_policy` | New; see the separate Phase E security design — referenced here, not redesigned. |
@@ -74,32 +71,13 @@ upper bound.
 
 ## Background / status / cancel / resume
 
-- **Cancel**: exists at the single-dispatcher-process level today
-  (`installSignalForwarding`/`posixKillTree`). A run-level cancel ("stop
-  this whole review, all seats") is a genuine gap — it would need to track
-  every spawned process/subagent for a run and forward the signal to all of
-  them, not just compose the existing per-process mechanism by accident.
-- **Resume**: partially exists today, not absent — a reviewer can already be
-  resumed after its Phase 1 pass for the Phase 2 exchange
-  (`pair-review/SKILL.md` step 5). What's missing is resuming a review that
-  was fully interrupted (harness restarted, orchestrator's own context
-  lost) from a saved run directory rather than from live subagent state.
-- **Background**: the harness already runs subagents non-blockingly; a
-  multi-minute review does not require the orchestrator's own turn to block
-  end-to-end today, in the sense that Phase 1 dispatches happen concurrently
-  (`pair-review/SKILL.md` step 4: "Start both isolated reviewers
-  concurrently"). What's missing is a way for the *user's own* interactive
-  session to detach and check back later without holding the conversation
-  open — that is a genuine gap.
-- **Status**: no run-level status command exists while a review is
-  in-progress. Genuine gap.
+What is left after the current state above: a command that cancels a whole review (every seat and agent of a run),
+resuming when the orchestrator session itself is lost, and a way for the user's session to detach and check back.
 
 ## Not in scope for this document
 
 - `execution_policy` semantics (never/ask/allow) — separate Phase E design.
-- Cost/token accounting for tier presets — depends on the observability
-  work (manifest telemetry) landing first, since there is currently no
-  token/cost capture mechanism to price a tier against.
+- Prices for tier presets: the manifest's per-seat token usage is the input; the pricing itself is not designed here.
 
 ## What this document is not
 

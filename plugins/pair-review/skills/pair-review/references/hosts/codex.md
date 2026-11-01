@@ -48,6 +48,10 @@ snapshots the whole repository, so preflight refuses a run folder in it that is 
 `codex doctor` shows a failed sandbox row, add `--skip-codex-doctor` to the preflight: its `--yes-paid`
 probe is a nested `codex exec`, which the Codex sandbox blocks.
 
+The target must be inside the folder Codex was started in too: start Codex one level above the repository. Outside
+that folder the sandbox cannot write the run folder (`EPERM` on `run.json`) and its git refuses the repository with
+`fatal: detected dubious ownership` (seen in four Codex sessions on Windows, 2026-10-20 to 2026-11-01).
+
 ## The sequence
 
 `review-run.mjs` cannot spawn agents; for a native actor it prints the brief path, then waits for the

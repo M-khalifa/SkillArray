@@ -131,6 +131,16 @@ codex login
 An OpenAI pair uses Codex's native agents. A Claude seat, auditor, or verifier also needs an installed, authenticated
 Claude Code CLI. Installing a CLI does not enable a route that this skill marks unsupported.
 
+The quickest way is the plugin marketplace (tested with Codex CLI 0.165.0 on Windows):
+
+```bash
+codex plugin marketplace add M-khalifa/SkillArray
+codex plugin add cross-review@skillarray
+codex plugin add pair-review@skillarray
+```
+
+`codex plugin list` then shows both as installed and enabled. Or copy the skill folders yourself:
+
 Codex reads skills from `.agents/skills` in the repository, or from `~/.agents/skills` for every project. Copy each complete
 skill folder, including its `scripts` and `references` directories. See
 [OpenAI's skill documentation](https://learn.chatgpt.com/docs/build-skills).
@@ -157,7 +167,8 @@ To update, pull the repository and replace each installed skill folder with a fr
 first. Merging over an older copy leaves deleted files behind, including old test fixtures named `SKILL.md` that Codex can
 mistake for skills. Codex detects skill changes automatically; restart it if a skill does not show up.
 
-Start `codex` in the folder you want reviewed, then call a skill with `$` (or pick it from `/skills`):
+Start `codex` one level above the folder you want reviewed (the target and the review's run folder must both be inside
+the folder Codex starts in), then call a skill with `$` (or pick it from `/skills`):
 
 ```text
 $cross-review setup
@@ -166,9 +177,7 @@ $pair-review -- review docs/design.md for gaps and wrong claims
 ```
 
 On a Codex host some routes are still a trial: a pair of two native OpenAI models, and a Claude CLI seat, which runs only
-after a session probe passes (see Hosts below). Claude Code is the host I test on most. The repository also has Codex plugin
-manifests (`plugins/*/.codex-plugin/plugin.json`) and a marketplace file (`.agents/plugins/marketplace.json`), but I have
-not tested installing through them yet.
+after a session probe passes (see Hosts below). Claude Code is the host I test on most.
 
 </details>
 

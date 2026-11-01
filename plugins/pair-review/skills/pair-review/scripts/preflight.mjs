@@ -31,7 +31,7 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { buildChildEnv } from './env-filter.mjs';
+import { buildChildEnv, NETWORK_ENV_ALLOWLIST } from './env-filter.mjs';
 import { DEFAULT_MAX_FILES, diffInventories, hashInventory } from './snapshot-utils.mjs';
 import { hasExited, jobSpawn, killGroupOnExit, killTree as killTreeShared, readJobReport, spawnCli, stopMarkedProcesses } from './spawn-utils.mjs';
 
@@ -151,8 +151,10 @@ Usage:
                      the command logs continue the command-N numbering after --exec's.
 --timeout <seconds>  Per --exec/--exec-in command timeout. 0 means unlimited.
                      Default: 1800 (matches the dispatchers' own default).
---env-mode <mode>    "filtered" (default) keeps only the OS basics (no proxy or CA
-                     variables: name them in --env-passthrough), or "inherit".
+--env-mode <mode>    "filtered" (default) keeps only the OS basics and the proxy and CA
+                     variables (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY, NODE_EXTRA_CA_CERTS,
+                     NODE_USE_SYSTEM_CA, SSL_CERT_FILE, SSL_CERT_DIR, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE),
+                     or "inherit".
 --env-passthrough <names>  Comma-separated extra env var names to allow through
                      under --env-mode filtered.
 --out <path>         Write the JSON result here instead of stdout.
@@ -775,7 +777,7 @@ function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platfo
 // first command runs.
 async function runTier2({ cd, commands, timeout, envMode, envPassthrough }, spawnOpts = {}) {
   const snapshotHash = await computeSnapshotHash(cd);
-  const env = buildChildEnv({ envMode, envPassthrough });
+  const env = buildChildEnv({ envMode, envPassthrough, providerAllowlist: NETWORK_ENV_ALLOWLIST });
   const results = [];
   for (const command of commands) {
     const startedAt = new Date().toISOString();

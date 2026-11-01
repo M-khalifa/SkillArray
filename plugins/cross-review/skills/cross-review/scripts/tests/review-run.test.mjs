@@ -2642,6 +2642,10 @@ test('round 6: the seat\'s one "Blocked:" line decides the blind warning; a No f
     const e = await empty.rr('phase1', '--run-dir', empty.run, '--wait');
     assert.equal(e.code, 1, e.out);
     assert.match(e.out, /seat B: wrote "No findings" but says it was blocked \("Blocked: every file in the target: EACCES"\)/);
+    // The next: line agrees with the message: a new run, not a rerun of this --wait.
+    const next = e.lines.find((l) => l.startsWith('next:'));
+    assert.match(next, /start a new run with the same packet/, e.out);
+    assert.doesNotMatch(next, /rerun: review-run phase1/, e.out);
   }
 });
 
