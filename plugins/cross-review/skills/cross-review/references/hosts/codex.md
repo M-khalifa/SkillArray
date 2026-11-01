@@ -16,10 +16,23 @@ depends on how Codex was launched.
 | Codex seat B | CLI (nested `codex-dispatch`) | unsupported: the Codex sandbox blocks a nested start; no override |
 | Claude native agent | none | cannot exist: the host spawner offers only OpenAI models |
 
-Why the probe: in two `codex exec` runs (2026-10-07) a Claude CLI call left no session file under
-`~/.claude/projects`, and Phase 2's resume of seat A failed with `No conversation found with session ID`; in a
-live Codex run launched another way (2026-10-07, file-tool launch path) the same CLI wrote its session and
-resumed it. The skill does not guess which launch it is in: `--probe-claude-session` makes two small Claude
+Why the probe: Claude saves each session under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`). A Codex
+sandbox lets a command write only inside the folder Codex was started in and its writable roots, so a Claude CLI call
+answers but loses its session, and Phase 2's resume of seat A fails with `No conversation found with session ID`. To
+run a Claude CLI seat from Codex, start Codex with that folder as a writable root (or set the same under
+`[sandbox_workspace_write]` in `~/.codex/config.toml`; single quotes keep the backslashes):
+
+```text
+codex -c "sandbox_workspace_write.writable_roots=['C:\Users\<you>\.claude\projects']"
+```
+
+Allow only `projects`, not all of `~/.claude`: that folder also holds Claude's settings and login, and any command the
+sandbox runs could then change them. preflight checks that the folder can be written before any paid call and names it
+when it cannot. Seen on Windows on 2026-11-01: with the writable root the probe resumed its session inside
+`codex sandbox`; without it the resume failed. The 2026-10-07 run that kept its session had Codex started in the home
+folder, which made `~/.claude/projects` writable.
+
+The skill still proves it before a run: `--probe-claude-session` makes two small Claude
 Haiku calls (remember a nonce, then resume the session and recall it; it needs `--yes-paid`), refuses the run
 if the recall fails, and records the result (`support[].probe`) in `run.json`. Without the probe a Claude seat
 on a Codex host is refused. "Trial" means the route runs but has not been run at length; the manifest records
@@ -62,6 +75,23 @@ to the preflight: its `--yes-paid` probe is a nested `codex exec`, which the Cod
 The target must be inside the folder Codex was started in too. Outside that folder the sandbox cannot write the run
 folder (`EPERM` on `run.json`) and its git refuses the repository with `fatal: detected dubious ownership` (seen in
 four Codex sessions on Windows, 2026-10-20 to 2026-11-01).
+
+Three more sandbox limits, seen on Windows on 2026-11-01:
+
+- Settings: the sandbox cannot read `~/.config/review-skills` (`EPERM`). Before `setup`, `show` and `seats`, set
+  `REVIEW_SKILLS_CONFIG_DIR` to a folder inside the Codex start folder, in the same shell call (PowerShell:
+  `$env:REVIEW_SKILLS_CONFIG_DIR = Join-Path (Get-Location) 'review-settings'`).
+- Models: `codex` itself does not run in the sandbox shell, so `codex debug models` cannot check a model. The models
+  the agent spawn tool offers are the list to choose from.
+- Usage: the spawn tool returns a task name such as `/root/pair_a`, not a thread id. The agent's rollout is the file
+  under `~/.codex/sessions/<year>/<month>/<day>/` whose first line holds `"agent_path":"/root/<task name>"` and this
+  session's `CODEX_THREAD_ID`. Give it to `phase1 --wait --native-agent <role>=<rollout>`, or afterwards to
+  `review-run manifest --seat-transcript <role>=<rollout>`; without it the manifest has no model or usage for that
+  agent and the report says so. To find it (PowerShell):
+
+```powershell
+Get-ChildItem "$HOME\.codex\sessions" -Recurse -Filter 'rollout-*.jsonl' | Where-Object { $l = Get-Content -LiteralPath $_.FullName -TotalCount 1; $l -match '"agent_path":"/root/pair_a"' -and $l -match $env:CODEX_THREAD_ID } | Select-Object -ExpandProperty FullName
+```
 
 ## The sequence
 

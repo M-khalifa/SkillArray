@@ -6,8 +6,8 @@
   "step translate": "d7d2d3433541f074af5a08ae8ffa70a08baebb5d73a0204460e6e9f52b305516",
   "step scorecard": "09fe016f18427dfd50dc85c710bbf1c410ca82e821d6cd5415e81ee98c291d64",
   "step manifest": "85aef72793000a34b5aefd97a0e592975e0e439175fc2a9f981a21f75edde833",
-  "step report chat": "a8a7fee643b5745383751b449ae6aa17b44b8870ce12f7bd1fe8cd1e71094388",
-  "step report chat all": "750f27192f6e4b0fac97e2a1c7ac9cd5769dfea9ad86de3ac06e1a9b104c227b",
+  "step report chat": "cdb1fb2a9fbec5c12f256060a3a18d055d3c4fea66e388c2c6cbfe98654f64f2",
+  "step report chat all": "b000257b59cefbaf024c44e9d49516b3b7ece773ae9c86cf1972d0e3ef2dc450",
   "phase1/A-findings.md": "610ab02f3320d61448db9dc0319185f2781211b1c8b4c81e869dcbf811cee895",
   "phase2/peer-view-for-A.md": "6cceb60d35815ff075a8fe26dc5a8ff832de67924f0fd81d3035356c2e70a1cb",
   "phase1/B-findings.md": "0b0357631c16e9378b9e7f70d2b5e68c7a2f745eb0a9c27acf01820ec091fbb9",
@@ -19,5 +19,5 @@
   "phase3/findings.json": "a2869f3a547f1c7e3d42dbc1646be645bdd4e1b1239c4f5c690ee83daf144ee9",
   "phase3/scorecard.md": "483501403a10443b24233aee034eebbd7039017d5be4036e33131f14fc8bf6ce",
   "manifest.json": "dd920ec9fa7a93e77d68d7aae6a5988ad518e96efe632a79d89cc4cf734710db",
-  "report.md": "bc5ba826c6f578f9a2a762abb3253069d059f62038c9942767489e09961b77ed"
+  "report.md": "3da545d381449e392e5f1353d6f8099b506ccc9a0333f1f52b1eeed78016f6f8"
 }

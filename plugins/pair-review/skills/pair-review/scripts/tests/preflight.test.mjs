@@ -10,7 +10,7 @@ import { platform as osPlatform } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
   assertNodeVersion, parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, repoFreshness, freshnessWarnings, findReviewArtifacts, summaryLine,
-  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs,
+  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs, claudeProjectsWritable,
 } from '../preflight.mjs';
 
 function git(args, cwd) {
@@ -1181,4 +1181,17 @@ test('field run: copyTarget keeps the reviewed files byte for byte, leaves out i
   assert.equal(big.copied, false);
   assert.match(big.reason, /3 file\(s\).*over the 2-file/);
   await assert.rejects(readFile(path.join(root, 'too-big', 'crlf.txt')), { code: 'ENOENT' });
+});
+
+test('claudeProjectsWritable: a writable projects folder passes and keeps no probe file; a refused write names the folder before any paid call', async (t) => {
+  const config = await mkdtemp(path.join(tmpdir(), 'preflight-claude-config-'));
+  t.after(() => rm(config, { recursive: true, force: true }));
+  const env = { CLAUDE_CONFIG_DIR: config };
+  const ok = await claudeProjectsWritable(env);
+  assert.deepEqual(ok, { ok: true, dir: path.join(config, 'projects') });
+  assert.deepEqual(await (await import('node:fs/promises')).readdir(ok.dir), [], 'the probe file is removed');
+  const denied = Object.assign(new Error('Access is denied'), { code: 'EPERM' });
+  const refused = await claudeProjectsWritable(env, { writeFileFn: async () => { throw denied; } });
+  assert.deepEqual(refused, { ok: false, dir: path.join(config, 'projects'), error: 'EPERM' });
+  await assert.rejects(claudeProjectsWritable(env, { writeFileFn: async () => { throw Object.assign(new Error('disk'), { code: 'EIO' }); } }), /disk/, 'another error is not read as a sandbox refusal');
 });

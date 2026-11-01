@@ -39,6 +39,7 @@ import { hasExited, jobSpawn, killGroupOnExit, killTree as killTreeShared, readJ
 const killTree = (child, options) => (hasExited(child) ? Promise.resolve() : killTreeShared(child, options));
 import { readRunDescriptor, RunDescriptorError, writeRunDescriptor, seatOutputDir } from './run-descriptor.mjs';
 import { evaluateSupport, hostStatusOf } from './host-support.mjs';
+import { projectsDir } from './native-agent.mjs';
 import { comparablePath, realPath, expandPathVars, expandWorkingFolderForms, probeFoldsCase, setFoldsCase, decodeFileUrls, DIFF_PLAIN, entryKey, entryPath, entrySha256, GIT_C_LOCALE, gitNames, GIT_PLAIN, gitRepoFromProbe, isInsidePath, isMainModule, nameBytes } from './path-utils.mjs';
 
 class RelayError extends Error {}
@@ -1865,7 +1866,27 @@ function planProbe({ cdAbs, runDir }) {
 
 // Two small Claude calls from this launch path: remember a nonce, then resume the session and recall it. A session that was not
 // persisted fails the second call with "No conversation found", which is exactly what a seat's Phase 2 resume would hit.
+// Claude saves each session under <config>/projects; where a sandbox cannot write there, the session is lost and a
+// resume finds nothing (a Codex sandbox started outside the home folder).
+export async function claudeProjectsWritable(env = process.env, { mkdirFn = mkdir, writeFileFn = writeFile, rmFn = rm } = {}) {
+  const dir = projectsDir(env);
+  const probe = path.join(dir, `.review-write-probe-${randomBytes(6).toString('hex')}`);
+  try {
+    await mkdirFn(dir, { recursive: true });
+    await writeFileFn(probe, '');
+    await rmFn(probe, { force: true });
+    return { ok: true, dir };
+  } catch (err) {
+    if (['EPERM', 'EACCES', 'EROFS'].includes(err.code)) return { ok: false, dir, error: err.code };
+    throw err;
+  }
+}
+
 async function runClaudeSessionProbe({ cdAbs, runDir }) {
+  const writable = await claudeProjectsWritable();
+  if (!writable.ok) {
+    return { ok: false, detail: `Claude cannot save its session: ${writable.dir} is not writable here (${writable.error}), so a resume would find nothing. Start Codex with that folder as a writable root (codex -c "sandbox_workspace_write.writable_roots=['${writable.dir}']") and run preflight again; no paid call was made` };
+  }
   const dir = path.join(runDir, 'probe-session');
   const nonce = `nonce${createHash('sha256').update(String(Date.now()) + String(process.pid)).digest('hex').slice(0, 10)}`;
   const call = async (name, text, extra) => {

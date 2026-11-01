@@ -188,7 +188,8 @@ Support is decided per actor (host, runtime, transport), not per host (`scripts/
 `preflight.mjs --allow-trial`, recorded in `run.json` and the manifest) or unsupported (refused, no override). Claude Code:
 everything is supported. Codex host: native OpenAI agents (pair-review, and cross-review's seat B) and a single-call Claude CLI auditor
 are trial routes; a Claude CLI seat is a trial only after `preflight --probe-claude-session --yes-paid` proves its session survives
-(it did not in two `codex exec` runs and did in another launch path); a nested Codex CLI seat is unsupported. The skill picks
+(Claude saves its session in `~/.claude/projects`, which the Codex sandbox can write only when you add that folder as a
+writable root; see each skill's `references/hosts/codex.md`); a nested Codex CLI seat is unsupported. The skill picks
 the host from the tools it has, in this order, and `preflight.mjs --host` records the choice.
 
 | Order | Condition | Host |
@@ -206,7 +207,8 @@ alone does not make a cross-review configuration usable: every actor must pass t
 `references/hosts/` folder has one file per host.
 
 **Codex sandbox.** Codex command and network access depend on the active sandbox and permission configuration. In the
-restricted Windows setup tested here, a bare `claude -p` run from a Codex shell left no session file in three trials.
+restricted Windows setup tested here, a bare `claude -p` run from a Codex shell left no session file in three trials: the sandbox could not write
+`~/.claude/projects`.
 `claude-dispatch.mjs` run through Codex failed in 2 of 2 trials with no allow rule. With a user-added allow rule for the
 dispatcher, 1 of 4 attempts completed; the others were killed with the Codex turn, failed on `--detach` (WMI access denied),
 or failed with ECONNREFUSED. Because no route has proved reliable, a Codex-host review runs only on the trial routes listed
@@ -226,7 +228,7 @@ reviewer read any files.
 
 On a Codex host, cross-review's seat B runs as a native Codex agent, a trial route; its Codex CLI route is unsupported, and a
 passing Claude session probe does not override that. A Claude pair on a Codex host is a trial only when the session probe passes. The native OpenAI pair-review is a trial
-that has completed one short run. See each skill's `references/hosts/codex.md`.
+that has completed two short runs. See each skill's `references/hosts/codex.md`.
 
 </details>
 

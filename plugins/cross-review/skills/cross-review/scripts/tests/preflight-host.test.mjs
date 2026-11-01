@@ -344,7 +344,7 @@ test('a skill folder without the dispatcher the seats need is refused with the f
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const scripts = path.join(root, 'cross-review', 'scripts');
   await fs.mkdir(scripts, { recursive: true });
-  for (const name of ['preflight.mjs', 'env-filter.mjs', 'snapshot-utils.mjs', 'spawn-utils.mjs', 'run-descriptor.mjs', 'provider-catalog.mjs', 'review-config.mjs', 'host-support.mjs', 'path-utils.mjs']) {
+  for (const name of ['preflight.mjs', 'env-filter.mjs', 'snapshot-utils.mjs', 'spawn-utils.mjs', 'run-descriptor.mjs', 'provider-catalog.mjs', 'review-config.mjs', 'host-support.mjs', 'path-utils.mjs', 'native-agent.mjs', 'rollout-utils.mjs']) {
     await fs.copyFile(path.join(SCRIPTS, name), path.join(scripts, name));
   }
   const h = await harness(t, { scriptsDir: scripts, seatB: CROSS_SEAT_B });

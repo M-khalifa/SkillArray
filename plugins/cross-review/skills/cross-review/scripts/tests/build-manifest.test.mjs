@@ -1066,6 +1066,10 @@ test('a native Codex seat: --seat-transcript A=<rollout> records usage and the r
   await fs.writeFile(input, JSON.stringify({ host_status: 'supported' }));
   const kept = await runCli(['--in', input, '--out', path.join(dir, 'm3.json'), '--run-dir', run]);
   assert.equal(kept.host_status, 'supported', 'a body value is kept');
+  await fs.writeFile(input, JSON.stringify({ reviewers: [{ role: 'A', provider: 'openai', model_requested: 'gpt-5.6-terra' }] }));
+  const reviewer = (await runCli(['--in', input, '--out', path.join(dir, 'm6.json'), '--run-dir', run, '--seat-transcript', 'A=' + file])).reviewers[0];
+  assert.deepEqual([reviewer.model_resolved, reviewer.model_resolved_source, reviewer.usage_ref], ['gpt-5.6-terra', 'transcript', 'seat_usage.A'], 'the rollout model reaches the reviewer row');
+  await fs.writeFile(input, '{}');
   const missing = await runCli(['--in', input, '--out', path.join(dir, 'm4.json'), '--run-dir', path.join(dir, 'no-such-run')]);
   assert.ok(missing.warnings.some((w) => /run\.json could not be read/.test(w)));
   await fs.writeFile(path.join(run, 'run.json'), JSON.stringify({ host: 'codex', support: rows, auditor: { role: 'auditor', provider: 'anthropic' }, verifiers: [{ role: 'verifier-1', provider: 'openai' }] }));

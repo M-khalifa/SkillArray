@@ -8,7 +8,7 @@ import { findThreadRollout } from './rollout-utils.mjs';
 const CLAUDE_AGENT_ID = /^a[0-9a-f]{8,}$/;
 const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function projectsDir(env = process.env) {
+export function projectsDir(env = process.env) {
   return path.join(env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
 }
 

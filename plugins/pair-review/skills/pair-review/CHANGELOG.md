@@ -18,6 +18,19 @@ Also: a target git refuses to open now shows git's reason (the `fatal:` line, su
 with its `safe.directory` command, not the command alone. On a Codex host the target must be inside the folder Codex was
 started in, as the run folder already had to be: the Codex host file and the README now say so.
 
+From a complete native pair-review on a Codex host (2026-11-01): the Codex host file says to set
+`REVIEW_SKILLS_CONFIG_DIR` inside the Codex start folder (the sandbox cannot read `~/.config/review-skills`), to take the
+model list from the agent spawn tool (`codex` does not run in the sandbox), and how to find a native agent's rollout
+from its task name. The manifest now copies the model of a Codex rollout to the reviewer row, and the report says when
+a native seat has no transcript, so its model and token use are not recorded. The catalog labels `haiku` as 5.5 (the
+probe resolved it to `claude-haiku-5-5`).
+
+cross-review on a Codex host: the cause of the lost Claude session is found. Claude saves its session in
+`~/.claude/projects`, which the Codex sandbox cannot write unless you add that folder as a writable root
+(`codex -c "sandbox_workspace_write.writable_roots=[...]"`); then the session probe resumes (seen on Windows). preflight
+now checks that folder before the paid probe and names the setting when it cannot write there. The Codex host files and
+the README say so.
+
 New: `references/worked-example-packet.md`, a filled task packet from a real second-round review with what makes it
 work, and the quick recheck recipe; linked from the packet template.
 

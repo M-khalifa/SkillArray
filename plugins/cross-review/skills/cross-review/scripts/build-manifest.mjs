@@ -1002,7 +1002,8 @@ async function run(args) {
     const used = stamped.seat_usage?.[reviewer.role];
     if (!used) continue;
     if (isUnset(reviewer, 'usage') && isUnset(reviewer, 'usage_ref')) reviewer.usage_ref = `seat_usage.${reviewer.role}`;
-    const models = used.models ? Object.keys(used.models) : [];
+    // A Claude transcript lists its models; a Codex rollout names the one model it ran.
+    const models = used.models ? Object.keys(used.models) : typeof used.model_resolved === 'string' ? [used.model_resolved] : [];
     if (isUnset(reviewer, 'model_resolved') && models.length === 1) {
       reviewer.model_resolved = models[0];
       reviewer.model_resolved_source = 'transcript';

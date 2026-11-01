@@ -779,6 +779,11 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   for (const row of Array.isArray(m.support) ? m.support : []) {
     if (row.status && row.status !== 'supported') caveats.push(`Seat ${row.role} runs on a ${row.status} route (${row.runtime}, ${row.transport}).`);
   }
+  const unrecorded = (Array.isArray(m.support) ? m.support : []).filter((row) => row.transport === 'native' && row.role
+    && !(m.seat_usage && row.role in m.seat_usage) && !(m.reviewers ?? []).some((r) => r.role === row.role && r.usage));
+  for (const row of unrecorded) {
+    caveats.push(`Seat ${row.role} ran as a native agent with no transcript, so its model and token use are not recorded: rerun review-run manifest with --seat-transcript ${row.role}=<its transcript or rollout>.`);
+  }
   if ((m.reviewers ?? []).some((r) => r.provider === 'anthropic' && r.transport === 'cli')) {
     caveats.push('Claude CLI seats: file tools are enforced (fileTools: enforced) and the shell is prompt-only (shell: prompt-only), so a shell can still read peer files and write by absolute path; touchedFiles in each result.json is the check.');
   }
