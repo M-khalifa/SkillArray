@@ -191,6 +191,17 @@ test('buildReport: a Claude CLI seat adds the read-only statement, a native one 
   assert.equal(buildReport({ ...base, manifest: MANIFEST }).caveats.length, 0);
 });
 
+test('buildReport: a native seat with no transcript says its model and usage are not recorded, and names the flag', () => {
+  const base = { findingsDoc: { findings: [] } };
+  const support = [{ role: 'A', runtime: 'codex', transport: 'native', status: 'supported' }, { role: 'auditor', runtime: 'codex', transport: 'native', status: 'supported' }];
+  const caveats = buildReport({ ...base, manifest: { ...MANIFEST, support, seat_usage: { A: MANIFEST.seat_usage.A } } }).caveats;
+  assert.deepEqual(caveats.filter((c) => /no transcript/.test(c)), ['Seat auditor ran as a native agent with no transcript, so its model and token use are not recorded: rerun review-run manifest with --seat-transcript auditor=<its transcript or rollout>.']);
+  const fromResult = buildReport({ ...base, manifest: { ...MANIFEST, support, seat_usage: {}, reviewers: [{ role: 'A', usage: { input_tokens: 1 } }, { role: 'auditor', usage: { input_tokens: 1 } }] } }).caveats;
+  assert.ok(!fromResult.some((c) => /no transcript/.test(c)), 'usage in a reviewer row counts as recorded');
+  const empty = buildReport({ ...base, manifest: { ...MANIFEST, support, seat_usage: { A: {}, auditor: { source: 'unknown' } }, reviewers: [{ role: 'A', usage: {} }] } }).caveats;
+  assert.equal(empty.filter((c) => /no transcript/.test(c)).length, 2, 'an empty or unknown entry records nothing');
+});
+
 test('notesSections: Why and Decisions needed come from the notes file', () => {
   const n = notesSections(lines('## Why', 'One sentence.', '', '## Decisions needed', '| a | b |', '|---|---|'));
   assert.equal(n.why, 'One sentence.');

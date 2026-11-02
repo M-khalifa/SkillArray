@@ -120,7 +120,7 @@ function seatPlans(args, p, desc) {
   const plans = {};
   for (const seat of ['A', 'B']) {
     const actor = desc?.[`seat${seat}`];
-    const channel = actor ? channelFor(actor) : seat === 'A' ? 'file' : 'final-message';
+    const channel = actor ? channelFor(actor, desc?.host) : seat === 'A' ? 'file' : 'final-message';
     const cli = actor?.transport === 'cli' && channel === 'file';
     plans[seat] = {
       channel,
@@ -244,7 +244,7 @@ async function finish(args) {
   const published = {};
   for (const seat of seats) {
     const actor = desc?.[`seat${seat}`];
-    const source = actor?.transport === 'cli' && channelFor(actor) === 'file' ? privateOutputPath(desc, 'phase2', seat) : null;
+    const source = actor?.transport === 'cli' && channelFor(actor, desc?.host) === 'file' ? privateOutputPath(desc, 'phase2', seat) : null;
     if (source && (await exists(source))) {
       // A refused append restores both findings files, so an earlier published copy is only an input: keep it and publish the corrected one.
       if ((await exists(p.raw[seat])) && !(await fs.readFile(p.raw[seat])).equals(await fs.readFile(source))) {

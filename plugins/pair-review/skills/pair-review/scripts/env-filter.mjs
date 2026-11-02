@@ -14,6 +14,29 @@ const WIN32_BASE_ENV_ALLOWLIST = [
 const POSIX_BASE_ENV_ALLOWLIST = ['PATH', 'HOME', 'USER', 'LANG', 'TERM', 'TMPDIR', 'SHELL'];
 // Prefix matches, checked case-sensitively against the exact env key.
 const POSIX_BASE_ENV_PREFIXES = ['LC_', 'XDG_'];
+// Proxy and certificate locations (no secrets): without them a command behind a corporate proxy cannot reach the network.
+// The same names the dispatchers allow for their CLIs.
+export const NETWORK_ENV_ALLOWLIST = [
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+  'NODE_EXTRA_CA_CERTS', 'NODE_USE_SYSTEM_CA', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
+];
+
+// Process-local git settings the review relies on: fsmonitor off (path-utils) and a trusted target (a Codex sandbox).
+// Other GIT_CONFIG_* entries can carry credentials (http.extraHeader), so only these keys pass, renumbered from 0.
+const GIT_CONFIG_PASSTHROUGH = new Set(['core.fsmonitor', 'safe.directory']);
+export function gitConfigPassthrough(sourceEnv) {
+  const kept = [];
+  const count = Math.min(Number(sourceEnv.GIT_CONFIG_COUNT) || 0, 1000);
+  for (let i = 0; i < count && sourceEnv[`GIT_CONFIG_KEY_${i}`] !== undefined; i++) {
+    const key = sourceEnv[`GIT_CONFIG_KEY_${i}`];
+    const value = sourceEnv[`GIT_CONFIG_VALUE_${i}`];
+    if (typeof key === 'string' && typeof value === 'string' && GIT_CONFIG_PASSTHROUGH.has(key.toLowerCase())) kept.push([key, value]);
+  }
+  const out = kept.length ? { GIT_CONFIG_COUNT: String(kept.length) } : {};
+  kept.forEach(([key, value], i) => Object.assign(out, { [`GIT_CONFIG_KEY_${i}`]: key, [`GIT_CONFIG_VALUE_${i}`]: value }));
+  return out;
+}
 
 // Builds the env object to pass to a spawned child. 'inherit' returns
 // undefined (Node's spawn() default: full parent env). 'filtered' returns an
@@ -46,5 +69,7 @@ export function buildChildEnv({
       result[key] = value;
     }
   }
-  return result;
+  // GIT_CONFIG_* names the caller passes on itself (git auth for a private remote) go through as given.
+  const namedGit = envPassthrough.some((name) => /^GIT_CONFIG_/i.test(name));
+  return namedGit ? result : { ...result, ...gitConfigPassthrough(sourceEnv) };
 }

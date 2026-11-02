@@ -1,5 +1,7 @@
 # Task packet template
 
+A filled example from a real review, with what makes it work, is in [worked-example-packet.md](worked-example-packet.md).
+
 Copy this into `<run-dir>/task-packet.md` and fill every slot; delete a slot only when it truly does not apply. The packet is
 the one thing both seats read, so what it leaves out costs a claim later. Keep real names of seats, models and vendors out of it
 (the blinding scan stops a packet that names them in a way a seat could copy).

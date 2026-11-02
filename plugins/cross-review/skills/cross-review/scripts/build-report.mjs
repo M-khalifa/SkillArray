@@ -779,6 +779,14 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   for (const row of Array.isArray(m.support) ? m.support : []) {
     if (row.status && row.status !== 'supported') caveats.push(`Seat ${row.role} runs on a ${row.status} route (${row.runtime}, ${row.transport}).`);
   }
+  // Recorded means real data (a token count or a model), not just an entry: an empty or unknown entry records nothing.
+  const recorded = (u) => Boolean(u) && (['input_tokens', 'total_input_tokens', 'new_input_tokens'].some((k) => typeof u[k] === 'number')
+    || typeof u.model_resolved === 'string' || (u.models && Object.keys(u.models).length > 0));
+  const unrecorded = (Array.isArray(m.support) ? m.support : []).filter((row) => row.transport === 'native' && row.role
+    && !recorded(m.seat_usage?.[row.role]) && !(m.reviewers ?? []).some((r) => r.role === row.role && recorded(r.usage)));
+  for (const row of unrecorded) {
+    caveats.push(`Seat ${row.role} ran as a native agent with no transcript, so its model and token use are not recorded: rerun review-run manifest with --seat-transcript ${row.role}=<its transcript or rollout>.`);
+  }
   if ((m.reviewers ?? []).some((r) => r.provider === 'anthropic' && r.transport === 'cli')) {
     caveats.push('Claude CLI seats: file tools are enforced (fileTools: enforced) and the shell is prompt-only (shell: prompt-only), so a shell can still read peer files and write by absolute path; touchedFiles in each result.json is the check.');
   }

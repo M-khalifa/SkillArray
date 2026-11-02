@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased
+
+Fixes for four of the 1.2.0 Known issues:
+
+- With `core.fsmonitor=true` in your Git config, the review's own git commands no longer start fsmonitor daemons
+  that keep running after the run (git 2.36 or later; older git is left as it was).
+- `preflight --exec` in the default filtered environment now passes the proxy and CA variables, as the dispatchers do.
+- After a "No findings" seat with a `Blocked:` line, the `next:` line now says to start a new run, as the message does.
+- A run folder stored with a decomposed (NFD) name and quoted composed (NFC), or the other way, is found and
+  rewritten as the same folder. Not yet verified on a Mac.
+
+Also: installing through the Codex plugin marketplace is tested (Codex CLI 0.165.0, Windows: both plugins install
+and Codex lists both skills); the README shows the three commands.
+
+Also: a target git refuses to open now shows git's reason (the `fatal:` line, such as "detected dubious ownership")
+with its `safe.directory` command, not the command alone. On a Codex host the run folder must be inside the folder Codex
+was started in (EPERM otherwise), and on Windows git inside the sandbox refuses any repository the sandbox account does
+not own; the Codex host file shows the process-local trust to use and how to take back a `.git` the sandbox took over.
+
+From a complete native pair-review on a Codex host (2026-11-01): the Codex host file says to set
+`REVIEW_SKILLS_CONFIG_DIR` inside the Codex start folder (the sandbox cannot read `~/.config/review-skills`), to take the
+model list from the agent spawn tool (`codex` does not run in the sandbox), and how to find a native agent's rollout
+from its task name. The manifest now copies the model of a Codex rollout to the reviewer row, and the report says when
+a native seat has no transcript, so its model and token use are not recorded. The catalog labels `haiku` as 5.5 (the
+probe resolved it to `claude-haiku-5-5`).
+
+cross-review on a Codex host: the cause of the lost Claude session is found. Claude saves its session in
+`~/.claude/projects`, which the Codex sandbox cannot write unless you add that folder as a writable root
+(`codex -c "sandbox_workspace_write.writable_roots=[...]"`); then the session probe resumes (seen on Windows). preflight
+now checks that folder before the paid probe and names the setting when it cannot write there. The Codex host files and
+the README say so.
+
+cross-review on a Codex host, part two: inside the Codex sandbox Claude Code refused every file write of a Claude CLI
+seat as "a sensitive file", so seat A could not save its findings (seen 2026-11-01; the cause inside Claude Code is
+unconfirmed). A Claude CLI seat or auditor on a Codex host now answers in its final message and the dispatcher writes
+the file, as a Codex CLI seat already does. No permission check is bypassed. Such a seat has no scratch folder. A
+Codex-host run started before this change cannot be finished: start it again in a new run folder.
+
+A seat or auditor that finished while `--wait` or `audit --finish` was checking it could be dispatched again (a second
+paid call), because the worker was checked twice and the second check saw it gone; the result is now read once more
+before anything is dispatched again. Seen in a real-target Codex run on 2026-11-01.
+
+From the real-target review of these changes on 2026-11-01:
+
+- A folder name in its other Unicode form (NFC or NFD) counts as the run folder only when it opens the same folder. On
+  Windows and Linux a sibling folder spelled the other way is no longer matched; macOS keeps both forms.
+- CLI seats and `preflight --exec` now get the review's process-local git settings: `core.fsmonitor=false` and a
+  `safe.directory` you set. No other `GIT_CONFIG_*` entry is passed on, since one could carry credentials.
+- The report's no-transcript warning counts only real usage data (a token count or a model), not an empty entry.
+- The session-folder check stops before the paid probe on any file error; only a refused write suggests the writable root.
+- A seat or auditor about to be dispatched again waits for a usage limit its latest result names, and the report names
+  the status that result really ended with.
+- Known issue: a `git -c core.fsmonitor=true` passed in through `GIT_CONFIG_PARAMETERS` still turns fsmonitor on.
+
+New: `references/worked-example-packet.md`, a filled task packet from a real second-round review with what makes it
+work, and the quick recheck recipe; linked from the packet template.
+
 ## 1.2.0 - 2026-10-28
 
 Fixes from field runs on real collectors, from self-reviews on Windows, macOS and Linux, and from five rounds of the skills

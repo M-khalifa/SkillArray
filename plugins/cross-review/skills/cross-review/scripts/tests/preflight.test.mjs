@@ -10,7 +10,7 @@ import { platform as osPlatform } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
   assertNodeVersion, parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, repoFreshness, freshnessWarnings, findReviewArtifacts, summaryLine,
-  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs,
+  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs, claudeProjectsWritable,
 } from '../preflight.mjs';
 
 function git(args, cwd) {
@@ -247,6 +247,22 @@ test('Tier 2 --exec runs the given command through a filtered environment: a sec
     envPassthrough: [],
   });
   assert.equal(result.tier2.results[0].stdout, 'absent');
+});
+
+test('Tier 2 --exec in the filtered environment keeps the proxy and CA variables, as the dispatchers do [slow]', async (t) => {
+  const dir = await makeGitRepo(t);
+  const saved = { HTTPS_PROXY: process.env.HTTPS_PROXY, NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS };
+  process.env.HTTPS_PROXY = 'http://proxy.example:8080';
+  process.env.NODE_EXTRA_CA_CERTS = 'corp-ca.pem';
+  t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  const result = await run({
+    cd: dir,
+    exec: [`node -e "process.stdout.write((process.env.HTTPS_PROXY || 'none') + ' ' + (process.env.NODE_EXTRA_CA_CERTS || 'none'))"`],
+    timeout: 30,
+    envMode: 'filtered',
+    envPassthrough: [],
+  });
+  assert.equal(result.tier2.results[0].stdout, 'http://proxy.example:8080 corp-ca.pem');
 });
 
 test('Tier 2 --exec with --env-mode inherit passes the secret through (the escape hatch, opt-in only) [slow]', async (t) => {
@@ -1165,4 +1181,18 @@ test('field run: copyTarget keeps the reviewed files byte for byte, leaves out i
   assert.equal(big.copied, false);
   assert.match(big.reason, /3 file\(s\).*over the 2-file/);
   await assert.rejects(readFile(path.join(root, 'too-big', 'crlf.txt')), { code: 'ENOENT' });
+});
+
+test('claudeProjectsWritable: a writable projects folder passes and keeps no probe file; a refused write names the folder before any paid call', async (t) => {
+  const config = await mkdtemp(path.join(tmpdir(), 'preflight-claude-config-'));
+  t.after(() => rm(config, { recursive: true, force: true }));
+  const env = { CLAUDE_CONFIG_DIR: config };
+  const ok = await claudeProjectsWritable(env);
+  assert.deepEqual(ok, { ok: true, dir: path.join(config, 'projects') });
+  assert.deepEqual(await (await import('node:fs/promises')).readdir(ok.dir), [], 'the probe file is removed');
+  const denied = Object.assign(new Error('Access is denied'), { code: 'EPERM' });
+  const refused = await claudeProjectsWritable(env, { writeFileFn: async () => { throw denied; } });
+  assert.deepEqual(refused, { ok: false, dir: path.join(config, 'projects'), error: 'EPERM', refused: true });
+  const other = await claudeProjectsWritable(env, { writeFileFn: async () => { throw Object.assign(new Error('disk'), { code: 'ENOSPC' }); } });
+  assert.deepEqual(other, { ok: false, dir: path.join(config, 'projects'), error: 'ENOSPC', refused: false }, 'another error also stops before the paid probe, but is not read as a sandbox refusal');
 });

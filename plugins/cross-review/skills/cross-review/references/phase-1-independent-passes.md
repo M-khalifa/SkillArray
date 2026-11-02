@@ -245,7 +245,8 @@ on Codex.
 
 `phase1 --start` starts every CLI seat detached (on Windows through WMI, since a plain detached
 child is killed with the shell's job) and prints the brief path of each native seat. A CLI Claude
-seat writes only into its own `phase1/seat-<role>/` folder. A Codex seat B runs in Codex's
+seat writes only into its own `phase1/seat-<role>/` folder (on a Codex host it answers in its final
+message like a Codex seat, because Claude Code refuses its file writes there; see `hosts/codex.md`). A Codex seat B runs in Codex's
 `read-only` sandbox with web search on unless `flags.repoOnly` is true, and returns its findings as
 its final message; the dispatcher writes that message to the findings file itself as UTF-8. Never
 re-save `finalMessage` through a shell (Windows PowerShell 5.1 reads UTF-8 as the ANSI code page

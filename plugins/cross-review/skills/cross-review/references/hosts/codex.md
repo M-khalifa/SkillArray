@@ -16,10 +16,31 @@ depends on how Codex was launched.
 | Codex seat B | CLI (nested `codex-dispatch`) | unsupported: the Codex sandbox blocks a nested start; no override |
 | Claude native agent | none | cannot exist: the host spawner offers only OpenAI models |
 
-Why the probe: in two `codex exec` runs (2026-10-07) a Claude CLI call left no session file under
-`~/.claude/projects`, and Phase 2's resume of seat A failed with `No conversation found with session ID`; in a
-live Codex run launched another way (2026-10-07, file-tool launch path) the same CLI wrote its session and
-resumed it. The skill does not guess which launch it is in: `--probe-claude-session` makes two small Claude
+Why the probe: Claude saves each session under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`). A Codex
+sandbox lets a command write only inside the folder Codex was started in and its writable roots, so a Claude CLI call
+answers but loses its session, and Phase 2's resume of seat A fails with `No conversation found with session ID`. To
+run a Claude CLI seat from Codex, start Codex with that folder as a writable root (or set the same under
+`[sandbox_workspace_write]` in `~/.codex/config.toml`; single quotes keep the backslashes):
+
+```text
+codex -c "sandbox_workspace_write.writable_roots=['C:\Users\<you>\.claude\projects']"
+```
+
+Allow only `projects`, not all of `~/.claude`: that folder also holds Claude's settings and login, and any command the
+sandbox runs could then change them. preflight checks that the folder can be written before any paid call and names it
+when it cannot. Seen on Windows on 2026-11-01: with the writable root the probe resumed its session inside
+`codex sandbox`; without it the resume failed. The 2026-10-07 run that kept its session had Codex started in the home
+folder, which made `~/.claude/projects` writable.
+
+Writing files: inside the Codex sandbox, which runs commands under its own Windows account (`CodexSandboxOffline`),
+Claude Code refuses every file write of a Claude CLI actor as "a sensitive file", whatever the allow rules say (seen on
+2026-11-01; the cause inside Claude Code is unconfirmed, and `os.userInfo()` failing there is a likely one). So on a
+Codex host a Claude CLI seat and a Claude CLI auditor answer in their final message, and the dispatcher writes the
+file (`--final-message-out`), as for a Codex CLI seat. The skill never bypasses that permission check. Such a seat
+gets no scratch folder (its brief says to write no file), so a check that needs temp files is run in preflight
+(`--exec`) and cited in the packet instead.
+
+The skill still proves it before a run: `--probe-claude-session` makes two small Claude
 Haiku calls (remember a nonce, then resume the session and recall it; it needs `--yes-paid`), refuses the run
 if the recall fails, and records the result (`support[].probe`) in `run.json`. Without the probe a Claude seat
 on a Codex host is refused. "Trial" means the route runs but has not been run at length; the manifest records
@@ -59,6 +80,39 @@ in it that is not ignored. Start Codex one level above the repository, or ignore
 never edits the target's `.gitignore`. When `codex doctor` shows a failed sandbox row, add `--skip-codex-doctor`
 to the preflight: its `--yes-paid` probe is a nested `codex exec`, which the Codex sandbox blocks.
 
+Keep the target inside the folder Codex was started in too. The run folder must be inside it, or the sandbox cannot
+write it (`EPERM` on `run.json`).
+
+Git ownership: on Windows the sandbox runs commands under its own account (`CodexSandboxOffline`), and git refuses any
+repository that account does not own, inside the start folder or not (`fatal: detected dubious ownership`). A
+repository you created or cloned yourself is refused. Trust it for the review's shell calls only, in the same call as
+preflight and review-run, never with `git config --global` (tested with git 2.52):
+
+```powershell
+$env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'safe.directory'; $env:GIT_CONFIG_VALUE_0 = 'C:/path/to/target'
+```
+
+A Codex session started inside a repository can take ownership of the files it writes there, `.git` included; in an
+admin shell `takeown /F <repository>\.git /R /D Y` gives them back (seen on Windows, 2026-11-01). The dispatchers pass that
+`safe.directory` and the review's `core.fsmonitor=false` on to CLI seats; no other `GIT_CONFIG_*` entry.
+
+Three more sandbox limits, seen on Windows on 2026-11-01:
+
+- Settings: the sandbox cannot read `~/.config/review-skills` (`EPERM`). Before `setup`, `show` and `seats`, set
+  `REVIEW_SKILLS_CONFIG_DIR` to a folder inside the Codex start folder, in the same shell call (PowerShell:
+  `$env:REVIEW_SKILLS_CONFIG_DIR = Join-Path (Get-Location) 'review-settings'`).
+- Models: `codex` itself does not run in the sandbox shell, so `codex debug models` cannot check a model. The models
+  the agent spawn tool offers are the list to choose from.
+- Usage: the spawn tool returns a task name such as `/root/pair_a`, not a thread id. The agent's rollout is the file
+  under `~/.codex/sessions/<year>/<month>/<day>/` whose first line holds `"agent_path":"/root/<task name>"` and this
+  session's `CODEX_THREAD_ID`. Give it to `phase1 --wait --native-agent <role>=<rollout>`, or afterwards to
+  `review-run manifest --seat-transcript <role>=<rollout>`; without it the manifest has no model or usage for that
+  agent and the report says so. To find it (PowerShell):
+
+```powershell
+Get-ChildItem "$HOME\.codex\sessions" -Recurse -Filter 'rollout-*.jsonl' | Where-Object { $l = Get-Content -LiteralPath $_.FullName -TotalCount 1; $l -match '"agent_path":"/root/pair_a"' -and $l -match $env:CODEX_THREAD_ID } | Select-Object -ExpandProperty FullName
+```
+
 ## The sequence
 
 1. `phase1 --start` starts seat A (Claude CLI, detached) and prints seat B's brief path and output path.
@@ -96,6 +150,11 @@ Observed on 2026-10-05 to 2026-10-07 (Windows, Codex CLI 0.160.x):
   (model resolved) although `CODEX_SANDBOX_NETWORK_DISABLED=1` was set.
 - Nested Codex CLI seats: `codex` was not found in the sandbox shell, and a second trial failed with
   `failed to initialize in-process app-server client: Access is denied. (os error 5)`.
+- First complete cross-review on a Codex host (2026-11-01, Windows, interactive Codex started with `--sandbox
+  workspace-write --add-dir <home>\.claude\projects`, small target): Claude Haiku as CLI seat A on the final-message
+  channel, `gpt-6.1-sol` as native seat B, a Claude CLI auditor. Both seats found the seeded defect, the exchange ran,
+  and the auditor confirmed it. Seat A's first file was refused by the format check and its one rewrite passed. The
+  manifest leaves out the two paid session-probe calls (it warns); their cost is in `probe-session/*/result.json`.
 - The skill never requests escalation, never sets a wider sandbox itself and never bypasses a permission check.
 
 ## Orchestrator cost

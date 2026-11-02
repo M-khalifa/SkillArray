@@ -131,6 +131,16 @@ codex login
 An OpenAI pair uses Codex's native agents. A Claude seat, auditor, or verifier also needs an installed, authenticated
 Claude Code CLI. Installing a CLI does not enable a route that this skill marks unsupported.
 
+The quickest way is the plugin marketplace (tested with Codex CLI 0.165.0 on Windows):
+
+```bash
+codex plugin marketplace add M-khalifa/SkillArray
+codex plugin add cross-review@skillarray
+codex plugin add pair-review@skillarray
+```
+
+`codex plugin list` then shows both as installed and enabled. Or copy the skill folders yourself:
+
 Codex reads skills from `.agents/skills` in the repository, or from `~/.agents/skills` for every project. Copy each complete
 skill folder, including its `scripts` and `references` directories. See
 [OpenAI's skill documentation](https://learn.chatgpt.com/docs/build-skills).
@@ -157,7 +167,8 @@ To update, pull the repository and replace each installed skill folder with a fr
 first. Merging over an older copy leaves deleted files behind, including old test fixtures named `SKILL.md` that Codex can
 mistake for skills. Codex detects skill changes automatically; restart it if a skill does not show up.
 
-Start `codex` in the folder you want reviewed, then call a skill with `$` (or pick it from `/skills`):
+Start `codex` one level above the folder you want reviewed (the review's run folder must be inside the folder Codex starts in;
+keep the target there too), then call a skill with `$` (or pick it from `/skills`):
 
 ```text
 $cross-review setup
@@ -165,10 +176,18 @@ $cross-review -- review the changes on this branch against main
 $pair-review -- review docs/design.md for gaps and wrong claims
 ```
 
-On a Codex host some routes are still a trial: a pair of two native OpenAI models, and a Claude CLI seat, which runs only
-after a session probe passes (see Hosts below). Claude Code is the host I test on most. The repository also has Codex plugin
-manifests (`plugins/*/.codex-plugin/plugin.json`) and a marketplace file (`.agents/plugins/marketplace.json`), but I have
-not tested installing through them yet.
+On a Codex host the routes are still a trial (see Hosts below). A pair of two native OpenAI models has completed two short
+runs, and a cross-review with a Claude CLI seat has completed two: one on a small target, one on this repository's own changes.
+Tested on Windows only. For cross-review, start Codex with
+Claude's session folder writable, or the Claude seat cannot be resumed (tested on Windows):
+
+```powershell
+codex --sandbox workspace-write --add-dir "$HOME\.claude\projects"
+```
+
+On Windows, git inside the Codex sandbox refuses a repository the sandbox account does not own, such as one you cloned
+yourself; each skill's `references/hosts/codex.md` shows how to trust it for the review only. Claude Code is the host I
+test on most.
 
 </details>
 
@@ -179,7 +198,8 @@ Support is decided per actor (host, runtime, transport), not per host (`scripts/
 `preflight.mjs --allow-trial`, recorded in `run.json` and the manifest) or unsupported (refused, no override). Claude Code:
 everything is supported. Codex host: native OpenAI agents (pair-review, and cross-review's seat B) and a single-call Claude CLI auditor
 are trial routes; a Claude CLI seat is a trial only after `preflight --probe-claude-session --yes-paid` proves its session survives
-(it did not in two `codex exec` runs and did in another launch path); a nested Codex CLI seat is unsupported. The skill picks
+(Claude saves its session in `~/.claude/projects`, which the Codex sandbox can write only when you add that folder as a
+writable root; see each skill's `references/hosts/codex.md`); a nested Codex CLI seat is unsupported. The skill picks
 the host from the tools it has, in this order, and `preflight.mjs --host` records the choice.
 
 | Order | Condition | Host |
@@ -197,12 +217,14 @@ alone does not make a cross-review configuration usable: every actor must pass t
 `references/hosts/` folder has one file per host.
 
 **Codex sandbox.** Codex command and network access depend on the active sandbox and permission configuration. In the
-restricted Windows setup tested here, a bare `claude -p` run from a Codex shell left no session file in three trials.
-`claude-dispatch.mjs` run through Codex failed in 2 of 2 trials with no allow rule. With a user-added allow rule for the
-dispatcher, 1 of 4 attempts completed; the others were killed with the Codex turn, failed on `--detach` (WMI access denied),
-or failed with ECONNREFUSED. Because no route has proved reliable, a Codex-host review runs only on the trial routes listed
-above. The skill never requests escalation, never sets a wider sandbox itself, and never bypasses a permission check.
-Details: each skill's `references/hosts/codex.md`.
+Windows setup tested here, two things stopped a Claude CLI seat. The sandbox could not write `~/.claude/projects`, so
+Claude lost its session and the Phase 2 resume failed. And inside the sandbox Claude Code refused every file write of
+the seat as "a sensitive file". With `~/.claude/projects` added as a writable root (`--add-dir`), and the Claude seat
+answering in its final message while the dispatcher writes the file, a full cross-review completed on 2026-11-01.
+preflight checks that folder before the paid session probe. Earlier attempts through `codex exec` were also killed with
+the Codex turn or failed on `--detach` (WMI access denied); the dispatchers now fall back to a plain detached process.
+These routes stay a trial until more runs on real targets pass. The skill never requests escalation, never sets a wider
+sandbox itself, and never bypasses a permission check. Details: each skill's `references/hosts/codex.md`.
 
 Before assigning a Codex CLI seat from Claude Code, check that it can actually read the target. From the target repository,
 run:
@@ -216,8 +238,10 @@ file contents. A green `codex doctor` row, a passing preflight, or a final "No f
 reviewer read any files.
 
 On a Codex host, cross-review's seat B runs as a native Codex agent, a trial route; its Codex CLI route is unsupported, and a
-passing Claude session probe does not override that. A Claude pair on a Codex host is a trial only when the session probe passes. The native OpenAI pair-review is a trial
-that has completed one short run. See each skill's `references/hosts/codex.md`.
+passing Claude session probe does not override that. A Claude pair on a Codex host is a trial only when the session probe
+passes. The native OpenAI pair-review has completed two short runs, and cross-review two (2026-11-01, one of them on a real target;
+Windows). See
+each skill's `references/hosts/codex.md`.
 
 </details>
 

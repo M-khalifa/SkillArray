@@ -318,7 +318,9 @@ The append step checks that every peer claim got exactly one entry, normalizes `
 headings to `### P<n>`, refuses a peer `P` ID inside an Evidence fence, translates each `P` back to
 the real peer ID, appends the section heading below, runs `validate`, and leaves the findings file
 unchanged on any refusal. Its refusal message names the rebutting seat, which is the seat to send a
-correction request to. The section heading is the exact literal string
+correction request to. For a seat that answers in its final message (a Codex CLI seat, or a Claude CLI
+seat on a Codex host), rename its `phase2/<seat>-rebuttals-raw.md` to `<seat>-rebuttals-raw.attempt-<n>.md`
+before resuming it with the correction: the dispatcher refuses to overwrite an answer that exists. The section heading is the exact literal string
 `## Rebuttals (from <seat>) of <peer> claims` — e.g. `## Rebuttals (from A) of
 B claims` appended to `B-findings.md` for seat A's rebuttals of seat B's
 claims — because Phase 3's double relabel matches this heading by exact regex to detect and

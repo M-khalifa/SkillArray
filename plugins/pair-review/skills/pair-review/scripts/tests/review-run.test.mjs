@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { readRunDescriptor, writeRunDescriptor } from '../run-descriptor.mjs';
-import { parseArgs, run as runInProcess, clockLine, seatDepth, shallowSeatNote, execFailureCount, formatElapsed, seatStatusLines, otherPendingSeats, warnExtraRepos, failureDetail, tail, print } from '../review-run.mjs';
+import { parseArgs, run as runInProcess, clockLine, seatDepth, shallowSeatNote, execFailureCount, formatElapsed, seatStatusLines, otherPendingSeats, warnExtraRepos, failureDetail, tail, print, endedBadlyNow } from '../review-run.mjs';
 import { computeSnapshotHash } from '../preflight.mjs';
 import { runStep as relabelStep } from '../blind-relabel.mjs';
 import { evaluateSupport } from '../host-support.mjs';
@@ -39,8 +39,8 @@ const m = /^seat-([AB])$/.exec(path.basename(outDir));
 const role = m ? m[1] : 'auditor';
 const phase = path.basename(path.dirname(outDir));
 fs.mkdirSync(outDir, { recursive: true });
-if (m) fs.writeFileSync(path.join(outDir, role + (phase === 'phase1' ? '-findings.md' : '-rebuttals-raw.md')), (role === 'A' && phase === 'phase1' && ctl.finalA) || '# findings from ' + role + '\\n' + (phase === 'phase1' ? '\\n## No findings\\n\\nBlocked: none\\n' : ''));
-else if (!ctl.auditorWritesNothing) fs.writeFileSync(path.join(outDir, 'findings.audit.json'), '{"fake":true}\\n');
+if (m) fs.writeFileSync(get('--final-message-out') ?? path.join(outDir, role + (phase === 'phase1' ? '-findings.md' : '-rebuttals-raw.md')), (role === 'A' && phase === 'phase1' && ctl.finalA) || '# findings from ' + role + '\\n' + (phase === 'phase1' ? '\\n## No findings\\n\\nBlocked: none\\n' : ''));
+else if (!ctl.auditorWritesNothing) fs.writeFileSync(get('--final-message-out') ?? path.join(outDir, 'findings.audit.json'), '{"fake":true}\\n');
 fs.writeFileSync(path.join(path.dirname(brief), 'result.json'), JSON.stringify({
   status: 'completed', sessionId: 'sess-' + role, modelResolved: ctl.resolved && role in ctl.resolved ? ctl.resolved[role] : 'resolved-' + role, worktreePath: ctl.worktrees?.[role] ?? null,
   touchedFiles: ctl.touched && role in ctl.touched ? ctl.touched[role] : [], ...(m ? null : ctl.recordAuditor),
@@ -133,7 +133,7 @@ function inProcessRunner(hook) {
   };
 }
 
-async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = {}, seatB = {}, auditor = {}, flags = {}, verifiers = [], fingerprint = null, git = false } = {}) {
+async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = {}, seatB = {}, auditor = {}, flags = {}, verifiers = [], fingerprint = null, git = false, probed = false } = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'review run '));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   const hook = path.join(base, 'hook');
@@ -158,7 +158,8 @@ async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = 
     auditor: actor(run, 'auditor', { outputDir: `${run}-audit-input`, ...auditor }),
     verifiers,
   };
-  desc.support = evaluateSupport(desc).map(({ role, runtime, transport, status }) => ({ role, runtime, transport, status }));
+  // probed: preflight's session probe passed, which turns a Claude CLI seat's probe row into a trial.
+  desc.support = evaluateSupport(desc).map(({ role, runtime, transport, status }) => ({ role, runtime, transport, ...(probed && status === 'probe' ? { status: 'trial', probe: { ok: true } } : { status }) }));
   await writeRunDescriptor(run, desc);
   const ctl = (values) => fs.writeFile(path.join(hook, 'control.json'), JSON.stringify(values));
   const state = { runAs: skill };
@@ -677,6 +678,53 @@ async function prepared(t, options) {
   assert.equal((await s.rr('audit', '--run-dir', s.run, '--prepare')).code, 0);
   return s;
 }
+
+test('on a Codex host a Claude CLI seat and a Claude CLI auditor answer in their final message, which the dispatcher writes', async (t) => {
+  const seatB = { provider: 'openai', runtime: 'codex', model: 'gpt-5.6-terra', transport: 'native' };
+  const s = await setup(t, { host: 'codex', seatB, probed: true });
+  const r = await s.rr('phase1', '--run-dir', s.run, '--start');
+  assert.equal(r.code, 0, r.out + r.err);
+  const calls = await s.calls();
+  const briefA = calls.find((c) => names([c])[0] === 'build-brief:--mode' && s.flag(c, '--seat') === 'A');
+  const startA = calls.find((c) => names([c])[0] === 'claude-dispatch:start');
+  assert.equal(s.flag(briefA, '--channel'), 'final-message');
+  assert.equal(briefA.argv.includes('--output-path'), false, 'no file path for the seat to write');
+  assert.equal(s.flag(startA, '--final-message-out'), path.join(s.run, 'phase1', 'A-findings.md'));
+  const audit = await prepared(t, { host: 'codex', seatB, probed: true });
+  const before = (await audit.calls()).length;
+  const finished = await audit.rr('audit', '--run-dir', audit.run, '--finish');
+  assert.equal(finished.code, 0, finished.out + finished.err);
+  const after = (await audit.calls()).slice(before);
+  const brief = after.find((c) => names([c])[0] === 'build-brief:--mode');
+  const dispatch = after.find((c) => names([c])[0] === 'claude-dispatch:start');
+  assert.equal(s.flag(brief, '--channel'), 'final-message');
+  assert.equal(brief.argv.includes('--output-path'), false);
+  assert.equal(audit.flag(dispatch, '--final-message-out'), path.join(`${audit.run}-audit-input`, 'findings.audit.json'));
+});
+
+test('on a Codex host a Claude CLI seat\'s answer reaches its file through --wait, a format rewrite and the Phase 2 resume', async (t) => {
+  const nl = String.fromCharCode(10);
+  const seatB = { provider: 'openai', runtime: 'codex', model: 'gpt-5.6-terra', transport: 'native' };
+  const s = await setup(t, { host: 'codex', seatB, probed: true });
+  const canonical = path.join(s.run, 'phase1', 'A-findings.md');
+  await s.ctl({ finalA: ['# Seat A findings', '', '## No findings', 'Blocked: none', '**Blocked:** rg missing', ''].join(nl) });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  assert.ok(await fs.stat(canonical), 'the dispatcher wrote the canonical file');
+  await fs.writeFile(path.join(s.run, 'phase1', 'B-findings.md'), ['# Seat B findings', '', '## No findings', '', 'Blocked: none', ''].join(nl));
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--native-done', 'B')).code, 3, 'a refused file asks the seat for a rewrite');
+  const rewrite = (await s.calls()).filter((c) => names([c])[0] === 'claude-dispatch:start').at(-1);
+  assert.equal(s.flag(rewrite, '--session'), 'sess-A');
+  assert.equal(s.flag(rewrite, '--final-message-out'), canonical);
+  assert.match(await fs.readFile(path.join(s.run, 'phase1', 'A', 'rewrite-brief.txt'), 'utf8'), /Reply with the whole file again as your final message/);
+  await fs.writeFile(canonical, ['# Seat A findings', '', '## No findings', '', 'Blocked: none', ''].join(nl));
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--wait', '--native-done', 'B')).code, 0);
+  const before = (await s.calls()).length;
+  assert.equal((await s.rr('phase2', '--run-dir', s.run, '--start')).code, 0);
+  const resume = (await s.calls()).slice(before).find((c) => names([c])[0] === 'claude-dispatch:start');
+  assert.equal(s.flag(resume, '--session'), 'sess-A');
+  assert.equal(s.flag(resume, '--final-message-out'), path.join(s.run, 'phase2', 'A-rebuttals-raw.md'));
+  assert.ok(await fs.stat(path.join(s.run, 'phase2', 'A-rebuttals-raw.md')), 'the dispatcher wrote the Phase 2 answer');
+});
 
 test('audit --finish with a CLI auditor: the full-audit brief, dispatch, translate, scorecard, clear-cache, in the documented order', async (t) => {
   const s = await prepared(t, { flags: { falsification: true } });
@@ -2642,6 +2690,10 @@ test('round 6: the seat\'s one "Blocked:" line decides the blind warning; a No f
     const e = await empty.rr('phase1', '--run-dir', empty.run, '--wait');
     assert.equal(e.code, 1, e.out);
     assert.match(e.out, /seat B: wrote "No findings" but says it was blocked \("Blocked: every file in the target: EACCES"\)/);
+    // The next: line agrees with the message: a new run, not a rerun of this --wait.
+    const next = e.lines.find((l) => l.startsWith('next:'));
+    assert.match(next, /start a new run with the same packet/, e.out);
+    assert.doesNotMatch(next, /rerun: review-run phase1/, e.out);
   }
 });
 
@@ -3135,4 +3187,21 @@ test('status: a re-audit after manifest.json was built is pending until audit --
   // audit --finish passed: fresh findings beside the kept attempt, and the manifest's hash is theirs.
   await fs.writeFile(path.join(p3, 'findings.json'), findings);
   assert.match(await status(), /: finished: manifest\.json is written/);
+});
+
+test('endedBadlyNow: a worker that wrote its final record and exited between the checks is not dispatched again', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ended-now-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'result.json');
+  const gone = spawnSync(process.execPath, ['-e', '0']).pid;
+  const now = new Date().toISOString();
+  const stale = { status: 'running', workerPid: gone, workerStartedAt: now, startedAt: now };
+  await fs.writeFile(file, JSON.stringify({ ...stale, status: 'completed', finishedAt: now }));
+  assert.equal(await endedBadlyNow(file, stale), null, 'the final record on disk wins over the stale read');
+  await fs.writeFile(file, JSON.stringify(stale));
+  assert.equal((await endedBadlyNow(file, stale))?.status, 'running', 'still running on disk with its worker gone: dispatched again');
+  await fs.writeFile(file, JSON.stringify({ ...stale, status: 'error' }));
+  assert.equal((await endedBadlyNow(file, { ...stale, status: 'error' }))?.status, 'error', 'a failed attempt is dispatched again');
+  await fs.writeFile(file, JSON.stringify({ ...stale, status: 'rate-limited', retryAfter: '3:00 AM' }));
+  assert.equal((await endedBadlyNow(file, stale))?.status, 'rate-limited', 'the fresh record is returned, so the usage-limit gate and the report see what it says');
 });

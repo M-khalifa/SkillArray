@@ -4,6 +4,11 @@ Status: design only. No code in this document has been built. Do not build
 it without a separate, explicit approval — this is Phase D of the
 production-readiness pass, kept design-only per that pass's own scope split.
 
+Checked against the code on 2026-11-01 (1.2.0 plus the Unreleased changes): the function line numbers below are
+updated, and two gaps are added: the seat file format now has more structure than the schemas below carry (see
+"What the seat file holds today"), and eight scripts, not only `blind-relabel.mjs`, read that Markdown (see "Other
+scripts that read the seat Markdown").
+
 ## Problem
 
 Phase 1 (independent findings) and Phase 2 (rebuttals) are currently
@@ -63,6 +68,17 @@ exactly as today. `action` reuses the existing
 `CONCEDE`/`DISPUTE`/`ACKNOWLEDGE` enum from review-protocol.md's Interaction
 modes.
 
+### What the seat file holds today
+
+`scripts/seat-file.mjs` enforces the current format: claim headings `## <seat letter><n> ...`, then
+`## Checks performed`; or `## No findings` alone. That section holds exactly one unfenced line `Blocked: none` or
+`Blocked: <what>: <the error>`, and the brief (`build-brief.mjs`) also asks for a closing line
+`web: <n> queries, <m> page fetches`. The run's status depends on these: a No findings seat that names a block makes
+the review incomplete (`review-run.mjs`, `build-manifest.mjs`), and the report reads the checks section for the
+acceptance criteria (`build-report.mjs`). A JSON seat file therefore needs, besides the findings array, at least
+`checks` (the checks-performed text), `blocked` (`none` or the block), `no_findings` (boolean) and `web`
+(query and fetch counts). The schemas above do not have them yet.
+
 ## What stays Markdown
 
 The final human-readable report (`joint-findings.md` / scorecard) stays
@@ -112,19 +128,38 @@ envelope moves to JSON.
 
 ## Which current parser functions this affects
 
-From `blind-relabel.mjs` (line numbers as of 1.2.0's final state):
+From `blind-relabel.mjs` (line numbers as of 2026-11-01; the file is 3,116 lines and
+`tests/blind-relabel.test.mjs` holds 242 tests):
 
 | Function | Fate under JSON Phase 1/2 |
 |---|---|
-| `parseFenceLines` (line 281) | Retired for the JSON path; still needed for verifier-file Markdown and for legacy-format replay during the dual-run/compat window. |
-| `splitLineSpans` (320) | Retired for the JSON path (no inline code spans to split in a JSON string). Still needed for verifier files and legacy replay. |
-| `splitProseAndCode` (352) | Same as above. |
-| `relabelText` (362) | Rewritten for JSON: becomes a JSON-tree walk substituting `id`/`claim` field values, plus a recursive string-value pass for any embedded identity tokens in `evidence`/`title`/`counter_fact` text. Markedly simpler than the current regex-based line relabeling. |
-| `extractClaimHeadings` (604) | Retired for the JSON path — claim IDs are just `.map(f => f.id)`, no heading regex or fence-awareness needed at all. This eliminates the entire bug class the "no fence-awareness" and "code-span-stripped reconstruction" 1.2.0 fixes were patching. |
-| `countRelabelTargets` (1091) | Same fate as `extractClaimHeadings` — becomes a straightforward field count. |
-| `scanText` (485) | Adapted, not retired: still walks every string value for identity tokens, but no longer needs fence/code-span awareness to know what to skip, since there is no prose/code distinction inside a JSON string value — every string value is scanned in full. |
-| `parseVerificationFile` (689) | Unaffected — verifier files stay Markdown (see Backwards compatibility above). |
-| `translateFindings` (820) | Unaffected in its core logic (provenance rules, contradiction checks, `auditor_check` handling are semantic, not parsing) — only its Phase 1/2 input-reading step changes from Markdown-heading extraction to JSON-array validation. |
+| `parseFenceLines` (line 241) | Retired for the JSON path; still needed for verifier-file Markdown and for legacy-format replay during the dual-run/compat window. |
+| `splitLineSpans` (295) | Retired for the JSON path (no inline code spans to split in a JSON string). Still needed for verifier files and legacy replay. |
+| `splitProseAndCode` (327) | Same as above. |
+| `relabelText` (358) | Rewritten for JSON: becomes a JSON-tree walk substituting `id`/`claim` field values, plus a recursive string-value pass for any embedded identity tokens in `evidence`/`title`/`counter_fact` text. Markedly simpler than the current regex-based line relabeling. |
+| `extractClaimHeadings` (1139) | Retired for the JSON path — claim IDs are just `.map(f => f.id)`, no heading regex or fence-awareness needed at all. This eliminates the entire bug class the "no fence-awareness" and "code-span-stripped reconstruction" 1.2.0 fixes were patching. |
+| `countRelabelTargets` (2020) | Same fate as `extractClaimHeadings` — becomes a straightforward field count. |
+| `scanText` (942) | Adapted, not retired: still walks every string value for identity tokens, but no longer needs fence/code-span awareness to know what to skip, since there is no prose/code distinction inside a JSON string value — every string value is scanned in full. |
+| `parseVerificationFile` (1537) | Unaffected — verifier files stay Markdown (see Backwards compatibility above). |
+| `translateFindings` (1670) | Unaffected in its core logic (provenance rules, contradiction checks, `auditor_check` handling are semantic, not parsing) — only its Phase 1/2 input-reading step changes from Markdown-heading extraction to JSON-array validation. |
+
+## Other scripts that read the seat Markdown
+
+Each of these reads the seat file's headings or its `Blocked:` line and needs a JSON path too:
+
+| Script | What it reads |
+|---|---|
+| `seat-file.mjs` | The whole seat format: claim headings, `## Checks performed` or `## No findings`, the one `Blocked:` line. |
+| `build-brief.mjs` | Writes the format into every seat brief, so the brief text changes. |
+| `review-run.mjs` | Whether a seat file has a claim heading or `## No findings`; a No findings seat with a block stops the run. |
+| `build-manifest.mjs` | A missing seat file or one with no claim and no `## No findings`; the parsed `Blocked:` line. |
+| `build-report.mjs` | The checks section (criteria NOT MET, failing checks) and the format note for older seat files. |
+| `exchange.mjs` | A peer that wrote `## No findings` gets no rebuttal brief. |
+| `build-recheck-packet.mjs` | Asks for CONFIRMED/REFUTED at the end of each hypothesis line in `## Checks performed`. |
+| `blind-relabel.mjs` | The functions in the table above. |
+
+The briefs change shape, so `scripts/compare-baseline.mjs` (which checks that an earlier revision's briefs still build
+byte for byte) reports every brief as changed; that is expected for this migration and must be read, not waived.
 
 ## Bug classes this eliminates
 

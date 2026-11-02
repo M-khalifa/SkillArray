@@ -9,7 +9,7 @@ export const PROVIDERS = Object.freeze({
       { id: 'fable', label: 'Fable (5.1)', note: 'Available only when the Claude harness exposes it.' },
       { id: 'opus', label: 'Opus (5.5)', note: 'Resolve the exact currently selectable Claude ID in the harness.' },
       { id: 'sonnet', label: 'Sonnet (5.x)', note: 'The harness has served both claude-sonnet-5 and claude-sonnet-5-5; record the resolved ID.' },
-      { id: 'haiku', label: 'Haiku (4.5)', note: 'Resolve the exact currently selectable Claude ID in the harness.' },
+      { id: 'haiku', label: 'Haiku (5.5)', note: 'Resolve the exact currently selectable Claude ID in the harness.' },
     ],
   },
   openai: {

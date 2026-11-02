@@ -48,6 +48,39 @@ snapshots the whole repository, so preflight refuses a run folder in it that is 
 `codex doctor` shows a failed sandbox row, add `--skip-codex-doctor` to the preflight: its `--yes-paid`
 probe is a nested `codex exec`, which the Codex sandbox blocks.
 
+Keep the target inside the folder Codex was started in too: start Codex one level above the repository. The run
+folder must be inside it, or the sandbox cannot write it (`EPERM` on `run.json`).
+
+Git ownership: on Windows the sandbox runs commands under its own account (`CodexSandboxOffline`), and git refuses any
+repository that account does not own, inside the start folder or not (`fatal: detected dubious ownership`). A
+repository you created or cloned yourself is refused. Trust it for the review's shell calls only, in the same call as
+preflight and review-run, never with `git config --global` (tested with git 2.52):
+
+```powershell
+$env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'safe.directory'; $env:GIT_CONFIG_VALUE_0 = 'C:/path/to/target'
+```
+
+A Codex session started inside a repository can take ownership of the files it writes there, `.git` included; in an
+admin shell `takeown /F <repository>\.git /R /D Y` gives them back (seen on Windows, 2026-11-01). The dispatchers pass that
+`safe.directory` and the review's `core.fsmonitor=false` on to CLI seats; no other `GIT_CONFIG_*` entry.
+
+Three more sandbox limits, seen on Windows on 2026-11-01:
+
+- Settings: the sandbox cannot read `~/.config/review-skills` (`EPERM`). Before `setup`, `show` and `seats`, set
+  `REVIEW_SKILLS_CONFIG_DIR` to a folder inside the Codex start folder, in the same shell call (PowerShell:
+  `$env:REVIEW_SKILLS_CONFIG_DIR = Join-Path (Get-Location) 'review-settings'`).
+- Models: `codex` itself does not run in the sandbox shell, so `codex debug models` cannot check a model. The models
+  the agent spawn tool offers are the list to choose from.
+- Usage: the spawn tool returns a task name such as `/root/pair_a`, not a thread id. The agent's rollout is the file
+  under `~/.codex/sessions/<year>/<month>/<day>/` whose first line holds `"agent_path":"/root/<task name>"` and this
+  session's `CODEX_THREAD_ID`. Give it to `phase1 --wait --native-agent <role>=<rollout>`, or afterwards to
+  `review-run manifest --seat-transcript <role>=<rollout>`; without it the manifest has no model or usage for that
+  agent and the report says so. To find it (PowerShell):
+
+```powershell
+Get-ChildItem "$HOME\.codex\sessions" -Recurse -Filter 'rollout-*.jsonl' | Where-Object { $l = Get-Content -LiteralPath $_.FullName -TotalCount 1; $l -match '"agent_path":"/root/pair_a"' -and $l -match $env:CODEX_THREAD_ID } | Select-Object -ExpandProperty FullName
+```
+
 ## The sequence
 
 `review-run.mjs` cannot spawn agents; for a native actor it prints the brief path, then waits for the
@@ -86,6 +119,10 @@ a native agent stays addressable by task name (shown once with a probe agent: on
 ## Evidence behind the table
 
 - One complete run through the sequencer by a `codex exec` orchestrator (2026-10-07, small target): both native agents found the seeded defect, the exchange, a fresh native auditor, the scorecard and the manifest completed in about 11 minutes with no script failure. The cell stays a trial until a second run on a real target completes.
+- A second complete run from an interactive Codex session (2026-11-01, Windows, small target, plugin copies
+  from the marketplace): `gpt-6.1-sol` and `gpt-6-sol` both found the seeded defect, the exchange and a fresh native
+  auditor confirmed it, in 7 minutes. It needed the run folder, the target and `REVIEW_SKILLS_CONFIG_DIR` inside the
+  Codex start folder (above); its manifest had no seat usage because the agents were waited on with `--native-done`.
 - Native `spawn_agent` of OpenAI models with `fork_turns: none`, `followup_task` by task name and a fresh
   native auditor completed a full review by hand (2026-10-07); each spawned agent has its own rollout with
   the model and token usage; `codex exec` (non-interactive) exposes `spawn_agent`, `followup_task`,
@@ -96,8 +133,15 @@ a native agent stays addressable by task name (shown once with a probe agent: on
 - A foreground `claude-dispatch.mjs` run and a plain detached `claude-dispatch` worker each completed from
   `codex exec` (the WMI start was refused with `Access denied`, so `--detach` falls back to a plain detached
   process). In two `codex exec` runs no Claude CLI call left a session file under `~/.claude/projects` and a Phase 2
-  resume failed with `No conversation found with session ID`; in a live Codex run on another launch path the session was
-  written and resumed. So a Claude seat is gated on a probe, and a single-call actor (the auditor) needs none.
+  resume failed with `No conversation found with session ID`, because the sandbox could not write that folder (the run
+  that kept its session had Codex started in the home folder). With `~/.claude/projects` as a writable root the session
+  survives (2026-11-01; `codex -c "sandbox_workspace_write.writable_roots=['<that folder>']"`; allow only `projects`, so
+  Claude's settings and login stay out of reach). So a Claude seat is gated on a probe, preflight checks that the folder
+  can be written before the paid probe, and a single-call actor (the auditor) needs none. Inside the sandbox (its own
+  Windows account) Claude Code also refuses every file write of a Claude CLI actor as "a sensitive file" (2026-11-01;
+  cause unconfirmed), so on a Codex host a Claude CLI seat or auditor answers in its final message and the dispatcher
+  writes the file, as for a Codex CLI seat; the skill never bypasses that check. Such a seat gets no scratch
+  folder, so run checks that need temp files in preflight (`--exec`) and cite them in the packet.
 - The skill never requests escalation, never sets a wider sandbox itself and never bypasses a permission check.
 
 ## Orchestrator cost

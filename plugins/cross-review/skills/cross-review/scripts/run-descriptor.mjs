@@ -217,8 +217,11 @@ function privateOutputPath(desc, phase, role) {
 }
 
 // A native agent has file tools whatever its vendor, so it writes its own file; a CLI actor follows its runtime.
-function channelFor(actor) {
-  if (actor.transport === 'native' || actor.runtime === 'claude') return 'file';
+// On a Codex host Claude Code refuses every file write of a Claude CLI actor as a sensitive file (seen under the
+// sandbox account), so that actor answers in its final message and the dispatcher writes the file.
+function channelFor(actor, host = null) {
+  if (actor.transport === 'native') return 'file';
+  if (actor.runtime === 'claude') return host === 'codex' ? 'final-message' : 'file';
   if (actor.runtime === 'codex') return 'final-message';
   throw new RunDescriptorError(`no output channel is defined for runtime "${actor.runtime}"`);
 }
@@ -229,7 +232,7 @@ function sha256(buffer) {
 
 async function publishSeatOutput(desc, phase, role) {
   const actor = seatActor(desc, role);
-  if (actor.transport !== 'cli' || channelFor(actor) !== 'file') {
+  if (actor.transport !== 'cli' || channelFor(actor, desc.host) !== 'file') {
     throw new RunDescriptorError(`seat ${role} is not a file-channel CLI seat; there is nothing to publish`);
   }
   const source = privateOutputPath(desc, phase, role);
@@ -258,7 +261,7 @@ function seatTable(desc) {
   return allActors(desc).map((actor) => ({
     role: actor.role, provider: actor.provider, runtime: actor.runtime, model: actor.model, effort: actor.effort,
     transport: actor.transport, sessionId: actor.sessionId, outputDir: actor.outputDir, resultPath: actor.resultPath,
-    worktreePath: actor.worktreePath, channel: channelFor(actor),
+    worktreePath: actor.worktreePath, channel: channelFor(actor, desc.host),
   }));
 }
 
