@@ -6,7 +6,7 @@ production-readiness pass, kept design-only per that pass's own scope split.
 
 ## Verified current state
 
-Checked against the code on 2026-11-01 (1.2.0 plus the Unreleased changes).
+Checked against the code on 2026-11-01 (1.2.0 with its 2026-11-02 update).
 
 - Effort is not a fixed named tier. `review-config.mjs` validates `effort` against
   `EFFORT = /^[a-z][a-z0-9_-]*$/`, any lowercase token; a model's own accepted values constrain it.
