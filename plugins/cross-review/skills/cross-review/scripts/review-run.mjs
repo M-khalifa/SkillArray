@@ -247,6 +247,12 @@ function endedBadly(record) {
   return Boolean(record) && ((record.status !== 'running' && record.status !== 'completed') || workerGone(record));
 }
 
+// Each liveness check can take seconds on Windows, so a worker can exit between the read and this decision; its final
+// record is on disk by then, so it is read once more before anything is dispatched again.
+export async function endedBadlyNow(file, record) {
+  return endedBadly(record) && endedBadly((await readResultAt(file)) ?? record);
+}
+
 // A usage limit ends a call cleanly; running the next --wait at once only burns a new session against the same limit.
 function rateLimitGate(label, record) {
   if (record?.status !== 'rate-limited') return;
@@ -600,7 +606,7 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
         }
         neverStarted = await exists(brief);
       }
-      if (endedBadly(prior) || neverStarted) {
+      if (await endedBadlyNow(resultFile(desc, phase, role), prior) || neverStarted) {
         stopRecordedChild(prior);
         await checkTouched(`seat ${role}`, resultFile(desc, phase, role));
         await assertFingerprint(desc, { report, step: phase });
@@ -1359,7 +1365,7 @@ async function dispatchAuditor(desc, args, report, briefPath, outputExists) {
   const prior = await recheckGone(result, await readResultAt(result));
   rateLimitGate('the auditor', prior);
   if (!prior && outputExists) throw new StepError('auditor output', `the auditor output exists but there is no result.json at ${result}, so the CLI auditor's completion cannot be confirmed; remove the output file to dispatch the auditor again`);
-  const redispatch = !prior || endedBadly(prior);
+  const redispatch = !prior || await endedBadlyNow(result, prior);
   if (redispatch) {
     stopRecordedChild(prior);
     if (prior) await checkTouched('auditor', result);

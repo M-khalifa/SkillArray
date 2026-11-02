@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { readRunDescriptor, writeRunDescriptor } from '../run-descriptor.mjs';
-import { parseArgs, run as runInProcess, clockLine, seatDepth, shallowSeatNote, execFailureCount, formatElapsed, seatStatusLines, otherPendingSeats, warnExtraRepos, failureDetail, tail, print } from '../review-run.mjs';
+import { parseArgs, run as runInProcess, clockLine, seatDepth, shallowSeatNote, execFailureCount, formatElapsed, seatStatusLines, otherPendingSeats, warnExtraRepos, failureDetail, tail, print, endedBadlyNow } from '../review-run.mjs';
 import { computeSnapshotHash } from '../preflight.mjs';
 import { runStep as relabelStep } from '../blind-relabel.mjs';
 import { evaluateSupport } from '../host-support.mjs';
@@ -3187,4 +3187,19 @@ test('status: a re-audit after manifest.json was built is pending until audit --
   // audit --finish passed: fresh findings beside the kept attempt, and the manifest's hash is theirs.
   await fs.writeFile(path.join(p3, 'findings.json'), findings);
   assert.match(await status(), /: finished: manifest\.json is written/);
+});
+
+test('endedBadlyNow: a worker that wrote its final record and exited between the checks is not dispatched again', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ended-now-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'result.json');
+  const gone = spawnSync(process.execPath, ['-e', '0']).pid;
+  const now = new Date().toISOString();
+  const stale = { status: 'running', workerPid: gone, workerStartedAt: now, startedAt: now };
+  await fs.writeFile(file, JSON.stringify({ ...stale, status: 'completed', finishedAt: now }));
+  assert.equal(await endedBadlyNow(file, stale), false, 'the final record on disk wins over the stale read');
+  await fs.writeFile(file, JSON.stringify(stale));
+  assert.equal(await endedBadlyNow(file, stale), true, 'still running on disk with its worker gone: dispatched again');
+  await fs.writeFile(file, JSON.stringify({ ...stale, status: 'error' }));
+  assert.equal(await endedBadlyNow(file, { ...stale, status: 'error' }), true, 'a failed attempt is dispatched again');
 });

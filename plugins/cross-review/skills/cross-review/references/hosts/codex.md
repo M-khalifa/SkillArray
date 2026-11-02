@@ -80,9 +80,20 @@ in it that is not ignored. Start Codex one level above the repository, or ignore
 never edits the target's `.gitignore`. When `codex doctor` shows a failed sandbox row, add `--skip-codex-doctor`
 to the preflight: its `--yes-paid` probe is a nested `codex exec`, which the Codex sandbox blocks.
 
-The target must be inside the folder Codex was started in too. Outside that folder the sandbox cannot write the run
-folder (`EPERM` on `run.json`) and its git refuses the repository with `fatal: detected dubious ownership` (seen in
-four Codex sessions on Windows, 2026-10-20 to 2026-11-01).
+Keep the target inside the folder Codex was started in too. The run folder must be inside it, or the sandbox cannot
+write it (`EPERM` on `run.json`).
+
+Git ownership: on Windows the sandbox runs commands under its own account (`CodexSandboxOffline`), and git refuses any
+repository that account does not own, inside the start folder or not (`fatal: detected dubious ownership`). A
+repository you created or cloned yourself is refused. Trust it for the review's shell calls only, in the same call as
+preflight and review-run, never with `git config --global` (tested with git 2.52):
+
+```powershell
+$env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'safe.directory'; $env:GIT_CONFIG_VALUE_0 = 'C:/path/to/target'
+```
+
+A Codex session started inside a repository can take ownership of the files it writes there, `.git` included; in an
+admin shell `takeown /F <repository>\.git /R /D Y` gives them back (seen on Windows, 2026-11-01).
 
 Three more sandbox limits, seen on Windows on 2026-11-01:
 

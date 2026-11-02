@@ -15,8 +15,9 @@ Also: installing through the Codex plugin marketplace is tested (Codex CLI 0.165
 and Codex lists both skills); the README shows the three commands.
 
 Also: a target git refuses to open now shows git's reason (the `fatal:` line, such as "detected dubious ownership")
-with its `safe.directory` command, not the command alone. On a Codex host the target must be inside the folder Codex was
-started in, as the run folder already had to be: the Codex host file and the README now say so.
+with its `safe.directory` command, not the command alone. On a Codex host the run folder must be inside the folder Codex
+was started in (EPERM otherwise), and on Windows git inside the sandbox refuses any repository the sandbox account does
+not own; the Codex host file shows the process-local trust to use and how to take back a `.git` the sandbox took over.
 
 From a complete native pair-review on a Codex host (2026-11-01): the Codex host file says to set
 `REVIEW_SKILLS_CONFIG_DIR` inside the Codex start folder (the sandbox cannot read `~/.config/review-skills`), to take the
@@ -36,6 +37,10 @@ seat as "a sensitive file", so seat A could not save its findings (seen 2026-11-
 unconfirmed). A Claude CLI seat or auditor on a Codex host now answers in its final message and the dispatcher writes
 the file, as a Codex CLI seat already does. No permission check is bypassed. Such a seat has no scratch folder. A
 Codex-host run started before this change cannot be finished: start it again in a new run folder.
+
+A seat or auditor that finished while `--wait` or `audit --finish` was checking it could be dispatched again (a second
+paid call), because the worker was checked twice and the second check saw it gone; the result is now read once more
+before anything is dispatched again. Seen in a real-target Codex run on 2026-11-01.
 
 New: `references/worked-example-packet.md`, a filled task packet from a real second-round review with what makes it
 work, and the quick recheck recipe; linked from the packet template.

@@ -167,8 +167,8 @@ To update, pull the repository and replace each installed skill folder with a fr
 first. Merging over an older copy leaves deleted files behind, including old test fixtures named `SKILL.md` that Codex can
 mistake for skills. Codex detects skill changes automatically; restart it if a skill does not show up.
 
-Start `codex` one level above the folder you want reviewed (the target and the review's run folder must both be inside
-the folder Codex starts in), then call a skill with `$` (or pick it from `/skills`):
+Start `codex` one level above the folder you want reviewed (the review's run folder must be inside the folder Codex starts in;
+keep the target there too), then call a skill with `$` (or pick it from `/skills`):
 
 ```text
 $cross-review setup
@@ -177,14 +177,17 @@ $pair-review -- review docs/design.md for gaps and wrong claims
 ```
 
 On a Codex host the routes are still a trial (see Hosts below). A pair of two native OpenAI models has completed two short
-runs, and a cross-review with a Claude CLI seat has completed one, on a small target. For cross-review, start Codex with
+runs, and a cross-review with a Claude CLI seat has completed two: one on a small target, one on this repository's own changes.
+Tested on Windows only. For cross-review, start Codex with
 Claude's session folder writable, or the Claude seat cannot be resumed (tested on Windows):
 
 ```powershell
 codex --sandbox workspace-write --add-dir "$HOME\.claude\projects"
 ```
 
-Claude Code is the host I test on most.
+On Windows, git inside the Codex sandbox refuses a repository the sandbox account does not own, such as one you cloned
+yourself; each skill's `references/hosts/codex.md` shows how to trust it for the review only. Claude Code is the host I
+test on most.
 
 </details>
 
@@ -236,7 +239,8 @@ reviewer read any files.
 
 On a Codex host, cross-review's seat B runs as a native Codex agent, a trial route; its Codex CLI route is unsupported, and a
 passing Claude session probe does not override that. A Claude pair on a Codex host is a trial only when the session probe
-passes. The native OpenAI pair-review has completed two short runs, and cross-review one (2026-11-01, small target). See
+passes. The native OpenAI pair-review has completed two short runs, and cross-review two (2026-11-01, one of them on a real target;
+Windows). See
 each skill's `references/hosts/codex.md`.
 
 </details>
