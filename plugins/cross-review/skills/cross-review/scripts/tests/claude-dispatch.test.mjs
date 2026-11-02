@@ -922,7 +922,13 @@ test('a detached worker killed with SIGKILL no longer leaves its seat process gr
   }
   assert.ok(pids, 'the fake CLI never started');
   t.after(() => { for (const pid of pids) { try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ } try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } } });
-  const running = await h.record(s);
+  // The worker saves the session id after the CLI's init line, separately from the child pid: wait for both.
+  let running = await h.record(s);
+  for (let i = 0; i < 100 && !running.sessionId; i++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    running = await h.record(s);
+  }
+  assert.equal(running.sessionId, 'fixture-session', 'the running record names the session');
   assert.equal(running.childPid, pids[0], 'the running record names the CLI child');
   assert.ok(running.childStartToken, 'and the token that proves a later pid is still that process');
   process.kill(running.workerPid, 'SIGKILL');
