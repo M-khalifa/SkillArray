@@ -259,6 +259,12 @@ means the review is incomplete; do not synthesize a completed two-vendor verdict
     re-reviewed.
 11. The manifest records what happened, never what was intended.
 12. The review never edits or commits the target.
+13. Every report you relay or write keeps its attribution line, `Reviewed with
+    <skill> <version> (SkillArray, MIT license): https://github.com/M-khalifa/SkillArray`,
+    exactly as `review-run report` printed it: chat (short or `--all`), text,
+    Markdown, HTML, JSON, and any PDF or document made from them. Paste the chat
+    report verbatim and put your own notes after it; never shorten a report in a
+    way that drops this line.
 
 ## Reviewing the same code again
 

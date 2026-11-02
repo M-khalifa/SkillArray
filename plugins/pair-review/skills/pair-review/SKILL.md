@@ -230,6 +230,12 @@ names (its section index gives their lines), not the whole file.
 12. The review never edits or commits the target; no sandbox enforces this for
     Claude seats, so check the target after each phase (phase 1, Completion
     gate).
+13. Every report you relay or write keeps its attribution line, `Reviewed with
+    <skill> <version> (SkillArray, MIT license): https://github.com/M-khalifa/SkillArray`,
+    exactly as `review-run report` printed it: chat (short or `--all`), text,
+    Markdown, HTML, JSON, and any PDF or document made from them. Paste the chat
+    report verbatim and put your own notes after it; never shorten a report in a
+    way that drops this line.
 
 A failed or unavailable seat means an incomplete review. Report what completed
 and the failure; never label a single pass as a completed pair review. Before
