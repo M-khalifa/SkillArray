@@ -17,6 +17,10 @@ SkillArray is two Claude Code and Codex skills that review your code, design doc
 models instead of one. Each model reviews on its own. Then each one sees the other's findings, with names removed, and has
 to accept them or prove them wrong with evidence. A fresh session that never saw who wrote what makes the final call.
 
+<p align="center">
+  <img src="docs/assets/skillarray-demo.svg" alt="Animation of one review: one model alone agrees with itself; two models review alone, cross-check each other blind, a fresh auditor confirms or refutes each finding, and you get a ranked report" width="432">
+</p>
+
 ## Why I built it
 
 I use Claude Code for most of my work: code, design documents, websites. I started asking it to review that work too. The
