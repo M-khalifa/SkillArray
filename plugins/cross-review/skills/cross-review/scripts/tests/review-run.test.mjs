@@ -3197,9 +3197,11 @@ test('endedBadlyNow: a worker that wrote its final record and exited between the
   const now = new Date().toISOString();
   const stale = { status: 'running', workerPid: gone, workerStartedAt: now, startedAt: now };
   await fs.writeFile(file, JSON.stringify({ ...stale, status: 'completed', finishedAt: now }));
-  assert.equal(await endedBadlyNow(file, stale), false, 'the final record on disk wins over the stale read');
+  assert.equal(await endedBadlyNow(file, stale), null, 'the final record on disk wins over the stale read');
   await fs.writeFile(file, JSON.stringify(stale));
-  assert.equal(await endedBadlyNow(file, stale), true, 'still running on disk with its worker gone: dispatched again');
+  assert.equal((await endedBadlyNow(file, stale))?.status, 'running', 'still running on disk with its worker gone: dispatched again');
   await fs.writeFile(file, JSON.stringify({ ...stale, status: 'error' }));
-  assert.equal(await endedBadlyNow(file, { ...stale, status: 'error' }), true, 'a failed attempt is dispatched again');
+  assert.equal((await endedBadlyNow(file, { ...stale, status: 'error' }))?.status, 'error', 'a failed attempt is dispatched again');
+  await fs.writeFile(file, JSON.stringify({ ...stale, status: 'rate-limited', retryAfter: '3:00 AM' }));
+  assert.equal((await endedBadlyNow(file, stale))?.status, 'rate-limited', 'the fresh record is returned, so the usage-limit gate and the report see what it says');
 });

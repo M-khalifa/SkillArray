@@ -42,6 +42,18 @@ A seat or auditor that finished while `--wait` or `audit --finish` was checking 
 paid call), because the worker was checked twice and the second check saw it gone; the result is now read once more
 before anything is dispatched again. Seen in a real-target Codex run on 2026-11-01.
 
+From the real-target review of these changes on 2026-11-01:
+
+- A folder name in its other Unicode form (NFC or NFD) counts as the run folder only when it opens the same folder. On
+  Windows and Linux a sibling folder spelled the other way is no longer matched; macOS keeps both forms.
+- CLI seats and `preflight --exec` now get the review's process-local git settings: `core.fsmonitor=false` and a
+  `safe.directory` you set. No other `GIT_CONFIG_*` entry is passed on, since one could carry credentials.
+- The report's no-transcript warning counts only real usage data (a token count or a model), not an empty entry.
+- The session-folder check stops before the paid probe on any file error; only a refused write suggests the writable root.
+- A seat or auditor about to be dispatched again waits for a usage limit its latest result names, and the report names
+  the status that result really ended with.
+- Known issue: a `git -c core.fsmonitor=true` passed in through `GIT_CONFIG_PARAMETERS` still turns fsmonitor on.
+
 New: `references/worked-example-packet.md`, a filled task packet from a real second-round review with what makes it
 work, and the quick recheck recipe; linked from the packet template.
 

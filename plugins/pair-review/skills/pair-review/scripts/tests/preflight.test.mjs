@@ -1192,6 +1192,7 @@ test('claudeProjectsWritable: a writable projects folder passes and keeps no pro
   assert.deepEqual(await (await import('node:fs/promises')).readdir(ok.dir), [], 'the probe file is removed');
   const denied = Object.assign(new Error('Access is denied'), { code: 'EPERM' });
   const refused = await claudeProjectsWritable(env, { writeFileFn: async () => { throw denied; } });
-  assert.deepEqual(refused, { ok: false, dir: path.join(config, 'projects'), error: 'EPERM' });
-  await assert.rejects(claudeProjectsWritable(env, { writeFileFn: async () => { throw Object.assign(new Error('disk'), { code: 'EIO' }); } }), /disk/, 'another error is not read as a sandbox refusal');
+  assert.deepEqual(refused, { ok: false, dir: path.join(config, 'projects'), error: 'EPERM', refused: true });
+  const other = await claudeProjectsWritable(env, { writeFileFn: async () => { throw Object.assign(new Error('disk'), { code: 'ENOSPC' }); } });
+  assert.deepEqual(other, { ok: false, dir: path.join(config, 'projects'), error: 'ENOSPC', refused: false }, 'another error also stops before the paid probe, but is not read as a sandbox refusal');
 });

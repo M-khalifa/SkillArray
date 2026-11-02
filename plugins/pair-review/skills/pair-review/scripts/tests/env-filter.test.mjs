@@ -98,3 +98,26 @@ test('buildChildEnv: providerAllowlist entries are matched case-insensitively on
   });
   assert.equal(env.codex_home, 'C:\\custom\\.codex');
 });
+
+test('filtered env passes only the fsmonitor and safe.directory git settings, renumbered, never other GIT_CONFIG entries', () => {
+  const sourceEnv = {
+    PATH: '/bin', SECRET: 'x',
+    GIT_CONFIG_COUNT: '3',
+    GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: 'C:/work/target',
+    GIT_CONFIG_KEY_1: 'http.extraHeader', GIT_CONFIG_VALUE_1: 'Authorization: Bearer token',
+    GIT_CONFIG_KEY_2: 'core.fsmonitor', GIT_CONFIG_VALUE_2: 'false',
+  };
+  const env = buildChildEnv({ envMode: 'filtered', platform: 'linux', sourceEnv });
+  assert.deepEqual(env, {
+    PATH: '/bin', GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: 'C:/work/target',
+    GIT_CONFIG_KEY_1: 'core.fsmonitor', GIT_CONFIG_VALUE_1: 'false',
+  });
+  assert.deepEqual(buildChildEnv({ envMode: 'filtered', platform: 'linux', sourceEnv: { PATH: '/bin' } }), { PATH: '/bin' }, 'no git settings, no keys');
+  assert.equal(buildChildEnv({ envMode: 'inherit', sourceEnv }), undefined);
+  const named = ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1', 'GIT_CONFIG_KEY_2', 'GIT_CONFIG_VALUE_2'];
+  const asNamed = buildChildEnv({ envMode: 'filtered', platform: 'linux', sourceEnv, envPassthrough: named });
+  assert.deepEqual(asNamed, { PATH: '/bin', ...Object.fromEntries(named.map((n) => [n, sourceEnv[n]])) }, 'git settings the caller names pass through exactly as given');
+  const huge = buildChildEnv({ envMode: 'filtered', platform: 'linux', sourceEnv: { PATH: '/bin', GIT_CONFIG_COUNT: '1000000000', GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: 'false' } });
+  assert.equal(huge.GIT_CONFIG_COUNT, '1', 'a huge count stops at the first missing entry');
+});

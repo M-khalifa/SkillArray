@@ -1,7 +1,7 @@
 // Path and file-entry helpers that see through symlinks (macOS /tmp -> /private/tmp, a symlinked
 // home or skills folder) and git calls that ignore the user's diff settings.
 import { createHash } from 'node:crypto';
-import { createReadStream, existsSync, promises as fs, readFileSync, realpathSync as jsRealpath, rmSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, promises as fs, readFileSync, realpathSync as jsRealpath, rmSync, statSync, writeFileSync } from 'node:fs';
 
 // The native realpath restores the on-disk case on case-insensitive volumes (macOS APFS, Windows), where the JS
 // implementation keeps the case the caller typed: "myrepo" for a folder on disk called "MyRepo" must equal git's spelling.
@@ -101,12 +101,27 @@ export function linkSpellingOf(abs) {
 
 // The lexical and the real spelling of p, plus on macOS the link spelling of each, without duplicates: a path
 // given in its real /private form is also written as /tmp/... by a shell whose working folder came through the link.
-// Each also in its composed (NFC) and decomposed (NFD) Unicode form: macOS can store a name decomposed while a seat
-// quotes it composed, and both must be found and rewritten as the same folder.
-export function pathSpellingsOf(p, { platform = process.platform, real = realPath } = {}) {
+// Each also in its other Unicode form (composed NFC or decomposed NFD) when that form opens the same folder: macOS can
+// store a name decomposed while a seat quotes it composed. Where the file system keeps the two forms apart, the other
+// form can be a different folder, so it is left out; when either form does not exist yet, macOS keeps it.
+export function pathSpellingsOf(p, { platform = process.platform, real = realPath, sameEntry = sameFileEntry } = {}) {
   const spellings = [path.resolve(p), real(p)];
   if (platform === 'darwin') spellings.push(...spellings.map(linkSpellingOf).filter(Boolean));
-  return [...new Set(spellings.flatMap((s) => [s, s.normalize('NFC'), s.normalize('NFD')]))];
+  const forms = (s) => [s.normalize('NFC'), s.normalize('NFD')].filter((v) => v === s || (sameEntry(s, v) ?? platform === 'darwin'));
+  return [...new Set(spellings.flatMap((s) => [s, ...forms(s)]))];
+}
+
+// Whether a and b open the same file system entry; null when either cannot be read.
+export function sameFileEntry(a, b) {
+  try {
+    const x = statSync(a, { bigint: true });
+    const y = statSync(b, { bigint: true });
+    // Some network and FUSE file systems report inode 0 for every entry: no answer, not "the same".
+    if (x.ino === 0n || y.ino === 0n) return null;
+    return x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    return null;
+  }
 }
 
 // Where the file system ignores letter case (Windows, macOS by default), so two spellings that differ only in case are one path.

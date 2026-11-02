@@ -550,15 +550,22 @@ test('git calls of these scripts turn off fsmonitor through GIT_CONFIG_COUNT on 
   assert.equal(gitConfigNoFsmonitor(env, v('git version 2.52.0')).GIT_CONFIG_COUNT, '2', 'a child that imports this again adds nothing');
 });
 
-test('a run folder stored decomposed (NFD) and quoted composed (NFC), or the other way, is the same folder: both spellings are rewritten', () => {
-  // "Revue" + a combining acute accent: the decomposed form of "Revué".
-  const nfd = path.join(os.tmpdir(), `Revue${String.fromCharCode(0x301)}-run`);
+test('a run folder name in its other Unicode form (NFC or NFD) is the same folder only where the file system makes it one', async (t) => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'unicode-forms-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  // "Revue" + a combining acute accent: the decomposed form of the accented name.
+  const nfd = path.join(base, `Revue${String.fromCharCode(0x301)}-run`);
   const nfc = nfd.normalize('NFC');
   assert.notEqual(nfc, nfd, 'the two forms differ as strings');
-  const spellings = pathSpellingsOf(nfd, { real: (p) => path.resolve(p) });
-  assert.ok(spellings.includes(nfc) && spellings.includes(nfd));
-  for (const quoted of [nfc, nfd]) {
-    const out = scrubDir(`see ${path.join(quoted, 'phase1', 'x.md')}`, nfd);
-    assert.equal(out.count, 1, quoted === nfc ? 'composed quote' : 'decomposed quote');
-  }
+  await fs.mkdir(nfd);
+  // macOS treats the two forms as one name; NTFS and ext4 keep them apart, so the second mkdir makes a sibling folder.
+  const oneName = await fs.mkdir(nfc).then(() => false, (err) => { if (err.code === 'EEXIST') return true; throw err; });
+  assert.equal(pathSpellingsOf(nfd).includes(nfc), oneName, oneName ? 'one folder: both forms' : 'a sibling folder is not this run folder');
+  assert.equal(scrubDir(`see ${path.join(nfc, 'phase1', 'x.md')}`, nfd).count, oneName ? 1 : 0);
+  assert.equal(scrubDir(`see ${path.join(nfd, 'phase1', 'x.md')}`, nfd).count, 1, 'the stored form is always this folder');
+  // A folder that does not exist yet keeps the other form on macOS only.
+  const missing = path.join(base, `Cafe${String.fromCharCode(0x301)}`);
+  assert.ok(pathSpellingsOf(missing, { platform: 'darwin' }).includes(missing.normalize('NFC')));
+  assert.ok(!pathSpellingsOf(missing, { platform: 'linux' }).includes(missing.normalize('NFC')));
+  assert.ok(pathSpellingsOf(nfd, { platform: 'darwin', sameEntry: () => true }).includes(nfc), 'macOS: one entry, both forms');
 });

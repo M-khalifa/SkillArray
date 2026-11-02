@@ -249,8 +249,11 @@ function endedBadly(record) {
 
 // Each liveness check can take seconds on Windows, so a worker can exit between the read and this decision; its final
 // record is on disk by then, so it is read once more before anything is dispatched again.
+// Returns that fresh record when the actor is to be dispatched again, else null.
 export async function endedBadlyNow(file, record) {
-  return endedBadly(record) && endedBadly((await readResultAt(file)) ?? record);
+  if (!endedBadly(record)) return null;
+  const fresh = (await readResultAt(file)) ?? record;
+  return endedBadly(fresh) ? fresh : null;
 }
 
 // A usage limit ends a call cleanly; running the next --wait at once only burns a new session against the same limit.
@@ -606,7 +609,9 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
         }
         neverStarted = await exists(brief);
       }
-      if (await endedBadlyNow(resultFile(desc, phase, role), prior) || neverStarted) {
+      const ended = prior ? await endedBadlyNow(resultFile(desc, phase, role), prior) : null;
+      if (ended) rateLimitGate(`seat ${role}`, ended);
+      if (ended || neverStarted) {
         stopRecordedChild(prior);
         await checkTouched(`seat ${role}`, resultFile(desc, phase, role));
         await assertFingerprint(desc, { report, step: phase });
@@ -616,7 +621,7 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
         if (rewriting) await startSeat(desc, role, phase, rewriteBrief, { resume: true, previousResult: path.join(dispatchDir(desc, phase, role), 'result.before-rewrite.json') });
         else await startSeat(desc, role, phase, brief);
         report.lines.push(prior
-          ? `seat ${role}: previous attempt ended with status ${endedAs(prior)}; dispatched again (the earlier result is kept as an attempt file)`
+          ? `seat ${role}: previous attempt ended with status ${endedAs(ended ?? prior)}; dispatched again (the earlier result is kept as an attempt file)`
           : `seat ${role}: not started by an earlier --start (no result.json); dispatched now`);
       }
       let done;
@@ -1365,7 +1370,9 @@ async function dispatchAuditor(desc, args, report, briefPath, outputExists) {
   const prior = await recheckGone(result, await readResultAt(result));
   rateLimitGate('the auditor', prior);
   if (!prior && outputExists) throw new StepError('auditor output', `the auditor output exists but there is no result.json at ${result}, so the CLI auditor's completion cannot be confirmed; remove the output file to dispatch the auditor again`);
-  const redispatch = !prior || await endedBadlyNow(result, prior);
+  const ended = prior ? await endedBadlyNow(result, prior) : null;
+  if (ended) rateLimitGate('the auditor', ended);
+  const redispatch = !prior || Boolean(ended);
   if (redispatch) {
     stopRecordedChild(prior);
     if (prior) await checkTouched('auditor', result);
@@ -1379,7 +1386,7 @@ async function dispatchAuditor(desc, args, report, briefPath, outputExists) {
       : ['--brief', briefPath, '--cd', desc.targetDir, '--sandbox', 'read-only', '--model', auditor.model, ...effortFlags(auditor), ...envFlags(auditor), ...timeoutFlags(desc),
         '--final-message-out', path.join(auditInputDir(desc), 'findings.audit.json'), '--detach'];
     await runScript('auditor dispatch', dispatcher, argv);
-    report.lines.push(prior ? `auditor: previous attempt ended with status ${endedAs(prior)}; dispatched again (the earlier result is kept as an attempt file)` : `auditor: dispatched (cli ${auditor.runtime})`);
+    report.lines.push(prior ? `auditor: previous attempt ended with status ${endedAs(ended ?? prior)}; dispatched again (the earlier result is kept as an attempt file)` : `auditor: dispatched (cli ${auditor.runtime})`);
   }
   if (redispatch || prior.status === 'running') {
     let waited;

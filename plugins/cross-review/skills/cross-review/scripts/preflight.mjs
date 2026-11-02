@@ -1877,13 +1877,16 @@ export async function claudeProjectsWritable(env = process.env, { mkdirFn = mkdi
     await rmFn(probe, { force: true });
     return { ok: true, dir };
   } catch (err) {
-    if (['EPERM', 'EACCES', 'EROFS'].includes(err.code)) return { ok: false, dir, error: err.code };
-    throw err;
+    // Any error stops before the paid probe; only a refused write is fixed by a writable root.
+    return { ok: false, dir, error: err.code ?? err.message, refused: ['EPERM', 'EACCES', 'EROFS'].includes(err.code) };
   }
 }
 
 async function runClaudeSessionProbe({ cdAbs, runDir }) {
   const writable = await claudeProjectsWritable();
+  if (!writable.ok && !writable.refused) {
+    return { ok: false, detail: `Claude cannot save its session: writing a test file in ${writable.dir} failed (${writable.error}); fix that, then run preflight again; no paid call was made` };
+  }
   if (!writable.ok) {
     return { ok: false, detail: `Claude cannot save its session: ${writable.dir} is not writable here (${writable.error}), so a resume would find nothing. Start Codex with that folder as a writable root (codex -c "sandbox_workspace_write.writable_roots=['${writable.dir}']") and run preflight again; no paid call was made` };
   }

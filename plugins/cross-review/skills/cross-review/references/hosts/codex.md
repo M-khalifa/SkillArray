@@ -93,7 +93,8 @@ $env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'safe.directory'; $env:GIT_
 ```
 
 A Codex session started inside a repository can take ownership of the files it writes there, `.git` included; in an
-admin shell `takeown /F <repository>\.git /R /D Y` gives them back (seen on Windows, 2026-11-01).
+admin shell `takeown /F <repository>\.git /R /D Y` gives them back (seen on Windows, 2026-11-01). The dispatchers pass that
+`safe.directory` and the review's `core.fsmonitor=false` on to CLI seats; no other `GIT_CONFIG_*` entry.
 
 Three more sandbox limits, seen on Windows on 2026-11-01:
 
