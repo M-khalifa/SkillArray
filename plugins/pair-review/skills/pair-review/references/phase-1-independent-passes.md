@@ -212,7 +212,8 @@ asks for one, and then treat an exceeded limit as an incomplete review for that 
 completed one.
 
 `phase1 --start` starts each CLI seat detached (a Claude seat writes only into its own
-`phase1/seat-<role>/` folder; a Codex seat returns its answer as the final message, which is saved
+`phase1/seat-<role>/` folder, except on a Codex host, where it answers in its final message because Claude
+Code refuses its file writes there; a Codex seat returns its answer as the final message, which is saved
 for it) and prints the brief path of each native seat. Spawn each native seat through the transport
 the host file names, with full tools so it keeps web access. `--wait` waits for both, copies each
 file-channel CLI seat's file to `phase1/<role>-findings.md`, compares the two resolved model IDs

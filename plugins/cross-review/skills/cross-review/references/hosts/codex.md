@@ -32,6 +32,14 @@ when it cannot. Seen on Windows on 2026-11-01: with the writable root the probe 
 `codex sandbox`; without it the resume failed. The 2026-10-07 run that kept its session had Codex started in the home
 folder, which made `~/.claude/projects` writable.
 
+Writing files: inside the Codex sandbox, which runs commands under its own Windows account (`CodexSandboxOffline`),
+Claude Code refuses every file write of a Claude CLI actor as "a sensitive file", whatever the allow rules say (seen on
+2026-11-01; the cause inside Claude Code is unconfirmed, and `os.userInfo()` failing there is a likely one). So on a
+Codex host a Claude CLI seat and a Claude CLI auditor answer in their final message, and the dispatcher writes the
+file (`--final-message-out`), as for a Codex CLI seat. The skill never bypasses that permission check. Such a seat
+gets no scratch folder (its brief says to write no file), so a check that needs temp files is run in preflight
+(`--exec`) and cited in the packet instead.
+
 The skill still proves it before a run: `--probe-claude-session` makes two small Claude
 Haiku calls (remember a nonce, then resume the session and recall it; it needs `--yes-paid`), refuses the run
 if the recall fails, and records the result (`support[].probe`) in `run.json`. Without the probe a Claude seat
@@ -130,6 +138,11 @@ Observed on 2026-10-05 to 2026-10-07 (Windows, Codex CLI 0.160.x):
   (model resolved) although `CODEX_SANDBOX_NETWORK_DISABLED=1` was set.
 - Nested Codex CLI seats: `codex` was not found in the sandbox shell, and a second trial failed with
   `failed to initialize in-process app-server client: Access is denied. (os error 5)`.
+- First complete cross-review on a Codex host (2026-11-01, Windows, interactive Codex started with `--sandbox
+  workspace-write --add-dir <home>\.claude\projects`, small target): Claude Haiku as CLI seat A on the final-message
+  channel, `gpt-6.1-sol` as native seat B, a Claude CLI auditor. Both seats found the seeded defect, the exchange ran,
+  and the auditor confirmed it. Seat A's first file was refused by the format check and its one rewrite passed. The
+  manifest leaves out the two paid session-probe calls (it warns); their cost is in `probe-session/*/result.json`.
 - The skill never requests escalation, never sets a wider sandbox itself and never bypasses a permission check.
 
 ## Orchestrator cost

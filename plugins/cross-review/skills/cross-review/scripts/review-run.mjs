@@ -538,7 +538,8 @@ async function startSeat(desc, role, phase, brief, { resume = phase !== 'phase1'
   let argv;
   if (actor.runtime === 'claude') {
     argv = ['--brief', brief, '--cd', desc.targetDir, '--model', actor.model, ...effortFlags(actor), ...envFlags(actor), '--out-dir', seatOutputDir(desc, phase, role),
-      ...sourceFlags(desc), ...(session ? ['--session', session] : []), ...(worktree ? ['--worktree', worktree] : []), ...(web ? ['--web'] : []), ...timeoutFlags(desc), '--detach'];
+      ...sourceFlags(desc), ...(session ? ['--session', session] : []), ...(worktree ? ['--worktree', worktree] : []), ...(web ? ['--web'] : []), ...timeoutFlags(desc),
+      ...(channelFor(actor, desc.host) === 'final-message' ? ['--final-message-out', raw] : []), '--detach'];
   } else if (actor.runtime === 'codex') {
     argv = ['--brief', brief, '--cd', desc.targetDir, ...(session ? ['--session', session, '--previous-result', previous] : ['--sandbox', 'read-only']),
       '--model', actor.model, ...effortFlags(actor), ...envFlags(actor), ...(web ? ['--web'] : []), ...timeoutFlags(desc), '--final-message-out', raw, '--detach'];
@@ -712,7 +713,7 @@ async function phase1Start(desc, args, report) {
   for (const role of SEATS) {
     const actor = desc[`seat${role}`];
     const cli = isCli(actor);
-    const channel = channelFor(actor);
+    const channel = channelFor(actor, desc.host);
     const earlier = cli ? await alreadyStarted(desc, role, 'phase1') : null;
     if (earlier) {
       report.lines.push(`seat ${role}: already started (${earlier}); not started again, --wait handles a failed one`);
@@ -873,11 +874,11 @@ async function checkSeatFormat(desc, report) {
 async function requestRewrite(desc, role, problems, report) {
   const actor = desc[`seat${role}`];
   const canonical = canonicalPath(desc, 'phase1', role);
-  const output = isCli(actor) && channelFor(actor) === 'file' ? privateOutputPath(desc, 'phase1', role) : canonical;
+  const output = isCli(actor) && channelFor(actor, desc.host) === 'file' ? privateOutputPath(desc, 'phase1', role) : canonical;
   const refusedCopy = path.join(path.dirname(canonical), `${role}-findings.refused.md`);
   await fs.rename(canonical, refusedCopy);
   const nl = String.fromCharCode(10);
-  const file = channelFor(actor) === 'file';
+  const file = channelFor(actor, desc.host) === 'file';
   const where = file ? `Write it again to ${output} in one write` : 'Reply with the whole file again as your final message';
   const text = [
     'Your Phase 1 findings file was refused by the review\'s format check:',
@@ -947,7 +948,7 @@ async function phase1Wait(desc, args, report) {
   await assertFingerprint(desc, { report, step: 'phase1' });
   for (const role of SEATS) {
     const actor = desc[`seat${role}`];
-    if (isCli(actor) && channelFor(actor) === 'file') report.lines.push(`seat ${role}: published ${path.basename(canonicalPath(desc, 'phase1', role))} (${await publishOnce(desc, 'phase1', role)})`);
+    if (isCli(actor) && channelFor(actor, desc.host) === 'file') report.lines.push(`seat ${role}: published ${path.basename(canonicalPath(desc, 'phase1', role))} (${await publishOnce(desc, 'phase1', role)})`);
     else await requireFile(`seat ${role} output`, canonicalPath(desc, 'phase1', role), `seat ${role}'s findings`);
   }
   await checkSeatFormat(desc, report);
@@ -1367,7 +1368,8 @@ async function dispatchAuditor(desc, args, report, briefPath, outputExists) {
     if (await exists(leftover)) report.lines.push(`auditor: the failed attempt's output is kept as ${await archiveAuditOutput(path.join(desc.runDir, 'phase3'), leftover)}`);
     const argv = auditor.runtime === 'claude'
       ? ['--brief', briefPath, '--cd', desc.targetDir, '--model', auditor.model, ...effortFlags(auditor), ...envFlags(auditor), '--out-dir', auditInputDir(desc),
-        ...sourceFlags(desc), ...(auditor.worktreePath ? ['--worktree', auditor.worktreePath] : []), ...timeoutFlags(desc), '--detach']
+        ...sourceFlags(desc), ...(auditor.worktreePath ? ['--worktree', auditor.worktreePath] : []), ...timeoutFlags(desc),
+        ...(channelFor(auditor, desc.host) === 'final-message' ? ['--final-message-out', path.join(auditInputDir(desc), 'findings.audit.json')] : []), '--detach']
       : ['--brief', briefPath, '--cd', desc.targetDir, '--sandbox', 'read-only', '--model', auditor.model, ...effortFlags(auditor), ...envFlags(auditor), ...timeoutFlags(desc),
         '--final-message-out', path.join(auditInputDir(desc), 'findings.audit.json'), '--detach'];
     await runScript('auditor dispatch', dispatcher, argv);
@@ -1466,7 +1468,7 @@ async function auditFinish(desc, args, report) {
     const staged = await stageVerification(desc, ai, args, report);
     await fs.mkdir(path.dirname(briefPath), { recursive: true });
     await runScript('auditor brief', 'build-brief.mjs', ['--mode', 'auditor', '--packet', task, '--audit-dir', ai, '--target-dir', desc.targetDir, '--run-dir', desc.runDir, '--out', briefPath,
-      ...(channelFor(desc.auditor) === 'file' ? ['--output-path', audited] : []), '--channel', channelFor(desc.auditor), ...sourceFlags(desc), ...rulesFlags(desc)]);
+      ...(channelFor(desc.auditor, desc.host) === 'file' ? ['--output-path', audited] : []), '--channel', channelFor(desc.auditor, desc.host), ...sourceFlags(desc), ...rulesFlags(desc)]);
     report.lines.push(`auditor brief: built (every claim is re-checked${staged > 0 ? `, ${staged} verification file(s) staged` : ''})`);
   } else if (await exists(path.join(desc.runDir, 'phase3', 'findings.json'))) {
     // A deep verify after the finished audit: its verification files are scanned and staged for the resumed auditor. Only a

@@ -67,8 +67,11 @@ relabel pass gives for a seat with zero rebuttals, so without this run the two c
 `validate` does not check WHICH file a rebuttal heading is appended to: placement is fixed in prose
 (the example above and review-protocol.md: onto the PEER's file), and `relabel` relabels a seat's
 letter wherever the heading appears, so `validate` only rejects a seat naming itself as its own
-rebutter. A refusal here uses the same redaction-round procedure as a `scan` hit. Wait for both
-exchanges before synthesis.
+rebutter. A refusal here uses the same redaction-round procedure as a `scan` hit. For a seat that
+answers in its final message (a Codex CLI seat, or a Claude CLI seat on a Codex host), rename its
+`phase2/<seat>-rebuttals-raw.md` to `<seat>-rebuttals-raw.attempt-<n>.md` before resuming it with the
+correction: the dispatcher refuses to overwrite an answer that exists. Wait for both exchanges before
+synthesis.
 
 ## Blind exchange rules
 

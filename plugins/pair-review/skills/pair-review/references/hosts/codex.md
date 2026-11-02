@@ -125,7 +125,11 @@ a native agent stays addressable by task name (shown once with a probe agent: on
   that kept its session had Codex started in the home folder). With `~/.claude/projects` as a writable root the session
   survives (2026-11-01; `codex -c "sandbox_workspace_write.writable_roots=['<that folder>']"`; allow only `projects`, so
   Claude's settings and login stay out of reach). So a Claude seat is gated on a probe, preflight checks that the folder
-  can be written before the paid probe, and a single-call actor (the auditor) needs none.
+  can be written before the paid probe, and a single-call actor (the auditor) needs none. Inside the sandbox (its own
+  Windows account) Claude Code also refuses every file write of a Claude CLI actor as "a sensitive file" (2026-11-01;
+  cause unconfirmed), so on a Codex host a Claude CLI seat or auditor answers in its final message and the dispatcher
+  writes the file, as for a Codex CLI seat; the skill never bypasses that check. Such a seat gets no scratch
+  folder, so run checks that need temp files in preflight (`--exec`) and cite them in the packet.
 - The skill never requests escalation, never sets a wider sandbox itself and never bypasses a permission check.
 
 ## Orchestrator cost

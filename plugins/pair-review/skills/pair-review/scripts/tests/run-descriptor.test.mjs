@@ -184,6 +184,11 @@ test('channelFor: a Claude actor writes files, a Codex actor, the auditor includ
   assert.throws(() => channelFor({ ...base, role: 'B', runtime: 'opencode' }), /no output channel is defined for runtime "opencode"/);
   assert.equal(channelFor({ ...base, role: 'A', runtime: 'codex', provider: 'openai', transport: 'native' }), 'file', 'a native agent writes its own file whatever its vendor');
   assert.equal(channelFor({ ...base, role: 'auditor', runtime: 'codex', provider: 'openai', transport: 'native' }), 'file');
+  // On a Codex host Claude Code refuses a Claude CLI actor's file writes, so that actor answers in its final message.
+  assert.equal(channelFor({ ...base, role: 'A', runtime: 'claude' }, 'codex'), 'final-message');
+  assert.equal(channelFor({ ...base, role: 'auditor', runtime: 'claude' }, 'codex'), 'final-message');
+  assert.equal(channelFor({ ...base, role: 'A', runtime: 'claude' }, 'claude-code'), 'file');
+  assert.equal(channelFor({ ...base, role: 'B', runtime: 'codex', provider: 'openai', transport: 'native' }, 'codex'), 'file', 'a native agent still writes its own file');
   assert.equal(channelFor({ ...base, role: 'B', runtime: 'codex', provider: 'openai', transport: 'cli' }), 'final-message', 'a CLI Codex actor still returns its final message');
   assert.throws(() => channelFor({ ...base, role: 'B', runtime: 'mystery' }), RunDescriptorError);
 });

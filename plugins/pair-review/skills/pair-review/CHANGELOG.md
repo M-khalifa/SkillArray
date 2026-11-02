@@ -31,6 +31,12 @@ cross-review on a Codex host: the cause of the lost Claude session is found. Cla
 now checks that folder before the paid probe and names the setting when it cannot write there. The Codex host files and
 the README say so.
 
+cross-review on a Codex host, part two: inside the Codex sandbox Claude Code refused every file write of a Claude CLI
+seat as "a sensitive file", so seat A could not save its findings (seen 2026-11-01; the cause inside Claude Code is
+unconfirmed). A Claude CLI seat or auditor on a Codex host now answers in its final message and the dispatcher writes
+the file, as a Codex CLI seat already does. No permission check is bypassed. Such a seat has no scratch folder. A
+Codex-host run started before this change cannot be finished: start it again in a new run folder.
+
 New: `references/worked-example-packet.md`, a filled task packet from a real second-round review with what makes it
 work, and the quick recheck recipe; linked from the packet template.
 
