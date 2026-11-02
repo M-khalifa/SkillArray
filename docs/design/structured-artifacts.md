@@ -4,7 +4,7 @@ Status: design only. No code in this document has been built. Do not build
 it without a separate, explicit approval — this is Phase D of the
 production-readiness pass, kept design-only per that pass's own scope split.
 
-Checked against the code on 2026-11-01 (1.2.0 plus the Unreleased changes): the function line numbers below are
+Checked against the code on 2026-11-01 (1.2.0 with its 2026-11-02 update): the function line numbers below are
 updated, and two gaps are added: the seat file format now has more structure than the schemas below carry (see
 "What the seat file holds today"), and eight scripts, not only `blind-relabel.mjs`, read that Markdown (see "Other
 scripts that read the seat Markdown").

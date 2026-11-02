@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 - 2026-10-28
+
+Update of 2026-11-02, same version number (a plugin installed before it is not updated automatically; reinstall it to
+get these fixes).
 
 Fixes for four of the 1.2.0 Known issues:
 
@@ -57,7 +60,7 @@ From the real-target review of these changes on 2026-11-01:
 New: `references/worked-example-packet.md`, a filled task packet from a real second-round review with what makes it
 work, and the quick recheck recipe; linked from the packet template.
 
-## 1.2.0 - 2026-10-28
+1.2.0 as first published on 2026-11-01:
 
 Fixes from field runs on real collectors, from self-reviews on Windows, macOS and Linux, and from five rounds of the skills
 reviewing their own code.
