@@ -1,0 +1,34 @@
+name: Bug
+description: A script failed, refused something it should accept, or printed something wrong.
+labels: [bug]
+body:
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran.
+      placeholder: node review-run.mjs phase1 --run-dir ... --wait
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What it printed
+      description: The FAILED, WARNING or next line, copied as printed. Remove paths or names you can't share.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, host (Claude Code or Codex), skill and version (the first lines of the skill's CHANGELOG.md), seats (runtime, model, effort).
+      placeholder: Windows 11, Claude Code, cross-review 1.2.0, seat A claude CLI opus, seat B codex gpt-6.1-sol high
+    validations:
+      required: true
