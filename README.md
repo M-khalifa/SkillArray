@@ -9,9 +9,13 @@
   <img alt="hosts: Claude Code and Codex" src="https://img.shields.io/badge/hosts-Claude%20Code%20%7C%20Codex-0d7c86">
 </p>
 
-Claude Code and Codex skills that review your code, design documents or other documents with two AI models instead of one.
-Each model reviews on its own. Then each one sees the other's findings, with names removed, and has to accept them or prove
-them wrong with evidence. A fresh session that never saw who wrote what makes the final call.
+**One AI reviewer misses things and sounds sure anyway. Two reviewers that check each other catch them.** In 160 reviews
+of my own work, the final check confirmed 2,135 findings: a Claude reviewer alone would have missed 28% of them, an OpenAI
+reviewer alone 43%.
+
+SkillArray is two Claude Code and Codex skills that review your code, design documents or other documents with two AI
+models instead of one. Each model reviews on its own. Then each one sees the other's findings, with names removed, and has
+to accept them or prove them wrong with evidence. A fresh session that never saw who wrote what makes the final call.
 
 ## Why I built it
 
@@ -19,9 +23,8 @@ I use Claude Code for most of my work: code, design documents, websites. I start
 reviews were useful, but one model reviewing a change tends to agree with itself, and it states a guess with the same
 confidence as something it actually checked.
 
-So I set up two reviewers and made them check each other. In 160 cross-reviews of my own work, with a Claude reviewer and
-an OpenAI reviewer, the final check confirmed 2,135 findings. Claude alone would have missed 28% of them; OpenAI alone
-would have missed 43%.
+So I set up two reviewers and made them check each other. The figures at the top come from 160 of those cross-reviews,
+each with a Claude reviewer and an OpenAI reviewer.
 
 ## Two skills
 
@@ -35,10 +38,10 @@ vendor can share a blind spot.
 
 ## Quick start (Claude Code)
 
-You need Node.js 22 or newer. `cross-review` also needs the [Codex CLI](https://github.com/openai/codex), installed and
-signed in.
+You need Node.js 22 or newer. The fastest way to try it is `pair-review`: it needs nothing but Claude Code. `cross-review`
+also needs the [Codex CLI](https://github.com/openai/codex), installed and signed in.
 
-1. Add the marketplace and install one skill or both:
+1. Add the marketplace and install `pair-review`, and `cross-review` if you have Codex:
 
    ```text
    /plugin marketplace add M-khalifa/SkillArray
@@ -93,6 +96,19 @@ A packet path like "<run-dir> 2\..\run\..." passed the run-directory guard,
 so the auditor could have been pointed at files it must not read.
 Fix: refuse any run-directory name followed by a space.
 ```
+
+## Compared with similar tools
+
+Other open-source tools also put a second model on Claude's work, for example
+[agent-peer-review](https://github.com/jcputney/agent-peer-review) (a Claude Code plugin in which Codex checks Claude's
+work) and [multi_mcp](https://github.com/religa/multi_mcp) (an MCP server for multi-model chat, code review and analysis).
+What SkillArray does, whichever you pick:
+
+- Both reviewers work alone first, on the same frozen snapshot, so neither copies the other.
+- The cross-examination is blind: each reviewer sees the other's findings without model names.
+- A reviewer can only reject a finding with evidence: a command and its output, or the exact lines.
+- A fresh auditor re-checks every finding, including the ones both reviewers agreed on.
+- Two models of one vendor (`pair-review`) or two vendors (`cross-review`), with the same report and `findings.json`.
 
 ## How it has been used so far
 
