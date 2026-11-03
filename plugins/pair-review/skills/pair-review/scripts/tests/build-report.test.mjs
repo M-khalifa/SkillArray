@@ -191,6 +191,21 @@ test('buildReport: a Claude CLI seat adds the read-only statement, a native one 
   assert.equal(buildReport({ ...base, manifest: MANIFEST }).caveats.length, 0);
 });
 
+test('buildReport: refused tool calls of a seat or the auditor are named with their tools; none adds no line', () => {
+  const base = { findingsDoc: { findings: [] } };
+  const reviewers = [{ role: 'A', permission_denials: { count: 3, tools: { Bash: 1, Read: 2 } } }, { role: 'B' }];
+  const actors = [{ role: 'auditor', permission_denials: { count: 1, tools: { Read: 1 } } }, { role: 'verifier-2', permission_denials: { count: 2, tools: { Grep: 2 } } }];
+  const lines = buildReport({ ...base, manifest: { ...MANIFEST, reviewers, actors } }).caveats.filter((c) => /refused/.test(c));
+  assert.deepEqual(lines, [
+    'Seat A: Claude Code refused 3 tool calls (Read 2, Bash 1); it may have reviewed with less than it asked for. See permissionDenials in its result.json.',
+    'The auditor: Claude Code refused 1 tool call (Read 1); it may have reviewed with less than it asked for. See permissionDenials in its result.json.',
+    'Verifier 2: Claude Code refused 2 tool calls (Grep 2); it may have reviewed with less than it asked for. See permissionDenials in its result.json.',
+  ]);
+  const zero = [{ role: 'A', permission_denials: { count: 0, tools: {} } }];
+  assert.equal(buildReport({ ...base, manifest: { ...MANIFEST, reviewers: zero } }).caveats.filter((c) => /refused/.test(c)).length, 0);
+  assert.equal(buildReport({ ...base, manifest: MANIFEST }).caveats.length, 0, 'no field, no line');
+});
+
 test('buildReport: a native seat with no transcript says its model and usage are not recorded, and names the flag', () => {
   const base = { findingsDoc: { findings: [] } };
   const support = [{ role: 'A', runtime: 'codex', transport: 'native', status: 'supported' }, { role: 'auditor', runtime: 'codex', transport: 'native', status: 'supported' }];

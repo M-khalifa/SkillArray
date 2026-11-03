@@ -516,6 +516,18 @@ async function fillReviewers(manifest, reviewerResults, warnings = [], collectio
       entry.child_threads = children;
       warnings.push(`${collection}[${role}]: the seat spawned ${children.length} agent thread(s) whose tokens are not in usage; see child_threads`);
     }
+    // Tool calls Claude Code refused this actor (its result's permission_denials), over all its calls, per tool name.
+    // Recorded only when there was at least one, so a run without any keeps its manifest as before.
+    const denials = results.flatMap((r) => (Array.isArray(r.permissionDenials) ? r.permissionDenials : []));
+    if (denials.length > 0 && isUnset(entry, 'permission_denials')) {
+      // Counted in a Map: a tool name such as "constructor" or "__proto__" stays a plain key.
+      const tools = new Map();
+      for (const d of denials) {
+        const name = typeof d?.tool_name === 'string' && d.tool_name ? d.tool_name : 'unknown';
+        tools.set(name, (tools.get(name) ?? 0) + 1);
+      }
+      entry.permission_denials = { count: denials.length, tools: Object.fromEntries(tools) };
+    }
     if (isUnset(entry, 'commands')) {
       const commands = await resultCommands(results);
       if (commands) entry.commands = commands;

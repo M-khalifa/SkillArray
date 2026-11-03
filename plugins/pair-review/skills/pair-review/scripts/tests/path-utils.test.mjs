@@ -569,3 +569,20 @@ test('a run folder name in its other Unicode form (NFC or NFD) is the same folde
   assert.ok(!pathSpellingsOf(missing, { platform: 'linux' }).includes(missing.normalize('NFC')));
   assert.ok(pathSpellingsOf(nfd, { platform: 'darwin', sameEntry: () => true }).includes(nfc), 'macOS: one entry, both forms');
 });
+
+test('macOS compares the composed and decomposed forms of a path as one, also for a part that does not exist yet; other systems keep them apart', async (t) => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'unicode-compare-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  // Not created: realPath appends a missing part exactly as written, so only the comparison can make the forms one.
+  const nfd = path.join(base, `Re${String.fromCharCode(0x301)}sume${String.fromCharCode(0x301)}-run`);
+  const nfc = nfd.normalize('NFC');
+  assert.notEqual(nfc, nfd);
+  assert.equal(comparablePath(nfd, { platform: 'darwin' }), comparablePath(nfc, { platform: 'darwin' }), 'macOS: one name');
+  assert.ok(isInsidePath(path.join(nfd, 'phase1', 'A.md'), nfc, { platform: 'darwin' }), 'macOS: inside the other spelling');
+  assert.notEqual(comparablePath(nfd, { platform: 'linux' }), comparablePath(nfc, { platform: 'linux' }), 'Linux: two names');
+  assert.ok(!isInsidePath(path.join(nfd, 'x'), nfc, { platform: 'linux' }), 'Linux: a sibling, not inside');
+  // A mount that keeps both forms as two folders (both exist, different entries): macOS keeps them apart too.
+  const apart = { platform: 'darwin', sameEntry: () => false };
+  assert.notEqual(comparablePath(nfd, apart), comparablePath(nfc, apart), 'two entries: two names');
+  assert.ok(!isInsidePath(path.join(nfd, 'x'), nfc, apart));
+});

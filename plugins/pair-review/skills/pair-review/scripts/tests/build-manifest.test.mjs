@@ -504,6 +504,33 @@ test('--reviewer-result: agent threads a Codex seat spawned reach the manifest a
   assert.ok(!('child_threads' in clean.reviewers[0]));
   assert.equal(clean.warnings.length, 0);
 });
+test('--reviewer-result: tool calls Claude Code refused a seat are summed over its calls per tool as permission_denials; none or null leaves the field out', async (t) => {
+  const dir = await tmpDir(t);
+  const inPath = path.join(dir, 'm.json');
+  await fs.writeFile(inPath, JSON.stringify({ reviewers: [{ role: 'A', provider: 'anthropic' }] }));
+  const base = { in: inPath, out: path.join(dir, 'o.json'), taskPacket: null, phase1: [], phase2: [], verification: [], findings: null, seatUsage: {} };
+  const common = { modelRequested: 'opus', modelResolved: 'claude-opus', effortRequested: null, effortResolved: null, isolated: true, worktreePath: null, status: 'completed', sessionId: 's', durationMs: 5, usage: { input_tokens: 1 } };
+  const denied = (tool) => ({ tool_name: tool, tool_use_id: 't', tool_input: {} });
+  const p1 = path.join(dir, 'p1.json');
+  const p2 = path.join(dir, 'p2.json');
+  const p3 = path.join(dir, 'p3.json');
+  await fs.writeFile(p1, JSON.stringify({ ...common, permissionDenials: [denied('Read'), denied('Bash')] }));
+  await fs.writeFile(p2, JSON.stringify({ ...common, permissionDenials: [denied('Read'), {}] }));
+  await fs.writeFile(p3, JSON.stringify({ ...common, permissionDenials: [] }));
+  const out = await run({ ...base, reviewerResults: { A: [p1, p2] } });
+  assert.deepEqual(out.reviewers[0].permission_denials, { count: 4, tools: { Read: 2, Bash: 1, unknown: 1 } });
+  const none = await run({ ...base, reviewerResults: { A: [p3] } });
+  assert.ok(!('permission_denials' in none.reviewers[0]), 'an empty list adds nothing');
+  await fs.writeFile(p3, JSON.stringify({ ...common, permissionDenials: null }));
+  assert.ok(!('permission_denials' in (await run({ ...base, reviewerResults: { A: [p3] } })).reviewers[0]), 'null (a Codex result) adds nothing');
+  // An actor (a verifier) is counted too, and a tool name like __proto__ or constructor stays a plain key.
+  const v = path.join(dir, 'v.json');
+  await fs.writeFile(v, JSON.stringify({ ...common, permissionDenials: [denied('__proto__'), denied('constructor'), denied('constructor')] }));
+  const withActor = await run({ ...base, reviewerResults: { A: [p3], 'verifier-1': [v] } });
+  const actor = withActor.actors.find((a) => a.role === 'verifier-1');
+  assert.equal(actor.permission_denials.count, 3);
+  assert.deepEqual(Object.entries(actor.permission_denials.tools), [['__proto__', 1], ['constructor', 2]]);
+});
 
 test('--seat-transcript: the wait after a SubagentHandback, or after end_turn followed by harness bookkeeping entries, is not working time', async (t) => {
   const dir = await tmpDir(t);

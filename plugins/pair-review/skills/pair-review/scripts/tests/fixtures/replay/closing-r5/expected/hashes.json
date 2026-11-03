@@ -6,8 +6,8 @@
   "step translate": "d7d2d3433541f074af5a08ae8ffa70a08baebb5d73a0204460e6e9f52b305516",
   "step scorecard": "09fe016f18427dfd50dc85c710bbf1c410ca82e821d6cd5415e81ee98c291d64",
   "step manifest": "85aef72793000a34b5aefd97a0e592975e0e439175fc2a9f981a21f75edde833",
-  "step report chat": "085a6c2d4acc4ce80c7497274c6de9e286e26952fb7930016be1525c16cdc907",
-  "step report chat all": "1c0102b59416092383b68c4327a8e507fb0aeb21ce8665f92d4b6dbc20e15214",
+  "step report chat": "ca0f3fb301dac15f66746a5dc3b71274408f75317ea2bd4ce5a2d99535e024fb",
+  "step report chat all": "232a196ebf72b767a3433f94d779ab1876d0a228e88c9026de43ed17b24de5fe",
   "phase1/A-findings.md": "1c350b656e37c9034bb264d4e4af71be59dd47625af3d1ecd60ebdb4f918ddcf",
   "phase2/peer-view-for-A.md": "eae116875a47f4154784d08df785cf1efe8241a29dd1c34ae873606fd3ab0409",
   "phase1/B-findings.md": "0cc7dbdcb1594d8072ac22fe723f1d93719c44c13cf9342f8df23e6e49c30618",
@@ -18,6 +18,6 @@
   "phase3/falsification-breakdown.json": "69e8a1df7594fe365e8a7aa11a62ef22fdd4f74af5e2846483790d56359b03aa",
   "phase3/findings.json": "91ed60fa4344297a55dd4dd425dba70218a854daf85bb32f629b842a38a638b4",
   "phase3/scorecard.md": "bc794b5f2d72955aaac240f0834f67b465765636ce2ac2c163017af28ea820b9",
-  "manifest.json": "3a314fdfdae817121eef2f15ca19729c55a2241989aa1f31d83e875a082827be",
-  "report.md": "ae438ca7841db2371c714a018907b3402a4920d126769043d945d67aa3ffa871"
+  "manifest.json": "cc4b408f212cbdbb12b9b68a75b0b16366903fc1febd7d451e988f6194806499",
+  "report.md": "065d1d3e5da24e03cf81474711440080e97ddc80b845a8189000e455d91db55d"
 }
