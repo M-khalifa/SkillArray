@@ -73,6 +73,8 @@ To update: run `/plugin marketplace update skillarray`, then `/plugin update pai
 `/plugin update cross-review@skillarray`. While two builds carry the same version number, the updater may not see a change;
 then uninstall and install again.
 
+If it catches something for you, a star on this repository helps others find it.
+
 ## How a review works
 
 <p align="center">
