@@ -787,6 +787,14 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   for (const row of unrecorded) {
     caveats.push(`Seat ${row.role} ran as a native agent with no transcript, so its model and token use are not recorded: rerun review-run manifest with --seat-transcript ${row.role}=<its transcript or rollout>.`);
   }
+  for (const row of [...(m.reviewers ?? []), ...(m.actors ?? [])]) {
+    const d = row?.permission_denials;
+    if (!d || !(d.count > 0)) continue;
+    const tools = Object.entries(d.tools ?? {}).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t} ${n}`).join(', ');
+    const role = String(row.role);
+    const who = /^[A-Z]$/.test(role) ? `Seat ${role}` : /^verifier-/.test(role) ? `Verifier ${role.slice('verifier-'.length)}` : `The ${role}`;
+    caveats.push(`${who}: Claude Code refused ${d.count} tool call${d.count === 1 ? '' : 's'}${tools ? ` (${tools})` : ''}; it may have reviewed with less than it asked for. See permissionDenials in its result.json.`);
+  }
   if ((m.reviewers ?? []).some((r) => r.provider === 'anthropic' && r.transport === 'cli')) {
     caveats.push('Claude CLI seats: file tools are enforced (fileTools: enforced) and the shell is prompt-only (shell: prompt-only), so a shell can still read peer files and write by absolute path; touchedFiles in each result.json is the check.');
   }

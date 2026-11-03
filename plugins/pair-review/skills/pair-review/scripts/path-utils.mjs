@@ -81,14 +81,21 @@ export function realPath(p) {
 }
 
 // The form two paths are compared in: real path, case-folded on Windows and where the run's folder was found to fold case.
-export function comparablePath(p) {
-  const real = realPath(p);
-  return process.platform === 'win32' || runFoldsCase === true ? real.toLowerCase() : real;
+// macOS file systems (APFS, HFS+) treat the composed (NFC) and decomposed (NFD) forms of a name as one name, so there it
+// is also NFC, as is a part of the path that does not exist yet (kept in the form it was written in). A mount that keeps
+// the two forms as two entries (some NFS, SMB or FUSE shares) keeps the path as it is.
+export function comparablePath(p, { platform = process.platform, sameEntry = sameFileEntry } = {}) {
+  let real = realPath(p);
+  if (platform === 'darwin') {
+    const nfc = real.normalize('NFC');
+    if (nfc !== real && sameEntry(real, nfc) !== false) real = nfc;
+  }
+  return platform === 'win32' || runFoldsCase === true ? real.toLowerCase() : real;
 }
 
-export function isInsidePath(child, parent) {
-  const c = comparablePath(child);
-  const p = comparablePath(parent);
+export function isInsidePath(child, parent, { platform = process.platform, sameEntry = sameFileEntry } = {}) {
+  const c = comparablePath(child, { platform, sameEntry });
+  const p = comparablePath(parent, { platform, sameEntry });
   return c === p || c.startsWith(p.endsWith(path.sep) ? p : p + path.sep);
 }
 

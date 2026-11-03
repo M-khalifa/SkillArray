@@ -969,10 +969,11 @@ async function watchUpstreamChanges(records, watchFiles) {
   for (const file of watchFiles) {
     const abs = path.resolve(file);
     // Compared through the real path (/tmp and /private/tmp, a linked checkout are one folder); the path given to git
-    // keeps its case, which comparablePath folds on Windows.
+    // keeps its case, which comparablePath folds on Windows. On macOS both sides are NFC, as isInsidePath compares them.
+    const sameForm = (p) => (process.platform === 'darwin' ? realPath(p).normalize('NFC') : realPath(p));
     const owner = records
       .filter((r) => r.gitRepo && r.head && isInsidePath(abs, r.path) && comparablePath(abs) !== comparablePath(r.path))
-      .map((r) => ({ r, rel: path.relative(realPath(r.path), realPath(abs)) }))
+      .map((r) => ({ r, rel: path.relative(sameForm(r.path), sameForm(abs)) }))
       .sort((a, b) => b.r.path.length - a.r.path.length)[0];
     if (!owner) {
       outside.push(abs);

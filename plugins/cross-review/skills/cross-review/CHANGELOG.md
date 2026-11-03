@@ -12,7 +12,7 @@ Fixes for four of the 1.2.0 Known issues:
 - `preflight --exec` in the default filtered environment now passes the proxy and CA variables, as the dispatchers do.
 - After a "No findings" seat with a `Blocked:` line, the `next:` line now says to start a new run, as the message does.
 - A run folder stored with a decomposed (NFD) name and quoted composed (NFC), or the other way, is found and
-  rewritten as the same folder. Not yet verified on a Mac.
+  rewritten as the same folder. Checked against how macOS file systems treat the two forms, but not yet run on a Mac.
 
 Also: installing through the Codex plugin marketplace is tested (Codex CLI 0.165.0, Windows: both plugins install
 and Codex lists both skills); the README shows the three commands.
@@ -59,6 +59,12 @@ From the real-target review of these changes on 2026-11-01:
 
 New: `references/worked-example-packet.md`, a filled task packet from a real second-round review with what makes it
 work, and the quick recheck recipe; linked from the packet template.
+
+- On macOS, path checks (such as "the run folder is inside the target") compare the composed and decomposed forms of a
+  name as one, also for a folder that does not exist yet; APFS and HFS+ treat them as one name. Windows and Linux are
+  unchanged.
+- Tool calls Claude Code refused a seat, the auditor or a verifier are recorded in the manifest as `permission_denials`
+  (count and tools), and the report names them, since such a reviewer may have worked with less than it asked for.
 
 1.2.0 as first published on 2026-11-01:
 
