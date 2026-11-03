@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="version 1.2.0" src="https://img.shields.io/badge/version-1.2.0-0d7c86">
+  <img alt="version 1.2.1" src="https://img.shields.io/badge/version-1.2.1-0d7c86">
   <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-0d7c86">
   <img alt="Node.js 22+" src="https://img.shields.io/badge/node-22%2B-0d7c86">
   <img alt="hosts: Claude Code and Codex" src="https://img.shields.io/badge/hosts-Claude%20Code%20%7C%20Codex-0d7c86">

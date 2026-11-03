@@ -1,9 +1,12 @@
 # Changelog
 
-## 1.2.0 - 2026-10-28
+## 1.2.1 - 2026-11-03
 
-Update of 2026-11-02, same version number (a plugin installed before it is not updated automatically; reinstall it to
-get these fixes).
+The fixes added to the 1.2.0 tag between 2026-11-01 and 2026-11-03, under a new version number so `/plugin update`
+brings them to an installed 1.2.0, and:
+
+- Typing `/pair-review` or `/cross-review` in Claude Code shows the arguments it takes (setup, config, reset, and
+  pair-review's modes), and a first run says it is picking models before it asks.
 
 Fixes for four of the 1.2.0 Known issues:
 
@@ -66,7 +69,7 @@ work, and the quick recheck recipe; linked from the packet template.
 - Tool calls Claude Code refused a seat, the auditor or a verifier are recorded in the manifest as `permission_denials`
   (count and tools), and the report names them, since such a reviewer may have worked with less than it asked for.
 
-1.2.0 as first published on 2026-11-01:
+## 1.2.0 - 2026-10-28
 
 Fixes from field runs on real collectors, from self-reviews on Windows, macOS and Linux, and from five rounds of the skills
 reviewing their own code.

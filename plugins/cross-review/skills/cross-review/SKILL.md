@@ -5,13 +5,14 @@ description: >-
   cross-examines their findings. Supports Claude/Fable and OpenAI Codex,
   with first-run model setup, saved preferences, and changing models anytime.
   Use for cross-vendor review, Claude plus Codex review, or /cross-review.
+argument-hint: "[setup | config | reset] -- <what to review>"
 license: MIT
 compatibility: >-
   Requires Node.js 22+, a selected reviewer runtime, and a harness that can run
   an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.2.0
+  version: 1.2.1
 ---
 
 # Cross Review

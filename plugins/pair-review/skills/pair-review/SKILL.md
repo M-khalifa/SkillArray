@@ -6,6 +6,7 @@ description: >-
   Supports collaborative, adversarial, and independent passes, first-run
   model setup, saved preferences, and changing models anytime.
   Use for pair review, two Claude or two OpenAI reviewers, or /pair-review.
+argument-hint: "[setup | config | reset | collaborate | adversarial | none] -- <what to review>"
 license: MIT
 compatibility: >-
   Requires Node.js 22+ and a harness that can run two isolated reviewers of
@@ -13,7 +14,7 @@ compatibility: >-
   Claude seats need the Claude CLI or Claude Code agents, OpenAI seats need the
   Codex CLI. Claude Code is the primary target. Model access depends on the user's account.
 metadata:
-  version: 1.2.0
+  version: 1.2.1
 ---
 
 # Pair Review

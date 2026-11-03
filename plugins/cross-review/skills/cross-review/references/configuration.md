@@ -15,7 +15,8 @@ account entitlements or dispatch a paid model call.
 ## First run and changes
 
 1. Resolve `<skill-dir>` to the directory containing the loaded SKILL.md.
-   Run `node "<skill-dir>/scripts/review-config.mjs" show`.
+   Run `node "<skill-dir>/scripts/review-config.mjs" show`. When it finds no saved file, start your reply with
+   "First time: let's pick your two models." and continue with step 2.
 2. For cross-review, run `catalog`. Ask for both reviewer providers, runtimes,
    models, and optional effort. For pair-review, ask for the vendor
    (Anthropic/Claude or OpenAI/Codex), two distinct models of that vendor and optional effort. Present the curated choices the
