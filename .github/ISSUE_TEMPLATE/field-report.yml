@@ -1,0 +1,32 @@
+name: Field report
+description: How a real review run went, good or bad. Short notes are fine.
+labels: [field-report]
+body:
+  - type: input
+    id: setup
+    attributes:
+      label: Setup
+      description: OS, host, skill and version, seats (runtime, model, effort), and what you reviewed (code, a design, a document; its size).
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: The report's first lines (findings per severity, how many the auditor confirmed). Were the findings real? Any false alarms?
+    validations:
+      required: true
+  - type: textarea
+    id: problems
+    attributes:
+      label: What went wrong or was hard
+      description: One item per line, with the exact command and the line it printed. Steps you had to do by hand count too.
+  - type: textarea
+    id: wishes
+    attributes:
+      label: What you wished it did
+  - type: input
+    id: time
+    attributes:
+      label: Time and cost
+      description: How long each phase took, and any usage limit you hit.
