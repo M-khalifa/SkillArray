@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { run, parseArgs, validateArmResult, RunComparisonError, KNOWN_ARMS } from '../run-comparison.mjs';
+import { run, parseArgs, validateArmResult, RunComparisonError, KNOWN_ARMS, aggregateArms } from '../run-comparison.mjs';
 import { makeFakeAdapter } from '../adapters/fake.mjs';
 
 const CASE_DIR = fileURLToPath(new URL('../cases/fixture-trivial-defect', import.meta.url));
@@ -208,4 +208,45 @@ test('makeFakeAdapter: throws a clear error for an arm with no script entry, rat
     () => runArm({ arm: 'codex-alone', caseDir: CASE_DIR, packet: {}, runDir: '/tmp/x', config: {}, trialIndex: 0 }),
     /no script entry for arm "codex-alone"/
   );
+});
+
+test('aggregateArms: score mean and spread over completed runs, p50/p95 wall time over all runs, new tokens when metered', () => {
+  const arm = (status, recall, ms, usage = { source: 'unavailable' }) => ({ arm: 'skillarray', status, score: status === 'completed' ? { recall, precision: 1, f1: recall } : null, duration_ms: ms, usage });
+  const trials = [
+    { trial: 1, arms: [arm('completed', 0.5, 1000, { source: 'provider', input_tokens: 10, cache_creation_input_tokens: 5, output_tokens: 5 })] },
+    { trial: 2, arms: [arm('completed', 1, 3000, { source: 'provider', input_tokens: 30, output_tokens: 10 })] },
+    { trial: 3, arms: [arm('failed', null, 2000)] },
+  ];
+  const a = aggregateArms(trials).skillarray;
+  assert.equal(a.runs, 3);
+  assert.equal(a.completed, 2);
+  assert.equal(a.recall.mean, 0.75);
+  assert.equal(Number(a.recall.stddev.toFixed(4)), 0.3536);
+  assert.deepEqual(a.duration_ms, { p50: 2000, p95: 3000 });
+  assert.deepEqual(a.new_tokens, { mean: 30, stddev: Number(a.new_tokens.stddev), n: 2, metered_runs: 2 });
+  assert.equal(Number(a.new_tokens.stddev.toFixed(4)), 14.1421);
+  const one = aggregateArms([{ trial: 1, arms: [arm('timed_out', null, 5)] }]).skillarray;
+  assert.deepEqual([one.recall.mean, one.recall.stddev, one.new_tokens.metered_runs], [null, null, 0]);
+});
+
+test('aggregateArms: new tokens of a cache-inclusive (Codex) record are input minus cached input plus output', () => {
+  const one = (usage) => aggregateArms([{ trial: 1, arms: [{ arm: 'codex-alone', status: 'completed', score: { recall: 1, precision: 1, f1: 1 }, duration_ms: 1, usage }] }])['codex-alone'].new_tokens;
+  assert.equal(one({ source: 'provider', input_tokens: 100, cached_input_tokens: 80, output_tokens: 10 }).mean, 30);
+  assert.equal(one({ source: 'provider', input_tokens: 100000, cached_input_tokens: 90000, cache_write_input_tokens: 0, output_tokens: 2000 }).mean, 12000);
+  assert.deepEqual(one({ source: 'provider', input_tokens: 10, cached_input_tokens: 80, output_tokens: 10 }), { mean: null, stddev: null, n: 0, metered_runs: 0 }, 'more cached than input is not this shape');
+});
+
+test('aggregateArms: new tokens of a separate-cache (Claude) record are input plus the cache write plus output; the cache read is not counted', () => {
+  const one = (usage) => aggregateArms([{ trial: 1, arms: [{ arm: 'claude-alone', status: 'completed', score: { recall: 1, precision: 1, f1: 1 }, duration_ms: 1, usage }] }])['claude-alone'].new_tokens.mean;
+  assert.equal(one({ source: 'provider', input_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 900, output_tokens: 5 }), 20);
+  assert.equal(one({ source: 'provider', input_tokens: 10, cache_creation_input_tokens: null, cache_read_input_tokens: 900, output_tokens: 5 }), 15);
+  assert.equal(one({ source: 'provider', input_tokens: 10, cache_write_input_tokens: 7, output_tokens: 5 }), 22);
+});
+
+test('run(): the summary carries a per-arm aggregate and each arm run its wall time', async (t) => {
+  const out = await withTmpOut(t);
+  const summary = await run({ case: CASE_DIR, out, adapter: 'fake', arms: ['claude-alone'], trials: 2 }, { runArm: makeFakeAdapter({ 'claude-alone': COMPLETED_EMPTY }) });
+  assert.ok(Number.isFinite(summary.trials[0].arms[0].duration_ms));
+  assert.equal(summary.aggregate['claude-alone'].runs, 2);
+  assert.equal(summary.aggregate['claude-alone'].completed, 2);
 });

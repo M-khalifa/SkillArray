@@ -6,8 +6,8 @@
   "step translate": "c89549d949ee10ca830abb1c15da5438c02d8c438f07ce52160ca5492f225bec",
   "step scorecard": "3a36b12c178108e8d21b988533ae85b2717fec2786424d0500bfcfbd4e3b86ac",
   "step manifest": "85aef72793000a34b5aefd97a0e592975e0e439175fc2a9f981a21f75edde833",
-  "step report chat": "d58b132853231023288838c0f9d27bb2bef99b5df6fa02abf3a348b21c0918ae",
-  "step report chat all": "593a46b0f6e837f6ec6c04c82a9059d3561720455fd35a9bb655889e266991c1",
+  "step report chat": "432cabdc05a282d199eee3ddfb5189042188bb5d81bdac4640f588dd71c1e6f1",
+  "step report chat all": "e29399a34d7ba7d0ca4f9906271303ef9c31150466a9cd81d7e8c5d2d1d05b11",
   "phase1/A-findings.md": "1707baf810673f1e2ec7c9352bb24cc959f73ac626523b31ec67b68effd1f0da",
   "phase2/peer-view-for-A.md": "09e69dd334fb2ba7b9d81e54ce49390cb88212c37d18cd51da2c27ffcc9c6d65",
   "phase1/B-findings.md": "63cc37038b0fab0c9f8ffdd1e143c06a6fcaea5a6a1b36f98cfae74f891eb1fb",
@@ -19,5 +19,5 @@
   "phase3/findings.json": "9843779a3a5a3acad86899de0a115f2216e22d775f37af130d78f6fd2ff744ac",
   "phase3/scorecard.md": "ccbc9beae0a5c4efcbbc7b557983fe6dbe28724288ba32974c70a96cab524b03",
   "manifest.json": "dee3e3b568b600bbb3258d427ed100ad7564a93f7f73c8b899de41609ffc620d",
-  "report.md": "8af697fd175bbab0a263c04d6cc00ceb6352bfe950dfcf55524252b248a6f10b"
+  "report.md": "a61e279e349d45726c1e26e99c26e49fa87f629be92a55773cbde20d250f6d1c"
 }

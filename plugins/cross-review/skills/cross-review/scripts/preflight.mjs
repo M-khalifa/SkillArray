@@ -40,7 +40,7 @@ const killTree = (child, options) => (hasExited(child) ? Promise.resolve() : kil
 import { readRunDescriptor, RunDescriptorError, writeRunDescriptor, seatOutputDir } from './run-descriptor.mjs';
 import { evaluateSupport, hostStatusOf } from './host-support.mjs';
 import { projectsDir } from './native-agent.mjs';
-import { comparablePath, realPath, expandPathVars, expandWorkingFolderForms, probeFoldsCase, setFoldsCase, decodeFileUrls, DIFF_PLAIN, entryKey, entryPath, entrySha256, GIT_C_LOCALE, gitNames, GIT_PLAIN, gitRepoFromProbe, isInsidePath, isMainModule, nameBytes } from './path-utils.mjs';
+import { compareVersions, comparablePath, realPath, expandPathVars, expandWorkingFolderForms, probeFoldsCase, setFoldsCase, decodeFileUrls, DIFF_PLAIN, entryKey, entryPath, entrySha256, GIT_C_LOCALE, gitNames, GIT_PLAIN, gitRepoFromProbe, isInsidePath, isMainModule, nameBytes } from './path-utils.mjs';
 
 class RelayError extends Error {}
 
@@ -1715,6 +1715,27 @@ async function codexReachProbe(cdAbs, packetText, runDir) {
   return { at: new Date().toISOString(), ran: run.ok, ...(run.ok ? {} : { error: lastLine.slice(0, 300) }), results, notProbed, notFound: reach.notFound };
 }
 
+export { compareVersions };
+
+// For a skill run from Claude Code's plugin cache: the running plugin's version and the one in the local marketplace clone,
+// which Claude Code refreshes (auto-update, /plugin marketplace update). No network call. null when the layout does not apply.
+export async function pluginUpdateCheck(skillDir) {
+  const m = /^(.*[\\/]plugins)[\\/]cache[\\/]([^\\/]+)[\\/]([^\\/]+)[\\/]([^\\/]+)[\\/]skills[\\/][^\\/]+$/.exec(skillDir);
+  if (!m) return null;
+  const [, plugins, marketplace, plugin, cacheVersion] = m;
+  const versionAt = async (dir) => { const v = JSON.parse(await readFile(path.join(dir, '.claude-plugin', 'plugin.json'), 'utf8'))?.version; return typeof v === 'string' && v !== '' ? v : null; };
+  const installed = (await versionAt(path.dirname(path.dirname(skillDir))).catch(() => null)) ?? cacheVersion;
+  const root = path.join(plugins, 'marketplaces', marketplace);
+  let source = `plugins/${plugin}`;
+  try {
+    const listed = JSON.parse(await readFile(path.join(root, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins?.find((p) => p?.name === plugin)?.source;
+    if (typeof listed === 'string') source = listed;
+  } catch { /* no marketplace file: the default plugins/<plugin> source */ }
+  const published = await versionAt(path.join(root, ...source.split('/').filter((p) => p && p !== '.'))).catch(() => null);
+  if (typeof published !== 'string' || typeof installed !== 'string') return null;
+  return { plugin, marketplace, installed, published, newer: compareVersions(published, installed) > 0 };
+}
+
 // A skill run from Claude Code's plugin cache (<plugins>/cache/<marketplace>/<plugin>/<version>/skills/<skill>) is compared with
 // the marketplace clone (<plugins>/marketplaces/<marketplace>/<plugin source>/skills/<skill>): a cache built under the same
 // version string is not refreshed, so different SKILL.md or script bytes mean an older build is running. Returns the
@@ -1749,6 +1770,12 @@ async function pluginCopyDrift(skillDir) {
     if (a === null || b === null || !a.equals(b)) differ.push(name);
   }
   return differ;
+}
+
+// The same-version drift warning, or null: when the marketplace copy has another version, the update check speaks for it.
+function copyDriftWarning(stale, update, plugin) {
+  if (stale.length === 0 || (update && update.installed !== update.published)) return null;
+  return `this skill runs from Claude Code's plugin cache, and ${stale.length} file(s) differ from the marketplace copy (${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ', ...' : ''}): an older build under the same version may be running. Update it (/plugin manage, ${plugin}, Update now, or in a shell: claude plugin update ${plugin}@<marketplace>; or uninstall and install it), restart, and run preflight again`;
 }
 
 // The commands of an --exec-file or --exec-in-file, one per line exactly as written (blank and # lines skipped).
@@ -2195,10 +2222,14 @@ async function hostPreflight(args) {
     await writeFile(path.join(runDir, 'reach-probe.json'), `${JSON.stringify(probe, null, 2)}\n`, 'utf8');
     reportReachProbe(probe, path.join(runDir, 'reach-probe.json'));
   }
-  const stale = await pluginCopyDrift(path.dirname(SCRIPTS_DIR));
-  if (stale.length > 0) {
-    process.stderr.write(`preflight: WARNING: this skill runs from Claude Code's plugin cache, and ${stale.length} file(s) differ from the marketplace copy (${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ', ...' : ''}): an older build under the same version may be running. Run /plugin update ${path.basename(path.dirname(SCRIPTS_DIR))}@<marketplace> (or uninstall and install it), restart, and run preflight again${String.fromCharCode(10)}`);
+  const update = await pluginUpdateCheck(path.dirname(SCRIPTS_DIR)).catch(() => null);
+  if (update) {
+    await writeFile(path.join(runDir, 'update-check.json'), `${JSON.stringify(update)}\n`, 'utf8');
+    // Loaded only here: preflight must still run, and refuse a skill copy, when build-report.mjs is missing.
+    if (update.newer) process.stderr.write(`preflight: NOTE: ${await import('./build-report.mjs').then((m) => m.updateNote(update), () => `a newer SkillArray (${update.published}) is published; this run used ${update.installed}`)}${String.fromCharCode(10)}`);
   }
+  const driftWarning = copyDriftWarning(await pluginCopyDrift(path.dirname(SCRIPTS_DIR)), update, path.basename(path.dirname(SCRIPTS_DIR)));
+  if (driftWarning) process.stderr.write(`preflight: WARNING: ${driftWarning}${String.fromCharCode(10)}`);
   if (!existsSync(path.join(runDir, 'task-packet.md'))) {
     process.stderr.write(`preflight: WARNING: ${path.join(runDir, 'task-packet.md')} not found; run.json is written, so write the packet there before "review-run phase1 --start" (no need to rerun this command)${String.fromCharCode(10)}`);
   }
@@ -2312,4 +2343,4 @@ if (isDirectRun) {
   });
 }
 
-export { stopOnSignal, assertNodeVersion, resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, fingerprintFiles, driftedFiles, pluginCopyDrift, packetReach, hostPreflight, parseArgs, runTier1, runTier2, runWithTimeout, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };
+export { stopOnSignal, assertNodeVersion, resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, fingerprintFiles, driftedFiles, pluginCopyDrift, copyDriftWarning, packetReach, hostPreflight, parseArgs, runTier1, runTier2, runWithTimeout, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };

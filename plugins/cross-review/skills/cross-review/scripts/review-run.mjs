@@ -1613,6 +1613,15 @@ export function formatElapsed(ms) {
 }
 
 // One line per seat for a "still running" exit: how long it has run and, from its own logs, whether it is healthy.
+// ", no output for 12m00s" when a running seat's log or transcript has not changed for 2 minutes or more, else "".
+// Only a Codex CLI seat writes a live log, of its stderr alone (its JSON events go to stdout), so its text says "no stderr".
+// A Claude CLI seat gets no idle text.
+// With no file yet, idle time counts from sinceMs (the seat's start) when given.
+export async function quietFor(file, nowMs, sinceMs = null, what = 'output') {
+  const idle = nowMs - ((await fs.stat(file).catch(() => null))?.mtimeMs ?? (Number.isFinite(sinceMs) ? sinceMs : nowMs));
+  return idle >= 120000 ? `, no ${what} for ${formatElapsed(idle)}` : '';
+}
+
 export async function seatStatusLines(desc, phase, nativeAgents = {}, nowMs = Date.now()) {
   const lines = [];
   for (const role of SEATS) {
@@ -1622,9 +1631,10 @@ export async function seatStatusLines(desc, phase, nativeAgents = {}, nowMs = Da
       if (!record) {
         lines.push(`seat ${role}: ${actor.runtime} cli, no status record yet`);
       } else if (record.status === 'running') {
-        const live = await fs.readFile(path.join(dispatchDir(desc, phase, role), 'result.stderr.live.log'), 'utf8').catch(() => '');
+        const liveFile = path.join(dispatchDir(desc, phase, role), 'result.stderr.live.log');
+        const live = await fs.readFile(liveFile, 'utf8').catch(() => '');
         const failures = execFailureCount(live);
-        lines.push(`seat ${role}: ${actor.runtime} running ${formatElapsed(nowMs - Date.parse(record.startedAt))}${failures > 0 ? `, ${failures} exec_command failure(s) so far` : ''}`);
+        lines.push(`seat ${role}: ${actor.runtime} running ${formatElapsed(nowMs - Date.parse(record.startedAt))}${failures > 0 ? `, ${failures} exec_command failure(s) so far` : ''}${actor.runtime === 'codex' ? await quietFor(liveFile, nowMs, Date.parse(record.startedAt), 'stderr') : ''}`);
       } else {
         lines.push(`seat ${role}: ${actor.runtime} ${record.status}${Number.isFinite(record.durationMs) ? ` in ${formatElapsed(record.durationMs)}` : ''}`);
       }
@@ -1635,7 +1645,7 @@ export async function seatStatusLines(desc, phase, nativeAgents = {}, nowMs = Da
         lines.push(`seat ${role}: native agent, transcript not readable yet`);
       } else {
         const state = { done: 'finished', aborted: 'turn aborted' }[await agentState(file)] ?? 'working';
-        lines.push(`seat ${role}: native agent ${state}${stats.startedAtMs ? ` ${formatElapsed(nowMs - stats.startedAtMs)}` : ''}, ${stats.calls} tool call(s)`);
+        lines.push(`seat ${role}: native agent ${state}${stats.startedAtMs ? ` ${formatElapsed(nowMs - stats.startedAtMs)}` : ''}, ${stats.calls} tool call(s)${state === 'working' ? await quietFor(file, nowMs) : ''}`);
       }
     } else {
       lines.push(`seat ${role}: native; pass --native-agent ${role}=<agent id> to see its progress`);

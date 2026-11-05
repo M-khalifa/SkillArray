@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   expandTagRange, parseArgs, isBlocker, shortTitle, compactTokens, seatCostRow, perCallNewInput, costTableLines, packetCriteria, criteriaGroup, buildCriteria, notesSections,
   parseOutcome, packetTicketMap, noteKinds, findingStatus, costNote, parseVerdict, buildTickets, groupFindings, renderChat, buildReport, renderText, renderMarkdown, renderHtml, loadRun, headingTags, outcomeOf, diffHunks, whereInChange,
+  notCheckedLine, unopenedWebConcedes,
 } from '../build-report.mjs';
 
 // The step in-process, as the script was run: env holds the variables set (or, undefined, removed) for the call.
@@ -142,7 +143,8 @@ test('buildReport: a withdrawn HIGH is counted as withdrawn, not in the HIGH bar
   assert.match(renderHtml(stamped), /<footer class="meta">Reviewed with (pair|cross)-review 9\.8\.7 \(SkillArray, MIT license\): <a href="https:\/\/github\.com\/M-khalifa\/SkillArray">/);
   assert.match(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: '', seatTexts: {} }).generator.version, /^\d+\.\d+\.\d+$/, 'without a manifest version, this copy\'s SKILL.md version');
   const blind = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, seat_blind_lines: { B: ['- H2: pytest failed: No usable temporary directory found. PARTIAL'] } }, packetText: '', seatTexts: {} });
-  assert.ok(blind.caveats.some((c) => /^Seat B may have reviewed blind: .*No usable temporary directory/.test(c)), blind.caveats.join('\n'));
+  assert.ok(blind.caveats.some((c) => /^Seat B may have reviewed blind: .*No usable temporary directory.*"\)\. Check whether the task packet already gave seat B that evidence; if it did, the block matters less\.$/.test(c)), blind.caveats.join('\n'));
+  assert.ok(!blind.caveats.some((c) => /weaker than it looks/.test(c)), 'the old alarm sentence is gone');
   const refused = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, status: 'incomplete', format_refused: { A: ['no "## Checks performed" heading after the claims'] } }, packetText: '', seatTexts: {} });
   const blockedSeat = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, status: 'incomplete', blocked_no_findings: ['B'] }, packetText: '', seatTexts: {} });
   assert.ok(blockedSeat.caveats.some((c) => /^Seat B wrote "No findings" but says it was blocked/.test(c)), blockedSeat.caveats.join('\n'));
@@ -783,7 +785,7 @@ test('chat: the exact layout for a small run (a drift check)', () => {
   const out = renderChat(CHAT_FIXTURE());
   const lines = out.split(nl);
   assert.deepEqual(lines.slice(0, expected.length), expected);
-  assert.match(out, /_Every finding, criterion and the cost: run with `--format chat --all`\._/);
+  assert.match(out, /_Short report\. Ask for the full one: every finding, every criterion and the cost\._/);
 });
 
 test('chat: no colour codes, no emoji, code lines within 100 characters, severities as words, whatever the run', () => {
@@ -1844,4 +1846,690 @@ test('field run: chat names the flagged criteria past the first eight instead of
   const out = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: seat } }));
   assert.match(out, /^- MORE {9}2 more flagged: AC-9 AC-10 \(--all lists them\)$/m, out);
   assert.doesNotMatch(out, /\(\+\d+ more\)$/m);
+});
+
+// How far a result was checked: web citations, skipped checks, bare pass lines, read-only confirmations, unopened concedes.
+const seatWith = (checks, web = null) => lines('# A', '', '## A1 [AC-1] t', 'Severity: LOW', '', '## Checks performed', ...checks, ...(web ? ['', web] : []));
+
+test('certainty R1: a web-cited SOURCE_CITATION finding gets a caveat; a seat that opened no page is named, in chat and json', () => {
+  const findings = [
+    finding({ id: 'F3', origins: ['A1'], basis: 'SOURCE_CITATION', evidence: ['https://example.com/doc says x'] }),
+    finding({ id: 'F5', origins: ['B1'], basis: 'SOURCE_CITATION', evidence: ['see http://vendor.test/api'] }),
+    finding({ id: 'F6', origins: ['A2'], basis: 'SOURCE_CITATION', evidence: ['README.md:3 says x'] }),
+    finding({ id: 'F7', origins: ['B2'], basis: 'SOURCE_CITATION', evidence: ['https://gone.test'], final_state: 'settled-refuted' }),
+  ];
+  const report = buildReport({ findingsDoc: { findings }, manifest: MANIFEST, seatTexts: { A: seatWith([], 'web: 2 queries, 1 page fetches'), B: seatWith([], 'web: 3 queries, 0 page fetches') } });
+  assert.ok(report.caveats.includes('F3, F5: web citation, not re-checked by the auditor (it has no web access)'), report.caveats.join('\n'));
+  assert.ok(report.caveats.includes('F5: its seat reported opening no page (search results only)'));
+  assert.match(renderChat(report), /> Caveat: F3, F5: web citation, not re-checked by the auditor/);
+  assert.match(JSON.stringify(report), /F5: its seat reported opening no page/);
+  const noLine = buildReport({ findingsDoc: { findings }, manifest: MANIFEST, seatTexts: { A: seatWith([]), B: seatWith([]) } });
+  assert.equal(noLine.caveats.filter((c) => /opening no page/.test(c)).length, 0, 'no web line, no claim about page fetches');
+});
+
+test('certainty R2: a NOT CHECKED line does not check its tag; verdict-less gap words and a pass line\'s own gap are doubt; a skipped-checks caveat', () => {
+  const packet = lines('- [AC-1] a', '- [AC-2] b', '- [AC-3] c', '- [AC-4] d');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith([
+    '- NOT CHECKED: AC-1 on Linux (no box)', '1. NOT CHECKED: the AC-2 timing (web budget spent)', '- AC-3: could not run it here', '- AC-4: ran `node x.mjs`; NOT CHECKED: the full suite. MET',
+  ]), B: '' } });
+  const by = Object.fromEntries(report.criteria.rows.map((r) => [r.tag, r]));
+  assert.deepEqual([by['AC-1'].status, by['AC-2'].status], ['not-verified', 'not-verified']);
+  assert.deepEqual([by['AC-3'].doubt, by['AC-4'].doubt], [['A'], ['A']]);
+  assert.deepEqual(report.criteria.silentSeats, []);
+  const caveat = 'Checks not done — seat A: AC-1 on Linux (no box); the AC-2 timing (web budget spent)';
+  assert.ok(report.caveats.includes(caveat), report.caveats.join('\n'));
+  assert.ok(renderChat(report).includes(`> Caveat: ${caveat}`));
+  assert.ok(JSON.stringify(report).includes(JSON.stringify(caveat)));
+});
+
+test('certainty R2: a MET line about the reviewed code\'s token budget, untested inputs or "cannot" is not a doubtful check', () => {
+  const packet = lines('- [AC-1] a', '- [AC-2] b', '- [AC-3] c');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith([
+    '- AC-1: the brief stays within its token budget (build-brief.mjs:40). MET', '- AC-2: untested inputs are rejected with exit 1 (x.mjs:9). MET', '- AC-3: a seat cannot write outside its folder (y.mjs:3). MET',
+  ]), B: '' } });
+  assert.deepEqual(report.criteria.rows.map((r) => r.doubt), [[], [], []]);
+});
+
+test('certainty R2: the skipped-checks caveat lists at most 8 lines, then how many more', () => {
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, seatTexts: { A: seatWith(Array.from({ length: 6 }, (_, i) => `- NOT CHECKED: a${i}`)), B: seatWith(Array.from({ length: 4 }, (_, i) => `- NOT CHECKED: b${i}`)) } });
+  assert.ok(report.caveats.includes('Checks not done — seat A: a0; a1; a2; a3; a4; a5; seat B: b0; b1; +2 more'), report.caveats.join('\n'));
+});
+
+test('certainty R3: pass lines that name a tag but cite no file:line, backtick, link, own claim ID or finding ID are counted per seat', () => {
+  const packet = lines(...Array.from({ length: 8 }, (_, i) => `- [AC-${i + 1}] c`), '- [H1] h', '- [H2] h');
+  const seatB = lines('# B', '', '## B1 t', 'Severity: LOW', '', '## Checks performed',
+    '- AC-1: looked fine. MET', '- `AC-2`: checked it. MET', '- AC-3: x.mjs:12 handles it. MET', '- AC-4: ran `node t.mjs`. MET', '- AC-5: https://example.com/spec agrees. MET',
+    '- AC-6: same as B1. MET', '- AC-7: covered by F2. MET', '- AC-8: not fully covered. PARTIAL', '- H1: read the code, no such path. REFUTED', '- H2: A1 shows it. REFUTED');
+  const report = buildReport({ findingsDoc: { findings: [finding({ id: 'F2', origins: ['B1'] })] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: '', B: seatB } });
+  assert.deepEqual(report.criteria.passes.B, { passes: 9, bare: 4 });
+  const caveat = 'Seat B: 4 of 9 MET or REFUTED check lines cite no file:line, backticked command, link, claim ID or finding ID the report could find';
+  assert.ok(report.caveats.includes(caveat), report.caveats.join('\n'));
+  assert.ok(renderChat(report).includes(`> Caveat: ${caveat}`));
+  assert.equal(report.caveats.filter((c) => /^Seat A: .* the report could find$/.test(c)).length, 0, 'no pass, no caveat');
+});
+
+test('certainty review fixes: anchors in other forms, a backticked tag with a colon, code words on MET lines, bold NOT CHECKED; lowercase is prose', () => {
+  const packet = lines(...Array.from({ length: 9 }, (_, i) => `- [AC-${i + 1}] c`), '- [H1] h');
+  const seatA = lines('# A', '', '## A1 t', 'Severity: LOW', '', '## Checks performed',
+    '- AC-1: Makefile:12 sets it. MET', '- AC-2: x.mjs#L12 sets it. MET', '- AC-3: x.mjs line 12 sets it. MET', '- `AC-4:` read it. MET',
+    '- AC-5: items NOT CHECKED by the tool are rejected (x.mjs:4). MET', '- AC-6: cache hits are not rerun (x.mjs:3). MET', '- AC-7: the hook did not run twice (x.mjs:3). MET',
+    '- AC-8: Not checked on Linux; Windows ok (x.mjs:3). MET', '**1.** NOT CHECKED: AC-9 (no box)', '| not checked | AC-9 later |',
+    '- H1: no such path in x.mjs:4; suite not rerun (web budget spent). REFUTED');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: '' } });
+  const by = Object.fromEntries(report.criteria.rows.map((r) => [r.tag, r]));
+  assert.deepEqual(report.criteria.passes.A, { passes: 9, bare: 1 }, 'eight MET lines and the refuted hypothesis; only the backticked tag is bare');
+  assert.deepEqual(['AC-5', 'AC-6', 'AC-7'].map((t) => by[t].doubt), [[], [], []], 'words about the code are not a gap');
+  assert.deepEqual(by['AC-8'].doubt, [], 'a sentence-case "Not checked" gap is not one of the two markers');
+  assert.deepEqual([by['AC-9'].status, by['AC-9'].seats], ['clean', ['A']], 'a lowercase "not checked" table cell is prose, so it names AC-9');
+  assert.ok(report.caveats.includes('Checks not done — seat A: AC-9 (no box)'), report.caveats.join('\n'));
+  assert.ok(report.caveats.includes('H1: seat A said its check was incomplete'), report.caveats.join('\n'));
+});
+
+test('certainty review fixes: a seat that ran no search is not said to have used search results', () => {
+  const findings = [finding({ id: 'F5', origins: ['B1'], basis: 'SOURCE_CITATION', evidence: ['see http://vendor.test/api'] })];
+  const report = buildReport({ findingsDoc: { findings }, manifest: MANIFEST, seatTexts: { A: seatWith([]), B: seatWith([], 'web: 0 queries, 0 page fetches') } });
+  assert.ok(report.caveats.includes('F5: its seat reported no search and no page opened'), report.caveats.join('\n'));
+  assert.equal(report.caveats.filter((c) => /search results only/.test(c)).length, 0);
+});
+
+test('certainty R4: an EXECUTED finding the auditor confirmed by reading gets a caveat; a null auditor basis or an EXECUTED one does not', () => {
+  const findings = [
+    finding({ id: 'F2', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' } }),
+    finding({ id: 'F3', auditor_check: { result: 'CONFIRMED', basis: 'EXECUTED' } }),
+    finding({ id: 'F4', auditor_check: { result: 'CONFIRMED', basis: null } }),
+    finding({ id: 'F7', auditor_check: { result: 'CONFIRMED', basis: 'SOURCE_CITATION' } }),
+    finding({ id: 'F8', basis: 'STATIC_TRACE', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' } }),
+  ];
+  const report = buildReport({ findingsDoc: { findings }, manifest: MANIFEST, seatTexts: {} });
+  assert.deepEqual(report.caveats.filter((c) => /confirmed by reading only/.test(c)), ['F2, F7: the seat ran it; the auditor confirmed by reading only']);
+  assert.match(renderChat(report), /> Caveat: F2, F7: the seat ran it; the auditor confirmed by reading only/);
+  assert.match(JSON.stringify(report), /F2, F7: the seat ran it/);
+});
+
+const webClaim = (id, basis, evidence) => lines(`## ${id} [AC-1] t`, 'Severity: LOW', `Basis: ${basis}`, 'Evidence strength: SUPPORTED', 'Evidence:', '```', evidence, '```', '');
+const rebuttal = (id, action, evidence) => lines(`### ${id}`, `Claim: ${id}`, `Action: ${action}`, 'Basis: STATIC_TRACE', 'Evidence:', '```', evidence, '```', '');
+
+test('certainty R6: CONCEDEs of a peer SOURCE_CITATION claim that cites a link, with no link of their own or saying the web fact was not re-checked, are counted per rebutting seat', () => {
+  const aFile = lines('# A', '', webClaim('A1', 'SOURCE_CITATION', 'https://a.test/x'), webClaim('A2', 'SOURCE_CITATION', 'https://a.test/y'), webClaim('A3', 'STATIC_TRACE', 'x.mjs:1'),
+    webClaim('A4', 'SOURCE_CITATION', 'https://a.test/z'), webClaim('A5', 'SOURCE_CITATION', 'https://a.test/w'), webClaim('A6', 'SOURCE_CITATION', 'docs/x.md:3 says so'), '## Rebuttals (from B) of A claims', '',
+    rebuttal('A1', 'CONCEDE', 'agreed'), rebuttal('A2', 'CONCEDE', 'opened https://a.test/y: "quote"'), rebuttal('A3', 'CONCEDE', 'agreed'),
+    rebuttal('A4', 'CONCEDE', 'Web fact not re-checked; https://a.test/z'), rebuttal('A5', 'DISPUTE', 'no'), rebuttal('A6', 'CONCEDE', 'agreed'));
+  const bFile = lines('# B', '', webClaim('B1', 'SOURCE_CITATION', 'https://b.test'), '## Rebuttals (from A) of B claims', '', rebuttal('B1', 'CONCEDE', 'opened https://b.test, it says so'));
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, seatTexts: { A: '', B: '' }, rebuttalTexts: { A: aFile, B: bFile } });
+  assert.deepEqual(report.caveats.filter((c) => /without opening the source/.test(c)), ['Seat B accepted 2 web-backed findings without opening the source']);
+  assert.match(renderChat(report), /> Caveat: Seat B accepted 2 web-backed findings without opening the source/);
+  assert.match(JSON.stringify(report), /Seat B accepted 2 web-backed findings/);
+});
+
+test('certainty R6: loadRun reads the rebuttals from phase1/<seat>-findings.md while the seat checks come from phase1/original/', async (t) => {
+  const dir = await makeRun(t);
+  await fs.mkdir(path.join(dir, 'phase1', 'original'), { recursive: true });
+  const aOwn = lines('# A', '', webClaim('A1', 'SOURCE_CITATION', 'https://a.test/x'), '## Checks performed', '- NOT CHECKED: the Mac path (no Mac)');
+  await fs.writeFile(path.join(dir, 'phase1', 'original', 'A-findings.md'), aOwn);
+  await fs.writeFile(path.join(dir, 'phase1', 'original', 'B-findings.md'), SEAT_B);
+  await fs.writeFile(path.join(dir, 'phase1', 'A-findings.md'), `${aOwn}\n## Rebuttals (from B) of A claims\n\n${rebuttal('A1', 'CONCEDE', 'agreed')}`);
+  const report = await loadRun(dir);
+  assert.ok(report.caveats.includes('Seat B accepted 1 web-backed finding without opening the source'), report.caveats.join('\n'));
+  assert.ok(report.caveats.includes('Checks not done — seat A: the Mac path (no Mac)'));
+});
+
+test('certainty verify fixes F1: words describing the reviewed code are not a gap on a MET line or a verdict-less line; the hypothesis caveat needs a refuted or split row', () => {
+  const packet = lines(...Array.from({ length: 6 }, (_, i) => `- [AC-${i + 1}] c`), '- [H1] h', '- [H2] h');
+  const seatA = lines('# A', '', '## A1 t', 'Severity: LOW', '', '## Checks performed',
+    '- AC-1: web budget enforcement stops the seat at 10 fetches (x.mjs:4). MET', '- AC-2: we did not run into a timeout (x.mjs:5). MET',
+    '- AC-3: tests were not rerun by the cache layer (x.mjs:6). MET', '- AC-4: the guard rejects items: not checked ones are dropped (x.mjs:7). MET',
+    '- AC-5: the "not done" state is shown for `skipped` tasks (x.mjs:8)', '- AC-6: the parser marks rows untested.flag (x.mjs:9)',
+    '- H1: the retry cannot loop forever (x.mjs:10). CONFIRMED', '- H2: a path that cannot be read logs an error (x.mjs:11)');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: '' } });
+  const by = Object.fromEntries(report.criteria.rows.map((r) => [r.tag, r]));
+  assert.deepEqual(['AC-1', 'AC-2', 'AC-3', 'AC-4', 'AC-5', 'AC-6'].map((t) => by[t].doubt), [[], [], [], [], [], []], report.criteria.rows.map((r) => `${r.tag} ${r.doubt}`).join('\n'));
+  assert.equal(report.caveats.filter((c) => /said its check was incomplete/.test(c)).length, 0, report.caveats.join('\n'));
+  const own = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith(['- AC-1: x.mjs:4; NOT CHECKED: the suite. MET', '- AC-2: x.mjs:5 (web budget spent). MET']), B: '' } });
+  assert.deepEqual(own.criteria.rows.filter((r) => ['AC-1', 'AC-2'].includes(r.tag)).map((r) => r.doubt), [['A'], ['A']]);
+  const prose = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith(['- AC-1: x.mjs:4; I did not run the suite. MET', '- AC-2: x.mjs:5 (web budget reached). MET']), B: '' } });
+  assert.deepEqual(prose.criteria.rows.filter((r) => ['AC-1', 'AC-2'].includes(r.tag)).map((r) => r.doubt), [[], []], 'a gap in other words is not marked, by design');
+  const quoted = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith(['- AC-1: the log says `web budget spent` and stops (x.mjs:4). MET', '- AC-2: prints "I did not run the suite" (x.mjs:5). MET']), B: '' } });
+  assert.deepEqual(quoted.criteria.rows.filter((r) => ['AC-1', 'AC-2'].includes(r.tag)).map((r) => r.doubt), [[], []]);
+});
+
+test('certainty verify fixes F2: an uppercase NOT CHECKED in a second sentence or after a comma on a MET line is the seat\'s own gap; other words are not', () => {
+  const packet = lines('- [AC-1] a', '- [AC-2] b', '- [AC-3] c');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith([
+    '- AC-1: MET on Windows (x.mjs:3). NOT CHECKED (no Linux box)', '- AC-2: x.mjs:4 holds, NOT CHECKED: Python 3.9. MET', '- AC-3: x.mjs:5 holds; NOT CHECKED (no Mac). MET',
+  ]), B: '' } });
+  assert.deepEqual(report.criteria.rows.map((r) => r.doubt), [['A'], ['A'], ['A']]);
+  const prose = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith([
+    '- AC-1: MET on Windows (x.mjs:3). Not checked on Linux.', '- AC-2: x.mjs:4 holds, not checked for Python 3.9. MET', '- AC-3: x.mjs:5 holds; Mac skipped (no box). MET',
+  ]), B: '' } });
+  assert.deepEqual(prose.criteria.rows.map((r) => r.doubt), [[], [], []], 'a gap in other words is not marked, by design');
+});
+
+test('certainty verify fixes F3, F7: a plural line range, an extensionless file and a dotfile with a line number are anchors', () => {
+  const packet = lines('- [AC-1] a', '- [AC-2] b', '- [AC-3] c', '- [AC-4] d');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith([
+    '- AC-1: about lines 336-352 do it. MET', '- AC-2: README:12 says so. MET', '- AC-3: .gitignore:12 excludes it. MET', '- AC-4: looked fine. MET',
+  ]), B: '' } });
+  assert.deepEqual(report.criteria.passes.A, { passes: 4, bare: 1 });
+});
+
+test('certainty verify fixes F4, F5: tag-first NOT CHECKED, plus bullets and task boxes are skips, listed with their tag', () => {
+  const packet = lines('- [AC-1] a', '- [AC-2] b', '- [AC-3] c', '- [AC-4] d');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith([
+    '- AC-2: NOT CHECKED (no box)', '+ NOT CHECKED: AC-3 on Mac', '- [ ] NOT CHECKED: AC-4 timing', '- **AC-1**: **NOT CHECKED** (no key)',
+  ]), B: '' } });
+  assert.deepEqual(report.criteria.rows.map((r) => r.status), ['not-verified', 'not-verified', 'not-verified', 'not-verified']);
+  assert.ok(report.caveats.includes('Checks not done — seat A: AC-2 (no box); AC-3 on Mac; AC-4 timing; AC-1 (no key)'), report.caveats.join('\n'));
+});
+
+test('certainty verify fixes F6: a link in a Tried or Suggested fix field is not the claim\'s or the concede\'s evidence', () => {
+  const claim = lines('## A1 [AC-1] t', 'Severity: LOW', 'Basis: SOURCE_CITATION', 'Evidence:', '```', 'docs/x.md:3 says so', '```', 'Suggested fix: see https://a.test/fix', '');
+  const webOnly = lines('## A2 [AC-1] t', 'Severity: LOW', 'Basis: SOURCE_CITATION', 'Evidence:', '```', 'https://a.test/x', '```', '');
+  const reb = lines('### A2', 'Claim: A2', 'Action: CONCEDE', 'Basis: STATIC_TRACE', 'Evidence:', '```', 'agreed', '```', 'Tried: https://a.test/x', '');
+  const aFile = lines('# A', '', claim, webOnly, '## Rebuttals (from B) of A claims', '', rebuttal('A1', 'CONCEDE', 'agreed'), reb);
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, seatTexts: { A: '', B: '' }, rebuttalTexts: { A: aFile, B: '' } });
+  assert.deepEqual(report.caveats.filter((c) => /without opening the source/.test(c)), ['Seat B accepted 1 web-backed finding without opening the source']);
+});
+
+test('live run 2b: an UNMET criterion line names the worst final severity of its findings; a CRITERION line names none', () => {
+  const packet = lines('# P', '## Acceptance criteria', '- [AC-3] three', '- [AC-4] four', '- [AC-5] five');
+  const seatA = lines('# A', '', '## A1 [AC-4] Fourth fails', 'Severity: MEDIUM', '', '## A2 [AC-5] Fifth fails', 'Severity: LOW', '', '## A3 [AC-5] Fifth fails too', 'Severity: MEDIUM', '', '## A4 [AC-3] Third', 'Severity: LOW', '',
+    '## Checks performed', '- AC-4 NOT MET: one case fails (x.mjs:3)', '- AC-5 NOT MET: two cases fail (x.mjs:4)', '- AC-3 MET: ok (x.mjs:5)');
+  const findings = [
+    finding({ id: 'F3', origins: ['A1'], severity: 'MEDIUM', severity_audited: 'LOW' }),
+    finding({ id: 'F4', origins: ['A2'], severity: 'LOW' }),
+    finding({ id: 'F5', origins: ['A3'], severity: 'MEDIUM' }),
+    finding({ id: 'F6', origins: ['A4'], severity: 'LOW' }),
+  ];
+  const out = renderChat(buildReport({ findingsDoc: { findings }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: SEAT_B } }));
+  assert.match(out, /^- UNMET {8}AC-4 {2}findings F3 \(LOW\)$/m, out);
+  assert.match(out, /^- UNMET {8}AC-5 {2}findings F4 F5 \(MEDIUM\)$/m, out);
+  assert.match(out, /^- CRITERION {4}AC-3 {2}findings F6$/m, out);
+});
+
+test('live run 2c: under the split-hypothesis caveat the full report prints each seat\'s own line, cut to 200 characters; the short chat does not', () => {
+  const packet = lines('- [H1] One.', '- [H2] Two.');
+  const long = `- H2: confirmed at x.mjs:9 ${'because the path is reachable '.repeat(10)}`;
+  const seatA = lines('## Checks performed', '- H1: disproved at x.mjs:4, the guard returns early. REFUTED', long);
+  const seatB = lines('## Checks performed', '- H1: confirmed by running node t.mjs, it throws.', '- H2: confirmed.');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB } });
+  const caveat = "H1: the seats disagree; the auditor rules on findings, not hypotheses, so no one decided between them: read both seats' lines for it.";
+  assert.ok(report.caveats.includes(caveat), report.caveats.join('\n'));
+  assert.deepEqual(Object.keys(report.criteria.rows.find((r) => r.tag === 'H1').seatLines), ['A', 'B']);
+  assert.equal('seatLines' in report.criteria.rows.find((r) => r.tag === 'H2'), false, 'only a split row carries its lines');
+  const text = renderText(report);
+  assert.ok(text.includes(`  - ${caveat}\n      H1, seat A: H1: disproved at x.mjs:4, the guard returns early. REFUTED\n      H1, seat B: H1: confirmed by running node t.mjs, it throws.\n`), text);
+  const md = renderMarkdown(report);
+  assert.ok(md.includes(`- ${caveat}\n  - H1, seat A: H1: disproved at x.mjs:4, the guard returns early. REFUTED\n  - H1, seat B: `), md);
+  assert.match(renderChat(report, { all: true }), /\n {2}- H1, seat B: H1: confirmed by running node t\.mjs, it throws\.\n/);
+  assert.doesNotMatch(renderChat(report), /H1, seat [AB]:/, 'the short chat keeps only the caveat');
+  assert.match(renderChat(report), /> Caveat: H1: the seats disagree/);
+  const cut = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: lines('## Checks performed', '- H2: disproved. REFUTED') } });
+  const cutLine = renderText(cut).split('\n').find((l) => l.startsWith('      H2, seat A: '));
+  assert.ok(cutLine.endsWith('...') && cutLine.length <= '      H2, seat A: '.length + 200 && cutLine.length > '      H2, seat A: '.length + 190, cutLine);
+});
+
+test('certainty 3: a standing HIGH or CRITICAL finding that neither the seat nor the auditor ran gets a caveat', () => {
+  const findings = [
+    finding({ id: 'F2', severity: 'HIGH', basis: 'STATIC_TRACE', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' } }),
+    finding({ id: 'F5', severity: 'MEDIUM', severity_audited: 'CRITICAL', basis: 'SOURCE_CITATION', auditor_check: { result: 'CONFIRMED' } }),
+    finding({ id: 'F6', severity: 'HIGH', basis: 'EXECUTED', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' } }),
+    finding({ id: 'F7', severity: 'HIGH', basis: 'STATIC_TRACE', auditor_check: { result: 'CONFIRMED', basis: 'EXECUTED' } }),
+    finding({ id: 'F8', severity: 'LOW', basis: 'STATIC_TRACE', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' } }),
+    finding({ id: 'F9', severity: 'HIGH', severity_audited: 'MEDIUM', basis: 'STATIC_TRACE' }),
+    finding({ id: 'F10', severity: 'CRITICAL', basis: 'STATIC_TRACE', final_state: 'settled-refuted', auditor_check: { result: 'REFUTED', basis: 'STATIC_TRACE' } }),
+    finding({ id: 'F11', severity: 'HIGH', basis: 'STATIC_TRACE', final_state: 'dropped-speculative' }),
+  ];
+  const report = buildReport({ findingsDoc: { findings }, manifest: MANIFEST, seatTexts: {} });
+  assert.deepEqual(report.caveats.filter((c) => /no one ran it/.test(c)), ['F2, F5: HIGH or CRITICAL, but no one ran it (read only)']);
+  assert.match(renderChat(report), /> Caveat: F2, F5: HIGH or CRITICAL, but no one ran it \(read only\)/);
+  const none = buildReport({ findingsDoc: { findings: findings.slice(2) }, manifest: MANIFEST, seatTexts: {} });
+  assert.equal(none.caveats.filter((c) => /no one ran it/.test(c)).length, 0);
+});
+
+test('certainty gap 7: an agreed finding the auditor could not check, in a full audit only', () => {
+  const findings = [
+    finding({ id: 'F1', auditor_check: { result: 'NOT_CHECKED' } }), finding({ id: 'F2', auditor_check: { result: 'CONFIRMED' } }),
+    finding({ id: 'F3', final_state: 'unresolved-disputed', auditor_check: { result: 'NOT_CHECKED' } }), finding({ id: 'F4', auditor_check: undefined }),
+    finding({ id: 'F5', final_state: 'settled-refuted', auditor_check: { result: 'NOT_CHECKED' } }),
+  ];
+  const full = buildReport({ findingsDoc: { audit_depth: 'full', findings }, manifest: MANIFEST, seatTexts: {} });
+  assert.deepEqual(full.caveats.filter((c) => /could not check/.test(c)), ['F1: both seats agreed, but the auditor could not check it']);
+  const light = buildReport({ findingsDoc: { audit_depth: 'light', findings }, manifest: MANIFEST, seatTexts: {} });
+  assert.equal(light.caveats.filter((c) => /could not check/.test(c)).length, 0, 'a light audit skips agreed claims by design');
+});
+
+test('r1 F2, F10: fingerprint-files.json lists only changed files, so no caveat names an unchanged, absolute, UNC or host:port citation', async (t) => {
+  const dir = await makeRun(t);
+  const findings = [
+    finding({ id: 'F1', evidence: ['src/caller.py:40 calls parse() without a guard'] }), finding({ id: 'F2', evidence: ['the service connects to db.internal.net:5432 and times out'] }),
+    finding({ id: 'F3', evidence: ['src/parser.py:12 drops the check'] }), finding({ id: 'F4', evidence: ['/outside/repo/missing.py:12'] }), finding({ id: 'F5', evidence: ['\\\\server\\share\\missing.py:12'] }),
+  ];
+  await fs.writeFile(path.join(dir, 'phase3', 'findings.json'), JSON.stringify({ audit_depth: 'full', findings }));
+  await fs.writeFile(path.join(dir, 'fingerprint-files.json'), JSON.stringify({ head: 'a'.repeat(40), files: { 'src/parser.py': 'x' } }));
+  const report = await loadRun(dir);
+  assert.equal(report.caveats.filter((c) => /reviewed files/.test(c)).length, 0, report.caveats.join('\n'));
+});
+
+// One seat line per report: the row of its tag and the report's caveats.
+const r1Row = (line, tag = 'AC-1') => {
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: lines('- [AC-1] a', '- [AC-2] b', '- [H1] h'), seatTexts: { A: seatWith([line]), B: '' } });
+  return { row: report.criteria.rows.find((r) => r.tag === tag), report };
+};
+
+test('r1 F1: words describing the reviewed code are not a gap: skipped (why), tests not rerun, not checked for ... by, web budget, untested, not done, NOT CHECKED by', () => {
+  const code = [
+    '- AC-1: x.mjs:5 marks the task skipped (reason logged). MET', '- AC-1: tests not rerun because of a cache hit is the expected path (x.mjs:5). MET',
+    '- AC-1: the test was not rerun after a cache hit, by design (x.mjs:5). MET', '- AC-1: x.mjs:5, not checked for nulls by the caller but guarded inside. MET',
+    '- AC-1: the web budget ran out at x.mjs:4 when the counter overflows. MET', "- AC-1: the seat's web budget exhausted check works (x.mjs:4). MET",
+    '- AC-1: untested branches fall back to the default (x.mjs:8)', '- AC-1: steps not done are listed in the summary (x.mjs:8)',
+    '- AC-1: cache.js:8 handles (web budget 10) without errors. MET', '- AC-1: cache.js:8 tests were not rerun by the worker',
+  ];
+  for (const l of code) assert.deepEqual(r1Row(l).row.doubt, [], l);
+  assert.deepEqual(r1Row('- AC-1: jobs that are not run get retried by the scheduler (x.mjs:8)').row.doubt, ['A'], 'a verdict-less line keeps the 1.2.0 word list');
+  const hyp = r1Row('- H1: a step skipped (by flag) is logged at x.mjs:8. REFUTED', 'H1');
+  assert.deepEqual([hyp.row.verdict, hyp.row.doubt], ['refuted', []]);
+  assert.equal(hyp.report.caveats.filter((c) => /said its check was incomplete/.test(c)).length, 0);
+  const byTool = r1Row('- AC-1: NOT CHECKED by the cache layer (cache.js:8). MET');
+  assert.deepEqual([byTool.row.status, byTool.row.met, byTool.report.criteria.criteriaStats.met], ['clean', 'MET', 1]);
+  assert.equal(byTool.report.caveats.filter((c) => /Checks not done/.test(c)).length, 0);
+  const own = ['- AC-1: x.mjs:5 holds; NOT CHECKED (no Mac). MET', '- AC-1: ran `node x.mjs`; NOT CHECKED: the suite. MET', '- AC-1: x.mjs:4 holds, NOT CHECKED: Python 3.9. MET',
+    '- AC-1: x.mjs:5 (web budget spent). MET', '- AC-1: could not run it here'];
+  for (const l of own) assert.deepEqual(r1Row(l).row.doubt, ['A'], l);
+  const prose = ['- AC-1: x.mjs:5 holds; Mac skipped (no box). MET', '- AC-1: ran `node x.mjs`; suite not rerun. MET', '- AC-1: x.mjs:4 holds, not checked for Python 3.9. MET',
+    '- AC-1: x.mjs:5 (web budget reached). MET', '- AC-1: x.mjs:5; web budget spent. MET', '- AC-1: untested here', '- AC-1: tests not rerun (no node)', '- AC-1: Not checked on Linux; Windows ok (x.mjs:3). MET'];
+  for (const l of prose) assert.deepEqual(r1Row(l).row.doubt, [], `not one of the markers, by design: ${l}`);
+  assert.deepEqual(r1Row('- AC-1: NOT CHECKED (no box)').row.status, 'not-verified');
+});
+
+test('r1 F3, F9: a bracketed tag, a tag with no separator, a table row and a hypothesis tag before NOT CHECKED are skips', () => {
+  const skips = [['- [AC-1] NOT CHECKED: no box', 'AC-1', 'AC-1 no box'], ['- AC-1 NOT CHECKED (no box)', 'AC-1', 'AC-1 (no box)'], ['| AC-1 | NOT CHECKED | no box |', 'AC-1', 'AC-1 no box'],
+    ['- H1: NOT CHECKED (no box)', 'H1', 'H1 (no box)'], ['- [H1] NOT CHECKED (no box)', 'H1', 'H1 (no box)'], ['+ H1: NOT CHECKED (no box)', 'H1', 'H1 (no box)'], ['- [ ] H1: NOT CHECKED (no box)', 'H1', 'H1 (no box)']];
+  for (const [l, tag, what] of skips) {
+    const { row, report } = r1Row(l, tag);
+    assert.equal(notCheckedLine(l), true, l);
+    assert.equal(row.status, 'not-verified', l);
+    assert.ok(report.caveats.includes(`Checks not done — seat A: ${what}`), `${l}\n${report.caveats.join('\n')}`);
+    assert.deepEqual(report.criteria.silentSeats, [], l);
+  }
+  for (const l of ['- AC-1: items NOT CHECKED by the tool are rejected (x.mjs:4). MET', '- H1: x.mjs:4 has no NOT CHECKED state. REFUTED', '| AC-1 | MET | x.mjs:3 |']) assert.equal(notCheckedLine(l), false, l);
+});
+
+test('r1 F4: a seat\'s own gap in other words on a pass line is not marked (closed list); the NOT CHECKED clause is, also on a refuted hypothesis', () => {
+  const prose = ['- AC-1: x.mjs:3 holds. Could not run the suite (no node). MET', '- AC-1: x.mjs:3 holds; tests not run (no node). MET', '- AC-1: x.mjs:3 holds; Linux path untested. MET',
+    '- AC-1: x.mjs:3 read only, not executed. MET', "- AC-1: MET by reading x.mjs:3; I couldn't run it."];
+  for (const l of prose) assert.deepEqual(r1Row(l).row.doubt, [], l);
+  assert.deepEqual(r1Row('- H1: x.mjs:3 guards it; could not reproduce on Linux (no box). REFUTED', 'H1').row.doubt, []);
+  const hyp = r1Row('- H1: x.mjs:3 guards it; NOT CHECKED: Linux (no box). REFUTED', 'H1');
+  assert.deepEqual(hyp.row.doubt, ['A']);
+  assert.ok(hyp.report.caveats.includes('H1: seat A said its check was incomplete'), hyp.report.caveats.join('\n'));
+  const code = ['- AC-1: a seat cannot write outside its folder (y.mjs:3). MET', '- AC-1: untested inputs are rejected with exit 1 (x.mjs:9). MET', '- AC-1: the retry cannot loop forever (x.mjs:10). MET',
+    '- AC-1: we did not run into a timeout (x.mjs:5). MET', '- AC-1: the hook could not run twice (x.mjs:3). MET', '- AC-1: x.mjs:3 marks jobs not run as failed. MET'];
+  for (const l of code) assert.deepEqual(r1Row(l).row.doubt, [], l);
+});
+
+test('r1 F5: a Windows drive path, a quoted path, a path right after the tag colon and "file L12" are citations', () => {
+  for (const l of ['- AC-1: C:\\repo\\src\\x.mjs:12 sets it. MET', '- AC-1: "x.mjs:12" sets it. MET', '- AC-1:x.mjs:12. MET', '- AC-1: x.mjs L12 sets it. MET']) {
+    assert.deepEqual(r1Row(l).report.criteria.passes.A, { passes: 1, bare: 0 }, l);
+  }
+  for (const l of ['- AC-1: looked fine. MET', '- AC-1: checked at 10:30, fine. MET', '- AC-1: see L12. MET', '- `AC-1:` read it. MET']) {
+    assert.deepEqual(r1Row(l).report.criteria.passes.A, { passes: 1, bare: 1 }, l);
+  }
+});
+
+test('r1 F6: rows that change against 1.2.0 on purpose: a skip-only seat, a quoted "could not"; a verdict-less "untested here" stays as in 1.2.0', () => {
+  const packet = lines('- [AC-1] a', '- [AC-2] b', '- [AC-3] c');
+  const skip = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith(['- NOT CHECKED: AC-1 on Linux (no box)', '- AC-2: x.mjs:3. MET', '- AC-3: x.mjs:4. MET']), B: '' } });
+  assert.deepEqual([skip.criteria.rows[0].status, skip.criteria.rows[0].seats], ['not-verified', []], 'was clean (A) in 1.2.0');
+  const words = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatWith(['- AC-1: the `could not` branch logs (x.mjs:3)', '- AC-2: x.mjs:3. MET', '- AC-3: untested here']), B: '' } });
+  assert.deepEqual(words.criteria.rows.map((r) => r.doubt), [[], [], []], 'AC-1 lost its 1.2.0 doubt mark; AC-3 has none, as in 1.2.0');
+});
+
+test('r1 F7: the Evidence field ends at its closing fence: a prose link after it is neither the claim\'s nor the concede\'s evidence', () => {
+  const claimThen = (next) => lines('# A', '', webClaim('A1', 'SOURCE_CITATION', 'docs/x.md:3 says so').trimEnd(), next, '', '## Rebuttals (from B) of A claims', '', rebuttal('A1', 'CONCEDE', 'agreed'));
+  assert.deepEqual(unopenedWebConcedes({ A: claimThen('see also https://a.test/blog for context') }), {});
+  assert.deepEqual(unopenedWebConcedes({ A: claimThen('Background reading: https://a.test/blog') }), {});
+  const concedeThen = lines('# A', '', webClaim('A1', 'SOURCE_CITATION', 'https://a.test/x'), '## Rebuttals (from B) of A claims', '', rebuttal('A1', 'CONCEDE', 'agreed').trimEnd(), 'see also https://a.test/x for context', '');
+  assert.deepEqual(unopenedWebConcedes({ A: concedeThen }), { B: 1 });
+  const twoFences = lines('# A', '', '## A1 [AC-1] t', 'Severity: LOW', 'Basis: SOURCE_CITATION', 'Evidence:', '```', 'docs/x.md:3', '```', '', '```', 'https://a.test/x', '```', '',
+    '## Rebuttals (from B) of A claims', '', rebuttal('A1', 'CONCEDE', 'agreed'));
+  assert.deepEqual(unopenedWebConcedes({ A: twoFences }), { B: 1 }, 'a second fence after a blank line is still Evidence');
+});
+
+// Round 2: the detectors that change a verdict or a doubt mark read only the closed list of exact formats.
+const skipCaveat = (report) => report.caveats.find((c) => c.startsWith('Checks not done')) ?? null;
+
+test('r2 closed list, skip form (a): uppercase NOT CHECKED after the list prefix, then ":", "(" or the line end', () => {
+  for (const l of ['- NOT CHECKED: AC-1 on Linux (no box)', '* NOT CHECKED (no box): AC-1', '1. NOT CHECKED', '1) NOT CHECKED: AC-1 (no box)', '> NOT CHECKED: AC-1',
+    '- [ ] NOT CHECKED: AC-1 timing', '**1.** NOT CHECKED: AC-1', '- **NOT CHECKED**: AC-1', '+ NOT CHECKED: AC-1', '| NOT CHECKED: AC-1 |', 'NOT CHECKED (no box)']) {
+    assert.equal(notCheckedLine(l), true, l);
+  }
+  const { row, report } = r1Row('- NOT CHECKED: AC-1 on Linux (no box)');
+  assert.deepEqual([row.status, skipCaveat(report)], ['not-verified', 'Checks not done — seat A: AC-1 on Linux (no box)']);
+  for (const l of ['- NOT CHECKED-in files are listed', '- NOT CHECKED. AC-1', '- NOT CHECKED, AC-1', '- NOT CHECKED AC-1', '- Not checked: AC-1', '- not checked: AC-1',
+    '- `NOT CHECKED`: AC-1', '`- NOT CHECKED: AC-1`', '- NOT CHECKED: AC-1 holds. MET', '- NOT CHECKED: AC-1 PARTIAL', '- NOT CHECKED: H1, REFUTED']) {
+    assert.equal(notCheckedLine(l), false, l);
+  }
+});
+
+test('r2 closed list, skip form (b): a tag, an optional ":", "-", en dash, em dash or "|", then uppercase NOT CHECKED and the end, ":", "(", ".", ";" or "|"', () => {
+  const skips = ['- AC-1: NOT CHECKED', '- AC-1 - NOT CHECKED (no box)', '- AC-1 – NOT CHECKED: no box', '- AC-1 — NOT CHECKED. no box', '| AC-1 | NOT CHECKED | no box |',
+    '- AC-1 NOT CHECKED; no box', '- [AC-1] NOT CHECKED: no box', '- **AC-1**: **NOT CHECKED** (no key)', '- `AC-1`: NOT CHECKED (no box)', '1. AC-1: NOT CHECKED (no box)',
+    '- [ ] AC-1: NOT CHECKED (no box)', '> AC-1: NOT CHECKED (no box)'];
+  for (const l of skips) {
+    const { row, report } = r1Row(l);
+    assert.equal(notCheckedLine(l), true, l);
+    assert.equal(row.status, 'not-verified', l);
+    assert.ok(skipCaveat(report)?.startsWith('Checks not done — seat A: AC-1'), `${l}\n${report.caveats.join('\n')}`);
+  }
+  const hyp = r1Row('- H1: NOT CHECKED (no box)', 'H1');
+  assert.deepEqual([hyp.row.status, skipCaveat(hyp.report)], ['not-verified', 'Checks not done — seat A: H1 (no box)']);
+  for (const l of ['- AC-1: NOT CHECKED, see below', '- AC-1: NOT CHECKED-in files are skipped', '- AC-1: NOT CHECKED by the tool', '- AC-1: NOT CHECKED (no box). MET',
+    '- AC-1 | done | NOT CHECKED |', '- h1: NOT CHECKED (no box)', '- AC1: NOT CHECKED (no box)']) {
+    assert.equal(notCheckedLine(l), false, l);
+  }
+});
+
+test('r2 F1, F2: a backticked NOT CHECKED after the tag, a line with its own verdict and a lowercase or sentence-case line start are not skips', () => {
+  for (const [l, tag, verdict] of [['- AC-1: `NOT CHECKED` (x.mjs:4) is displayed for skipped jobs. MET', 'AC-1', 'MET'], ['- H1: `NOT CHECKED` (x.mjs:4) is displayed for skipped jobs. REFUTED', 'H1', 'refuted'],
+    ['- Not checked-in files are ignored, so AC-1 holds (x.mjs:3). MET', 'AC-1', 'MET']]) {
+    const { row, report } = r1Row(l, tag);
+    assert.equal(notCheckedLine(l), false, l);
+    assert.equal(row.status, 'clean', l);
+    assert.equal(tag === 'H1' ? row.verdict : row.met, verdict, l);
+    assert.equal(skipCaveat(report), null, l);
+  }
+  const counts = r1Row('- AC-1: `NOT CHECKED` (x.mjs:4) is displayed for skipped jobs. MET').report.criteria.criteriaStats;
+  assert.deepEqual([counts.met, counts.notVerified], [1, 1], 'AC-1 MET; only the untouched AC-2 is not verified');
+  for (const l of ['- AC-1: `NOT CHECKED` (x.mjs:4) is displayed', '- not checked: AC-1 on Linux', '- Not checked: AC-1 on Linux']) {
+    assert.equal(notCheckedLine(l), false, l);
+    assert.equal(r1Row(l).row.status, 'clean', l);
+  }
+});
+
+test('r2 F10, by design: a sentence-case tag-first "Not checked" and a parenthesised tag are not skips; the line counts as a check with no verdict', () => {
+  for (const l of ['- AC-1: Not checked (no box)', '- AC-1 — Not checked.', '- (AC-1) NOT CHECKED: no box']) {
+    const { row, report } = r1Row(l);
+    assert.equal(notCheckedLine(l), false, l);
+    assert.deepEqual([row.status, row.met, row.doubt, row.seats], ['clean', null, [], ['A']], l);
+    assert.equal(skipCaveat(report), null, l);
+  }
+});
+
+test('r2 F3: code-describing "untested" and "skipped (...)" on pass lines are silent', () => {
+  for (const l of ['- AC-1: x.mjs:4 renders skipped (no input) for empty jobs. MET', '- AC-1: x.mjs:4 labels branches untested (coverage absent). MET',
+    '- AC-1: rows are untested, flagged and logged (x.mjs:3). MET', '- AC-1: an empty list is skipped (no rows) by design (x.mjs:3). MET']) {
+    assert.deepEqual(r1Row(l).row.doubt, [], l);
+  }
+  const hyp = r1Row('- H1: rows are untested, flagged and logged (x.mjs:3). REFUTED', 'H1');
+  assert.deepEqual([hyp.row.verdict, hyp.row.doubt], ['refuted', []]);
+  assert.equal(hyp.report.caveats.filter((c) => /said its check was incomplete/.test(c)).length, 0);
+});
+
+test('r2 F4, by design: an own gap in other words on a pass line is not marked; a verdict-less line keeps the 1.2.0 word list', () => {
+  for (const l of ['- AC-1: x.mjs:4 holds. Not run on Linux because no box was available. MET', '- AC-1: x.mjs:4 holds; web budget ran out at ten fetches. MET',
+    '- AC-1: x.mjs:4 holds. I did not re-run the suite. MET', '- AC-1: x.mjs:4 holds. Tests were not rerun by me. MET', '- AC-1: x.mjs:3 holds. Not tested on macOS. MET',
+    '- AC-1: MET on Windows (x.mjs:3). Linux NOT CHECKED (no box).', '- AC-1: MET (x.mjs:3); the Linux path was skipped: no box.', '- AC-1: MET (x.mjs:3). Skipped Linux, no box.']) {
+    assert.deepEqual(r1Row(l).row.doubt, [], l);
+  }
+  assert.deepEqual(r1Row('- AC-1: the Linux branch was not run because no box').row.doubt, ['A'], '"not run" is a 1.2.0 word');
+  assert.deepEqual(r1Row('- AC-1: the Linux branch is untested here').row.doubt, [], '"untested" is not');
+});
+
+test('r2 closed list, own gap (a): uppercase NOT CHECKED after ";", ".", ",", or a dash, then ":", "(" or the end, outside backticks', () => {
+  for (const l of ['- AC-1: x.mjs:3 holds; NOT CHECKED: Linux. MET', '- AC-1: MET (x.mjs:3). NOT CHECKED (no Linux box)', '- AC-1: MET at x.mjs:3, NOT CHECKED',
+    '- AC-1: MET at x.mjs:3 - NOT CHECKED (Linux)', '- AC-1: MET at x.mjs:3 – NOT CHECKED: Linux', '- AC-1: MET at x.mjs:3 — NOT CHECKED']) {
+    assert.deepEqual(r1Row(l).row.doubt, ['A'], l);
+  }
+  for (const l of ['- AC-1: MET at x.mjs:3; Linux NOT CHECKED (no box)', '- AC-1: x.mjs:3 prints `; NOT CHECKED:` for skips. MET', '- AC-1: x.mjs:3 holds; not checked: Linux. MET',
+    '- AC-1: x.mjs:3 holds; NOT CHECKED by the tool. MET', '- AC-1: x.mjs:3 holds; NOT CHECKED. MET', '- AC-1: NOT CHECKED: Linux; x.mjs:3 holds. MET']) {
+    assert.deepEqual(r1Row(l).row.doubt, [], l);
+  }
+  const hyp = r1Row('- H1: no such path in x.mjs:4. NOT CHECKED: Linux. REFUTED', 'H1');
+  assert.ok(hyp.report.caveats.includes('H1: seat A said its check was incomplete'), hyp.report.caveats.join('\n'));
+});
+
+test('r2 closed list, own gap (b): a bracket naming the web budget as spent, in any case', () => {
+  for (const b of ['(web budget spent)', '(Web budget used up)', '(WEB BUDGET EXHAUSTED)', '(web budget ran out)', '(out of web budget)']) {
+    assert.deepEqual(r1Row(`- AC-1: x.mjs:3 holds ${b}. MET`).row.doubt, ['A'], b);
+  }
+  for (const b of ['(web budget reached)', '(web budget 10)', '(no web budget)', 'web budget spent', '`(web budget spent)`', '(the web budget spent check)']) {
+    assert.deepEqual(r1Row(`- AC-1: x.mjs:3 holds ${b}. MET`).row.doubt, [], b);
+  }
+});
+
+test('r2 F5: a HIGH finding a falsification verifier ran (verifications[].basis EXECUTED) is not "no one ran it"', () => {
+  const findings = [
+    finding({ id: 'F1', severity: 'HIGH', basis: 'STATIC_TRACE', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' }, verifications: [{ claim: 'B7', verdict: 'CONFIRMED', basis: 'EXECUTED', evidence: 'ran it' }] }),
+    finding({ id: 'F2', severity: 'HIGH', basis: 'STATIC_TRACE', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' }, verifications: [{ claim: 'B8', verdict: 'CONFIRMED', basis: 'STATIC_TRACE', evidence: 'read it' }] }),
+    finding({ id: 'F3', severity: 'CRITICAL', basis: 'STATIC_TRACE', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' }, verifications: [{ claim: 'B9', verdict: 'CONFIRMED', basis: 'STATIC_TRACE' }, { claim: 'B9', verdict: 'CONFIRMED', basis: 'EXECUTED' }] }),
+    finding({ id: 'F4', severity: 'HIGH', basis: 'STATIC_TRACE', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' } }),
+  ];
+  const report = buildReport({ findingsDoc: { findings }, manifest: MANIFEST, seatTexts: {} });
+  assert.deepEqual(report.caveats.filter((c) => /no one ran it/.test(c)), ['F2, F4: HIGH or CRITICAL, but no one ran it (read only)']);
+});
+
+const bare = (l, findings = []) => buildReport({ findingsDoc: { findings }, manifest: MANIFEST, packetText: lines('- [AC-1] a', '- [AC-2] b'), seatTexts: { A: seatWith([l]), B: '' } }).criteria.passes.A;
+
+test('r2 F7: :L12, file(12), l. 12, ll. 3-9, a quote closed before :12 and a runner word before a file name are citations', () => {
+  for (const l of ['- AC-1: ran node --test scripts/tests/x.test.mjs, 3 pass. MET', '- AC-1: x.mjs:L12 checks it. MET', '- AC-1: src/x.mjs(12) checks it. MET', '- AC-1: x.mjs, l. 12 checks it. MET',
+    '- AC-1: x.mjs ll. 3-9 check it. MET', '- AC-1: "C:\\repo\\x.mjs":12 says so. MET', '- AC-1: pytest tests/test_x.py passes. MET', '- AC-1: Ran python tools/check.py, clean. MET',
+    '- AC-1: cargo test --test x.rs passes. MET', '- AC-1: go test ./pkg/x_test.go passes. MET', '- AC-1: npm run lint -- src/a.ts is clean. MET']) {
+    assert.deepEqual(bare(l), { passes: 1, bare: 0 }, l);
+  }
+  for (const l of ['- AC-1: ran it, fine. MET', '- AC-1: npm test passes. MET', '- AC-1: node is fine. MET', '- AC-1: see L12. MET', '- AC-1: all. 12 cases pass. MET']) {
+    assert.deepEqual(bare(l), { passes: 1, bare: 1 }, l);
+  }
+});
+
+test('r2 F8: name:N needs a dot or slash in the name or a known extensionless file; F<n> counts only as a finding ID of this report', () => {
+  for (const l of ['- AC-1: the bench reports F1 per arm. MET', '- AC-1: the server listens on localhost:8080. MET', '- AC-1: AC-2:3 ok. MET', '- AC-1: from step:2 on it works. MET',
+    '- AC-1: phase:1 ok. MET', '- AC-1: Note:1 nothing to say. MET', '- AC-1: covered by F3. MET']) {
+    assert.deepEqual(bare(l), { passes: 1, bare: 1 }, l);
+  }
+  for (const name of ['README', 'makefile', 'Dockerfile', 'LICENSE', 'CHANGELOG', 'Justfile', 'Procfile', 'Gemfile', 'Rakefile', 'src/x', 'x.mjs', '.gitignore']) {
+    assert.deepEqual(bare(`- AC-1: ${name}:12 says so. MET`), { passes: 1, bare: 0 }, name);
+  }
+  assert.deepEqual(bare('- AC-1: covered by F3. MET', [finding({ id: 'F3', origins: ['A9'] })]), { passes: 1, bare: 0 }, 'F3 is a finding of this report');
+  const report = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: lines('- [AC-1] a'), seatTexts: { A: seatWith(['- AC-1: the bench reports F1 per arm. MET']), B: '' } });
+  assert.ok(report.caveats.includes('Seat A: 1 of 1 MET or REFUTED check lines cite no file:line, backticked command, link, claim ID or finding ID the report could find'), report.caveats.join('\n'));
+});
+
+test('r3 F1: a gap marker inside double or single quotes on a pass line is quoted text, not the seat\'s own gap', () => {
+  for (const l of ['- AC-1: the tool prints "done; NOT CHECKED: rest" on exit (x.mjs:4). MET', "- AC-1: the tool prints '(web budget spent)' on exit (x.mjs:4). MET",
+    '- AC-1: prints "(web budget spent)" (x.mjs:4). MET', '- AC-1: the tool prints `done; NOT CHECKED: rest` on exit (x.mjs:4). MET']) {
+    assert.deepEqual(r1Row(l).row.doubt, [], l);
+  }
+  const hyp = r1Row('- H1: the seat file prints "done; NOT CHECKED: rest" and x.mjs:4 parses it, no crash. REFUTED', 'H1');
+  assert.equal(hyp.report.caveats.includes('H1: seat A said its check was incomplete'), false, hyp.report.caveats.join('\n'));
+});
+
+test('r3 F1 neighbours: an unquoted marker next to quoted text, or after an apostrophe, is still the seat\'s own gap', () => {
+  for (const l of ['- AC-1: prints "ok" (x.mjs:4). NOT CHECKED: Linux. MET', "- AC-1: the seat's run passes (x.mjs:4); NOT CHECKED: Windows. MET",
+    '- AC-1: x.mjs:3 holds "fine" (web budget spent). MET', "- AC-1: x.mjs:3 prints 'ok'; NOT CHECKED (no box). MET"]) {
+    assert.deepEqual(r1Row(l).row.doubt, ['A'], l);
+  }
+  const hyp = r1Row('- H1: no such path in x.mjs:4 for "x". NOT CHECKED: Linux. REFUTED', 'H1');
+  assert.ok(hyp.report.caveats.includes('H1: seat A said its check was incomplete'), hyp.report.caveats.join('\n'));
+});
+
+test('r3 F4: a dotted host and port and an F<n> score are not citations, also with a finding F1', () => {
+  const f1 = [finding({ id: 'F1', origins: ['A9'] })];
+  for (const l of ['- AC-1: the F1 score of the bench rises to 0.92. MET', '- AC-1: the F1-score of the bench rises. MET', '- AC-1: the F1 Score rises. MET','- AC-1: db.internal.net:5432 refuses. MET',
+    '- AC-1: example.com:443 serves it. MET', '- AC-1: api.internal:8080 answers. MET', '- AC-1: v1.2:3 holds. MET']) {
+    assert.deepEqual(bare(l, f1), { passes: 1, bare: 1 }, l);
+  }
+});
+
+test('r3 F4 neighbours: file:line, a path, :L12 on a host-like name and a finding ID next to an F<n> score are still citations', () => {
+  const f1 = [finding({ id: 'F1', origins: ['A9'] })];
+  for (const l of ['- AC-1: x.mjs:12 checks it. MET', '- AC-1: .gitignore:12 lists it. MET', '- AC-1: src/x:12 says so. MET', '- AC-1: build-report.mjs:374 strips it. MET',
+    '- AC-1: config.json:5 sets it. MET', '- AC-1: src/app.com:12 says so. MET', '- AC-1: example.com:L12 says so. MET', '- AC-1: covered by F1. MET',
+    '- AC-1: F1 is fixed; the F1 score rose. MET']) {
+    assert.deepEqual(bare(l, f1), { passes: 1, bare: 0 }, l);
+  }
+});
+
+const r3Skip = (line) => buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: lines('- [AC-1] a'), seatTexts: { A: seatWith([line]), B: '' } }).caveats.find((c) => c.startsWith('Checks not done'));
+
+test('r3 F5: a period or semicolon right after a tag-first NOT CHECKED is not part of what was not checked', () => {
+  assert.equal(r3Skip('* AC-1 - NOT CHECKED.'), 'Checks not done — seat A: AC-1');
+  assert.equal(r3Skip('- AC-1 — NOT CHECKED; no box'), 'Checks not done — seat A: AC-1 no box');
+  assert.equal(r3Skip('- AC-1 — NOT CHECKED. no box'), 'Checks not done — seat A: AC-1 no box');
+});
+
+test('r3 F5 neighbours: a colon or bracket form and a dotfile name after NOT CHECKED keep their text', () => {
+  assert.equal(r3Skip('- AC-1: NOT CHECKED (no box)'), 'Checks not done — seat A: AC-1 (no box)');
+  assert.equal(r3Skip('- NOT CHECKED: .gitignore rules (no time)'), 'Checks not done — seat A: .gitignore rules (no time)');
+  assert.equal(r3Skip('- AC-1: NOT CHECKED: .env loading (no box)'), 'Checks not done — seat A: AC-1 .env loading (no box)');
+});
+
+// Round 4.
+const r4Concede = (...ev) => lines('# A', '', '## A1 [AC-1] t', 'Severity: LOW', 'Basis: SOURCE_CITATION', 'Evidence strength: SUPPORTED', 'Evidence:', '```', 'https://docs.example.org/x', '```', '',
+  '## Rebuttals (from B) of A claims', '', '### A1', 'Claim: A1', 'Action: CONCEDE', 'Basis: STATIC_TRACE', 'Evidence:', ...ev, '');
+
+test('r4 F3: an unfenced concede Evidence line that starts with a capitalised word and holds the link is still Evidence', () => {
+  for (const l of ['Opened https://docs.example.org/x, it says Y', 'I opened https://docs.example.org/x and it says Y', 'Fetched the page https://docs.example.org/x; it says Y', 'See https://docs.example.org/x (section 2): it says Y']) {
+    assert.deepEqual(unopenedWebConcedes({ A: r4Concede(l) }), {}, l);
+  }
+  const claimSide = lines('# A', '', '## A1 [AC-1] t', 'Severity: LOW', 'Basis: SOURCE_CITATION', 'Evidence strength: SUPPORTED', 'Evidence:', 'See https://docs.example.org/x: it says Y', '',
+    '## Rebuttals (from B) of A claims', '', rebuttal('A1', 'CONCEDE', 'agreed'));
+  assert.deepEqual(unopenedWebConcedes({ A: claimSide }), { B: 1 }, 'the claim side reads the same unfenced link, so the bare concede is counted');
+});
+
+test('r4 F3 neighbours: a known field line still ends the Evidence field, and a fenced or lowercase link keeps its result', () => {
+  assert.deepEqual(unopenedWebConcedes({ A: r4Concede('agreed, same reading', 'Suggested fix: see https://docs.example.org/x') }), { B: 1 }, 'a link after "Suggested fix:" is not the concede\'s evidence');
+  assert.deepEqual(unopenedWebConcedes({ A: r4Concede('agreed', 'Action: CONCEDE https://docs.example.org/x') }), { B: 1 });
+  assert.deepEqual(unopenedWebConcedes({ A: r4Concede('```', 'Opened https://docs.example.org/x, it says Y', '```') }), {});
+  assert.deepEqual(unopenedWebConcedes({ A: r4Concede('opened https://docs.example.org/x, it says Y') }), {});
+  assert.deepEqual(unopenedWebConcedes({ A: r4Concede('agreed') }), { B: 1 });
+});
+
+test('r4 F4: a number or task box then a bracketed tag, and a bold tag with the colon inside, are skip lines', () => {
+  const cases = [['1. [AC-1] NOT CHECKED: no box', 'AC-1 no box'], ['1) [AC-1]: NOT CHECKED (no box)', 'AC-1 (no box)'], ['**1.** [AC-1] NOT CHECKED (no box)', 'AC-1 (no box)'],
+    ['1. [ ] NOT CHECKED: AC-1', 'AC-1'], ['- [ ] [AC-1] NOT CHECKED (no box)', 'AC-1 (no box)'], ['- **AC-1:** NOT CHECKED (no box)', 'AC-1 (no box)'],
+    ['- **[AC-1]:** NOT CHECKED (no box)', 'AC-1 (no box)'], ['1. **AC-1:** NOT CHECKED (no box)', 'AC-1 (no box)']];
+  for (const [l, what] of cases) {
+    assert.equal(notCheckedLine(l), true, l);
+    const { row, report } = r1Row(l);
+    assert.equal(row.status, 'not-verified', l);
+    assert.equal(skipCaveat(report), `Checks not done — seat A: ${what}`, l);
+  }
+});
+
+test('r4 F4 neighbours: the same leads with a verdict, lowercase or in backticks stay as they were', () => {
+  for (const l of ['- [AC-1] NOT CHECKED: no box', '- **AC-1**: NOT CHECKED (no box)', '> [AC-1] NOT CHECKED: no box']) assert.equal(notCheckedLine(l), true, l);
+  for (const l of ['1. [AC-1] x.mjs:3 holds. MET', '1. [ ] not checked: AC-1', '- **AC-1:** Not checked (no box)', '1. [AC-1] `NOT CHECKED`: no box', '- **AC-1:** NOT CHECKED: x.mjs:3 holds. MET']) {
+    assert.equal(notCheckedLine(l), false, l);
+  }
+  const { row } = r1Row('1. [AC-1] x.mjs:3 holds. MET');
+  assert.deepEqual([row.status, row.seats, row.met], ['clean', ['A'], 'MET']);
+});
+
+test('r4 F5: a gap marker or skip in a double-backtick code span is quoted code, not the seat\'s own gap or skip', () => {
+  assert.deepEqual(r1Row('- AC-1: prints ``done; NOT CHECKED: rest`` (x.mjs:4). MET').row.doubt, []);
+  assert.deepEqual(r1Row('- AC-1: prints ```done; (web budget spent)``` (x.mjs:4). MET').row.doubt, []);
+  assert.equal(notCheckedLine('- ``NOT CHECKED: AC-1 (no box)``'), false);
+  assert.equal(notCheckedLine('- AC-1: ``NOT CHECKED`` (no box)'), false);
+  const { row } = r1Row('- ``NOT CHECKED: AC-1 (no box)``');
+  assert.deepEqual(row.seats, ['A'], 'the quoted line still names AC-1, so it is not dropped as a skip');
+});
+
+test('r4 F5 neighbours: a marker outside the span, a single-backtick span and an unmatched backtick run keep their results', () => {
+  assert.deepEqual(r1Row('- AC-1: prints ``x`` (x.mjs:4); NOT CHECKED: Linux. MET').row.doubt, ['A']);
+  assert.deepEqual(r1Row('- AC-1: prints `done; NOT CHECKED: rest` (x.mjs:4). MET').row.doubt, []);
+  assert.deepEqual(r1Row('- AC-1: x.mjs:3 holds; NOT CHECKED: Linux. MET').row.doubt, ['A']);
+  assert.equal(notCheckedLine('- `NOT CHECKED: AC-1 (no box)`'), false);
+  assert.equal(notCheckedLine('- ``a`` NOT CHECKED: AC-1 (no box)'), false, 'not one of the two forms: text before NOT CHECKED');
+  assert.equal(notCheckedLine('- AC-1: NOT CHECKED (no box, see ``x``)'), true, 'a code span after the marker does not hide it');
+});
+
+test('r4 F6: a backtick span and a quote before :N count as citations, as the CHANGELOG now says; plain prose does not', () => {
+  assert.deepEqual(bare('- AC-1: rejects `null` inputs. MET'), { passes: 1, bare: 0 });
+  assert.deepEqual(bare('- AC-1: response contains {"count":2}. MET'), { passes: 1, bare: 0 });
+  assert.deepEqual(bare('- AC-1: rejects null inputs. MET'), { passes: 1, bare: 1 });
+  assert.deepEqual(bare('- AC-1: ran `npm test`, 3 pass. MET'), { passes: 1, bare: 0 }, 'a backticked command with no file name');
+});
+
+// Round 5.
+const r5Criteria = (checks, packet = ['- [AC-1] a', '- [AC-2] b', '- Tickets: 6041 = AC-1, AC-2']) => buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: lines(...packet), seatTexts: { A: seatWith(checks), B: '' } }).criteria;
+const r5Row = (c, tag = 'AC-1') => { const r = c.rows.find((x) => x.tag === tag); return { status: r.status, met: r.met, failedSeats: r.failedSeats, doubt: r.doubt, seats: r.seats }; };
+
+test('r5 F3: a criterion skipped tag-first stays not verified next to a ticket line that names it; no verdict, fail word or pass comes from that line', () => {
+  for (const skip of ['- AC-1: NOT CHECKED (no Linux box)', '- [AC-1] NOT CHECKED: no box', '- **AC-1:** NOT CHECKED (no box)',
+    '+ AC-1: NOT CHECKED (no box)', '- [ ] [AC-1] NOT CHECKED (no box)', '- [x] AC-1: NOT CHECKED (no box)', '**1.** AC-1: NOT CHECKED (no box)']) {
+    for (const ticket of ['- 6041: AC-2 MET; AC-1 open. NO GO', '- 6041: AC-1 fails on Linux per CI log, AC-2 met. NO GO', '- 6041: AC-1 and AC-2 met, live run done. GO']) {
+      const c = r5Criteria([skip, '- AC-2: x.mjs:3 holds. MET', ticket]);
+      assert.deepEqual(r5Row(c), { status: 'not-verified', met: null, failedSeats: [], doubt: [], seats: [] }, `${skip} + ${ticket}`);
+      assert.deepEqual([c.criteriaStats.met, c.criteriaStats.notVerified, c.criteriaStats.failedClean], [1, 1, 0], ticket);
+      assert.deepEqual(c.passes.A, { passes: 1, bare: 0 }, ticket);
+      assert.equal(c.tickets[0].verdict, ticket.endsWith('NO GO') ? 'NO GO' : 'GO', 'the ticket line still gives the ticket verdict');
+    }
+  }
+});
+
+test('r6 F1: a hypothesis skipped tag-first with a plus bullet, task box or bold number takes no outcome from a line that mentions it', () => {
+  for (const skip of ['- H1: NOT CHECKED (no box)', '+ H1: NOT CHECKED (no box)', '- [ ] [H1] NOT CHECKED (no box)', '- [x] H1: NOT CHECKED (no box)', '**1.** H1: NOT CHECKED (no box)']) {
+    const c = r5Criteria([skip, '- H2: x.mjs:3 guards. REFUTED', '- Summary: H2 REFUTED; H1 open. REFUTED'], ['- [H1] x is broken', '- [H2] y is broken']);
+    const r = c.rows.find((x) => x.tag === 'H1');
+    assert.deepEqual([r.status, r.verdict, r.seats], ['not-verified', null, []], skip);
+  }
+  for (const own of ['+ H1: x.mjs:4 guards. REFUTED', '- [x] H1: x.mjs:4 guards. REFUTED', '**1.** H1: x.mjs:4 guards. REFUTED']) {
+    const r = r5Criteria([own, '- Summary: H1 CONFIRMED'], ['- [H1] x is broken']).rows.find((x) => x.tag === 'H1');
+    assert.deepEqual([r.status, r.verdict], ['clean', 'refuted'], `${own}: the tag's own line wins over a line that mentions it`);
+  }
+});
+
+test('r6 F2: a slash-less dotfile or numbered file with :N is a citation; a host and port, an IPv4 address and port or a version stay bare', () => {
+  for (const l of ['- AC-1 MET: .env.local:12 sets it', '- AC-1 MET: ls.1:12', '- AC-1 MET: app.log.1:40 shows it', '- AC-1 MET: .config.dev:3 sets it', '- AC-1 MET: config/.env.local:12']) {
+    assert.deepEqual(bare(l), { passes: 1, bare: 0 }, l);
+  }
+  for (const l of ['- AC-1 MET: example.com:443 serves it', '- AC-1 MET: 10.0.0.1:8080 answers', '- AC-1 MET: localhost:3000 answers', '- AC-1 MET: v1.2:3 holds', '- AC-1 MET: api.internal:8080 answers']) {
+    assert.deepEqual(bare(l), { passes: 1, bare: 1 }, l);
+  }
+});
+
+test('r5 F3 neighbours: a ticket line alone still checks a tag, an own verdict line beside a skip still counts, and a skip for another tag does not block it', () => {
+  assert.deepEqual(r5Row(r5Criteria(['- AC-2: x.mjs:3 holds. MET', '- 6041: AC-2 MET; AC-1 met per x.mjs:9. GO'])), { status: 'clean', met: 'MET', failedSeats: [], doubt: [], seats: ['A'] });
+  assert.deepEqual(r5Row(r5Criteria(['- AC-1: NOT CHECKED (no Linux box)', '- AC-1: x.mjs:4 holds on Windows. MET', '- 6041: AC-1 open. NO GO'])), { status: 'clean', met: 'MET', failedSeats: [], doubt: [], seats: ['A'] });
+  assert.deepEqual(r5Row(r5Criteria(['- AC-2: NOT CHECKED (no box)', '- 6041: AC-1 fails on Linux per CI log. NO GO'])), { status: 'clean', met: null, failedSeats: ['A'], doubt: [], seats: ['A'] });
+  assert.equal(r5Row(r5Criteria(['- AC-2: NOT CHECKED (no box)', '- 6041: AC-1 fails on Linux per CI log. NO GO']), 'AC-2').status, 'not-verified');
+});
+
+test('r5 F1: a gap or failure word between two multi-backtick spans that hold a backtick is the seat\'s own; inside such a span it is code', () => {
+  assert.deepEqual(r1Row('- AC-1: read ``left`name``; could not run Linux tests; checked ``right`name`` (x.mjs:4)').row.doubt, ['A']);
+  assert.deepEqual(r1Row('- AC-1: read ``could not`` (x.mjs:4)').row.doubt, []);
+  assert.deepEqual(r1Row('- AC-1: read ``a`b``; the build failed; checked ``c`d`` (x.mjs:4)').row.failedSeats, ['A']);
+  assert.deepEqual(r1Row('- AC-1: read ``the build failed`` (x.mjs:4)').row.failedSeats, []);
+});
+
+test('r5 F1 neighbours: single-backtick spans, gap words outside code and an unmatched backtick keep their results', () => {
+  assert.deepEqual(r1Row('- AC-1: read `could not` (x.mjs:4)').row.doubt, []);
+  assert.deepEqual(r1Row('- AC-1: could not run `x` (x.mjs:4)').row.doubt, ['A']);
+  assert.deepEqual(r1Row('- AC-1: could not run x` tests (x.mjs:4)').row.doubt, ['A']);
+  assert.deepEqual(r1Row('- AC-1: read "could not" in x.mjs:4').row.doubt, []);
+  assert.deepEqual(r1Row('- AC-1: the build failed (x.mjs:4)').row.failedSeats, ['A']);
+  assert.deepEqual(r1Row('- AC-1: prints `build failed` (x.mjs:4)').row.failedSeats, []);
+  assert.deepEqual(r1Row('- AC-1: the build failed` here (x.mjs:4)').row.failedSeats, ['A']);
+});
+
+test('r5 F4: the exact NOT CHECKED marker in * or _ emphasis is a skip and a pass line\'s own gap', () => {
+  for (const l of ['- __NOT CHECKED__: AC-1 (no box)', '- _NOT CHECKED_: AC-1 (no box)', '- AC-1: _NOT CHECKED_ (no box)', '- AC-1: __NOT CHECKED__ (no box)', '- **NOT CHECKED**: AC-1 (no box)', '- AC-1: **NOT CHECKED** (no box)']) {
+    assert.equal(notCheckedLine(l), true, l);
+    const { row, report } = r1Row(l);
+    assert.equal(row.status, 'not-verified', l);
+    assert.equal(skipCaveat(report), 'Checks not done — seat A: AC-1 (no box)', l);
+  }
+  for (const l of ['- AC-1: x.mjs:3 holds; **NOT CHECKED**: Linux. MET', '- AC-1: x.mjs:3 holds; **NOT CHECKED:** Linux. MET', '- AC-1: x.mjs:3 holds. **NOT CHECKED** (no Mac). MET', '- AC-1: x.mjs:3 holds; _NOT CHECKED_: Linux. MET']) {
+    assert.deepEqual(r1Row(l).row.doubt, ['A'], l);
+  }
+  assert.deepEqual(r1Row('- H1: x.mjs:3 guards; **NOT CHECKED**: Linux. REFUTED', 'H1').row.doubt, ['A']);
+});
+
+test('r5 F4 neighbours: emphasis does not widen the closed list: lowercase, "by", a hyphen, code spans and text between stay as they were', () => {
+  for (const l of ['- _not checked_: AC-1', '- AC-1: _NOT CHECKED_ by the tool', '- AC-1: __NOT CHECKED__-in files', '- `_NOT CHECKED_`: AC-1', '- AC-1: _NOT CHECKED_ (no box). MET', '- _x_ NOT CHECKED: AC-1']) {
+    assert.equal(notCheckedLine(l), false, l);
+  }
+  for (const l of ['- AC-1: x.mjs:3 holds; _NOT CHECKED_ by the tool. MET', '- AC-1: x.mjs:3 prints `; **NOT CHECKED**:` for skips. MET', '- AC-1: x.mjs:3 holds; Linux **NOT CHECKED** (no box). MET', '- AC-1: x.mjs:3 holds; _not checked_: Linux. MET']) {
+    assert.deepEqual(r1Row(l).row.doubt, [], l);
+  }
 });

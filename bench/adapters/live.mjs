@@ -356,6 +356,14 @@ async function runUnion({ runDir }) {
   };
 }
 
+export const SKILLARRAY_USAGE_DEVIATION = 'skillarray\'s usage is the orchestrator\'s own claude -p call only (source "orchestrator-only"); the reviewer seats and the auditor run as separate processes and are not summed, so new_tokens does not count this arm';
+
+// The orchestrator's usage, marked partial so the aggregate's new_tokens skips it; unavailable when stdout does not parse.
+export function skillarrayUsage(stdout) {
+  const mapped = mapClaudeCliResult(stdout);
+  return mapped.error ? { source: 'unavailable' } : { ...mapped.usage, source: 'orchestrator-only' };
+}
+
 async function runSkillarray({ packet, runDir }) {
   const runDirAbs = path.resolve(runDir);
   await mkdir(runDirAbs, { recursive: true });
@@ -391,6 +399,7 @@ async function runSkillarray({ packet, runDir }) {
     'skillarray has no per-arm dispatcher result.json of its own at this layer -- its artifacts are whatever review-protocol.md\'s own run directory contains',
     'skillarray\'s run directory is externally fixed via --append-system-prompt, not orchestrator-chosen by default',
     '--append-system-prompt also carries a "the configured Codex model IDs are real" nudge, to prevent a refusal at dispatch time matching the one seen during interactive setup',
+    SKILLARRAY_USAGE_DEVIATION,
   ];
   const artifacts = ['orchestrator-stdout.json'];
 
@@ -408,12 +417,10 @@ async function runSkillarray({ packet, runDir }) {
     return { status: 'malformed', findings: null, error: `no readable findings.json in the run directory: ${err.message}`, usage: { source: 'unavailable' }, artifacts, deviations };
   }
 
-  const mapped = mapClaudeCliResult(stdout);
-  const usage = mapped.error ? { source: 'unavailable' } : mapped.usage;
   return {
     status: 'completed',
     findings: findingsJson.findings ?? [],
-    usage,
+    usage: skillarrayUsage(stdout),
     artifacts,
     deviations,
   };

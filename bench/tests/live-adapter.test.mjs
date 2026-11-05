@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { parseFindingsBlock, renderBrief, mapClaudeCliResult, runArm } from '../adapters/live.mjs';
+import { parseFindingsBlock, renderBrief, mapClaudeCliResult, runArm, skillarrayUsage, SKILLARRAY_USAGE_DEVIATION } from '../adapters/live.mjs';
+import { aggregateArms } from '../run-comparison.mjs';
 
 async function withTmpDir(t) {
   const dir = await mkdtemp(path.join(tmpdir(), 'live-adapter-test-'));
@@ -197,4 +198,18 @@ test('runArm("skillarray"): a case with no target throws before any spawn is att
 test('runArm: an unknown arm name throws', async (t) => {
   const runDir = await withTmpDir(t);
   await assert.rejects(() => runArm({ arm: 'not-a-real-arm', packet: {}, runDir }), /unknown arm/);
+});
+
+test('skillarrayUsage: the orchestrator\'s usage is marked orchestrator-only, so aggregateArms does not count it as the arm\'s new tokens', () => {
+  const stdout = JSON.stringify({ result: 'done', usage: { input_tokens: 2000, cache_creation_input_tokens: 300, output_tokens: 500 } });
+  const usage = skillarrayUsage(stdout);
+  assert.equal(usage.source, 'orchestrator-only');
+  assert.equal(usage.input_tokens, 2000, 'the figures stay readable');
+  const arm = (name, u) => ({ arm: name, status: 'completed', score: { recall: 1, precision: 1, f1: 1 }, duration_ms: 1000, usage: u });
+  const agg = aggregateArms([{ trial: 1, arms: [arm('skillarray', usage), arm('claude-alone', mapClaudeCliResult(stdout).usage)] }]);
+  assert.equal(agg.skillarray.new_tokens.metered_runs, 0);
+  assert.equal(agg['claude-alone'].new_tokens.metered_runs, 1, 'a single-process arm is still metered');
+  assert.equal(agg['claude-alone'].new_tokens.mean, 2800);
+  assert.match(SKILLARRAY_USAGE_DEVIATION, /orchestrator's own claude -p call only.*seats and the auditor .*not summed/);
+  assert.deepEqual(skillarrayUsage('not json'), { source: 'unavailable' });
 });

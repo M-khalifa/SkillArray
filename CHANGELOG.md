@@ -2,11 +2,22 @@
 
 ## 1.2.1 - 2026-11-03
 
-The fixes added to the 1.2.0 tag between 2026-11-01 and 2026-11-03, under a new version number so `/plugin update`
+The fixes added to the 1.2.0 tag between 2026-11-01 and 2026-11-03, under a new version number so a plugin update
 brings them to an installed 1.2.0, and:
 
 - Typing `/pair-review` or `/cross-review` in Claude Code shows the arguments it takes (setup, config, reset, and
   pair-review's modes), and a first run says it is picking models before it asks.
+- A review report (text, Markdown, chat or HTML) ends with one line when Claude Code's local copy of the marketplace
+  holds a newer SkillArray than the one that ran, with the steps to update the plugin (`/plugin manage`, the plugin,
+  Update now, then `/reload-plugins`; or `claude plugin update <plugin>@<marketplace>` in a shell); preflight records
+  both versions in `update-check.json` and makes no network call. A record whose versions, plugin or marketplace are
+  not text, whose `newer` is not `true`, or whose published version is not a higher dotted version (`1.2.2`) than the
+  one that ran, is ignored; preflight reads a missing or non-text installed version as the cache folder's version and
+  records nothing when the published one is missing or not text. A first setup on Claude Code also suggests turning on auto-update for
+  the skillarray marketplace. Whenever the installed and published versions differ (also when no update line is shown, such as a
+  pre-release installed or an older marketplace copy), preflight leaves out its same-version drift warning (the
+  files differ because the version differs). That warning now names the same update steps; it named
+  `/plugin update`, which has no session form in Claude Code.
 
 Fixes for four of the 1.2.0 Known issues:
 
@@ -68,6 +79,83 @@ work, and the quick recheck recipe; linked from the packet template.
   unchanged.
 - Tool calls Claude Code refused a seat, the auditor or a verifier are recorded in the manifest as `permission_denials`
   (count and tools), and the report names them, since such a reviewer may have worked with less than it asked for.
+
+The report now says how far a result was checked:
+
+- A finding that cites a web page (Basis SOURCE_CITATION with a link) gets a caveat that the auditor, which has no web
+  access, did not re-check it, and one more when its seat reported opening no page (`0 page fetches`).
+- A Checks performed line in one of two exact forms is a skipped check: it no longer counts as a check of the
+  criterion it names, and the report lists it under "Checks not done". A criterion whose own lines are all tag-first
+  skips takes no verdict, failure word or pass from a line that only mentions it, such as a ticket line (`- 6041:
+  AC-2 MET; AC-1 open. NO GO`), with any bullet, number, bold, quote, table bar or task box the skip forms accept
+  before the tag (`+ AC-1:`, `- [ ] [AC-1]`, `**1.** AC-1:`). The forms are `NOT CHECKED` first, followed by
+  `:`, `(` or the line end (`- NOT CHECKED: AC-2 on Linux (no box)`), and a tag first (`AC-2` or `H1`, also in `[ ]`),
+  then an optional `:`, `-`, en dash, em dash or `|`, then `NOT CHECKED` followed by the line end, `:`, `(`, `.`, `;` or
+  `|` (`- AC-2: NOT CHECKED (no box)`, `- [AC-2] NOT CHECKED: no box`, `| AC-2 | NOT CHECKED | no box |`), after any
+  bullet, number, bold, quote, table bar or task box, also a number or task box then a bracketed tag (`1. [AC-2] NOT
+  CHECKED: no box`) and a bold tag with the colon inside (`- **AC-2:** NOT CHECKED (no box)`). `NOT CHECKED` must be
+  uppercase (bare or in `*` or `_` emphasis: `**NOT CHECKED**`, `_NOT CHECKED_`) and outside a code span (of any number of backticks), and the line must have no verdict of its own (MET, NOT MET, PARTIAL, REFUTED or CONFIRMED).
+- A MET or REFUTED line names its own gap, and the check is marked as incomplete, only with one of two exact markers:
+  an uppercase `NOT CHECKED` (bare or in `*` or `_` emphasis) after `;`, `.`, `,` or a dash and followed by `:`, `(`
+  or the line end (`x.mjs:3 holds; NOT CHECKED: Linux. MET`, `x.mjs:3 holds; **NOT CHECKED**: Linux. MET`); or a bracket `(web budget spent)`, `(web budget used up)`, `(web budget exhausted)`,
+  `(web budget ran out)` or `(out of web budget)`, in any case. Neither marker counts inside a code span (of any
+  number of backticks) or single or double quotes. A line with no verdict is marked by the
+  1.2.0 words (unverified, not verified, could not, couldn't, cannot, can't, not available, not run, unable to, skipped), not inside
+  quotes, code spans (of any number of backticks) or dotted names. Gaps written in other words ("Not checked on Linux", "untested", "suite not rerun",
+  "never executed") are not marked, and a sentence-case "Not checked" or a tag in parentheses is not a skip: the seat
+  should write each skip on its own `- NOT CHECKED: <what> (<why>)` line. A hypothesis gets the "said its check was
+  incomplete" caveat only when a seat refuted it or the seats split.
+- Expected change to existing criteria rows (not only added lines) against a 1.2.0 report: a criterion a seat named
+  only on a `NOT CHECKED` line is no longer checked by that seat (NOT VERIFIED when no other seat checked it); a line
+  with no verdict loses its "said the check was incomplete" mark when its gap word (such as "could not") is inside
+  quotes, backticks or a dotted name; a failure word (such as "failed") inside a code span of two or more backticks
+  no longer marks a line as failing; and a MET or REFUTED line that names its own gap with one of the two exact markers
+  (an uppercase `NOT CHECKED` clause or a web-budget-spent bracket) gains the mark.
+- Per seat, the report counts MET and REFUTED lines that name a criterion or hypothesis but cite none of these: a
+  file:line whose name has a dot or slash (`x.mjs:12`, `.gitignore:12`, `C:\repo\x.mjs:12`, `x.mjs:L12`, `x.mjs#L12`,
+  `src/x.mjs(12)`) or is README, Makefile, Dockerfile, LICENSE, CHANGELOG, Justfile, Procfile,
+  Gemfile or Rakefile; a line number (`x.mjs L12`, "lines 336-352", `l. 12`, `ll. 3-9`); any quoted name closed before
+  `:12` (`"C:\repo\x.mjs":12`, but also `{"count":2}`); any backtick span (a command such as `npm test`, but also a
+  value such as `null`); a runner word (ran, node, npm, pytest, python, go test, cargo) before a file name; a link; one of the seat's claim IDs;
+  one of the report's finding IDs. A dotfile or numbered file with no folder (`.env.local:12`, `ls.1:5`,
+  `app.log.1:3`) is a file:line. `localhost:8080`, a dotted host and port (`example.com:443`, `10.0.0.1:8080`), a
+  version (`v1.2:3`), `step:2` and an F-score (`F1 score`) are not citations. The caveat reads "N of M
+  MET or REFUTED check lines cite no file:line, backticked command, link, claim ID or finding ID the report could find".
+  Known undercount: a path in emphasis or angle brackets (`**x.mjs:12**`, `<x.mjs:12>`), a path holding `@`, `(`,
+  `)`, `[`, `]` or `~` (`app/(auth)/page.tsx:12`), and `x.mjs (L12)` or `x.mjs, L12` are not read as citations, so
+  such a line counts as citing nothing.
+- A finding a seat ran (Basis EXECUTED) that the auditor confirmed only by reading gets a caveat.
+- Per seat, the report counts conceded peer claims that cite a web page where the concede neither links the page nor
+  checks it (or says `Web fact not re-checked`); it reads the rebuttals from `phase1/<seat>-findings.md` and looks for
+  links only in the Evidence field of the claim and of the concede, which ends at its fenced block or, unfenced, at the
+  next field line (Severity, Basis, Evidence strength, Evidence, Suggested fix, Trigger, Pre-existing, Same shape
+  elsewhere, Claim or Action); a line such as "Opened https://..." stays in the field.
+- The review protocol asks for a concede's own evidence, an opened page or `Web fact not re-checked` when conceding a web
+  citation, a `Tried:` line in adversarial mode (the rebuttal format checks accept it), `- NOT CHECKED: <what> (<why>)`
+  lines for skipped checks, and what each pass line rests on.
+
+From a live run of the pre-release on 2026-11-03:
+
+- The rules that apply throughout a run now come right after the skill's introduction in SKILL.md, within the first
+  5,000 tokens that Claude Code keeps after it compacts a session. The text is unchanged.
+- The "may have reviewed blind" caveat now tells you to check whether the task packet already gave that seat the
+  evidence it could not get, instead of saying the result is weaker than it looks.
+- An UNMET criterion line in the short report names the highest severity of its findings ("findings F3 (LOW)").
+- When the seats split on a hypothesis, the full report (text, Markdown and chat `--all`) prints each seat's own check
+  line for it under the caveat, cut to 200 characters.
+- A new caveat names each HIGH or CRITICAL finding that stands where neither the seat nor the auditor ran anything
+  (Basis not EXECUTED on both sides) and no falsification verifier ran it (no `verifications` entry with basis EXECUTED).
+- A new caveat names each finding both seats agreed on that the auditor of a full audit marked NOT_CHECKED.
+- `review-run status` adds ", no stderr for 5m30s" to a running Codex CLI seat whose stderr log has not changed for 2
+  minutes or more (its JSON events on stdout are not measured, so a working seat can show it), and ", no output for
+  5m30s" to a native agent whose transcript has not changed for as long; a Codex seat with no live log yet counts from
+  its start. A Claude CLI seat writes no live log, so its line has no idle text.
+- The bench summary (`bench/run-comparison.mjs`) records each arm run's wall time and adds a per-arm aggregate: mean and
+  spread of recall, precision and F1 over completed runs, p50 and p95 wall time, and new tokens where the adapter meters
+  them (as in the report's cost table: a Codex record's input minus its cached input, a Claude record's input plus its
+  cache write, then the output). The skillarray arm meters only its orchestrator's `claude -p` call (the seats and
+  the auditor are separate processes), so its usage is marked `orchestrator-only`, is not counted, and a deviation
+  line says so.
 
 ## 1.2.0 - 2026-10-28
 

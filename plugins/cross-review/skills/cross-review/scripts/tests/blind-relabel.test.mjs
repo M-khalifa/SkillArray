@@ -3065,6 +3065,16 @@ test('CLI append-rebuttals: F8 -- normalizes "## P<n>" entry headings to "###", 
   assert.match(again.stderr, /already contains "## Rebuttals \(from B\) of A claims"/);
 });
 
+test('CLI append-rebuttals: an adversarial-mode "Tried:" line after Action is kept and the result validates clean', async (t) => {
+  const { dir, peerView, onto } = await f8Setup(t);
+  const raw = path.join(dir, 'raw.md');
+  await fs.writeFile(raw, '### P1\nClaim: P1\nAction: CONCEDE\nTried: fed it an empty list; it still fails\nEvidence:\n```\nWeb fact not re-checked\n```\n\n### P2\nClaim: P2\nAction: DISPUTE\nTried: ran it twice, both passed\nCounter-fact: x\n');
+  const r = await runCli(['append-rebuttals', '--in', raw, '--onto', onto, '--rebutter', 'B', '--peer-view', peerView]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(await fs.readFile(onto, 'utf8'), /\nAction: CONCEDE\nTried: fed it an empty list; it still fails\n/);
+  assert.equal((await runCli(['validate', '--phase1-dir', dir])).status, 0);
+});
+
 test('CLI append-rebuttals: F8 -- refuses, leaving --onto byte-identical, on a coverage gap, a duplicate entry, a missing Action line, a fenced P token naming a peer-view claim, or an --onto that is not the peer\'s file [slow]', async (t) => {
   const { dir, aText, peerView, onto } = await f8Setup(t);
   const cases = [

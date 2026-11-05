@@ -76,3 +76,12 @@ test('every review-run command and option the docs write in code is in review-ru
   }
   assert.deepEqual(problems, []);
 });
+
+test('SKILL.md: the rules that apply throughout end within the first 5,000 tokens (4 characters each), which survive compaction', () => {
+  const text = fs.readFileSync(path.join(SKILL, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+  const start = text.indexOf('\n## Rules that apply throughout\n');
+  const end = text.indexOf('\n## ', start + 1);
+  assert.ok(start > 0 && end > start, 'the section is there');
+  assert.ok(end <= text.indexOf('\n## Quickstart\n'), 'it comes before the Quickstart');
+  assert.ok(end / 4 < 5000, `it ends at about ${Math.round(end / 4)} tokens`);
+});

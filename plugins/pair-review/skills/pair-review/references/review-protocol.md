@@ -16,16 +16,16 @@ This file is longer than one Read returns. Read it in two parts: up to the
 - line 75: Three label layers
 - line 93: Model identity
 - line 116: Evidence and findings: reviewer-authored fields
-- line 208: Standard seat instructions
-- line 312: Web verification
-- line 380: Blind exchange
-- line 389: Interaction modes
-- line 419: Synthesis: adjudication-added fields
-- line 465: Falsification pass
-- line 568: Canonical findings
-- line 640: findings.json
-- line 821: Fresh-context auditor
-- line 1009: Manifest and final output
+- line 209: Standard seat instructions
+- line 314: Web verification
+- line 382: Blind exchange
+- line 391: Interaction modes
+- line 421: Synthesis: adjudication-added fields
+- line 467: Falsification pass
+- line 570: Canonical findings
+- line 642: findings.json
+- line 823: Fresh-context auditor
+- line 1011: Manifest and final output
 <!-- /section-index -->
 
 ## Scope and independence
@@ -123,7 +123,8 @@ For designs and documents, cite source passages and distinguish inference.
 A finding is a defect claim. Checks that found nothing wrong are NOT findings;
 list them in a separate `## Checks performed` section (one line each: what was
 checked and how) so the findings list stays defect-only and the schema below
-never needs a PASS case.
+never needs a PASS case. Write a skipped in-scope check as `- NOT CHECKED: <what> (<why>)`, and
+make each pass line name what it rests on (file:line, command, claim ID or link).
 
 Every finding uses this schema (claims are labelled `A1, A2, ...` for seat A
 and `B1, B2, ...` for seat B; the review relabels them for each reader, so use
@@ -289,7 +290,7 @@ copies this section into briefs verbatim, never a paraphrase.
 For each `P` claim, refute it with a specific checkable counter-fact or explicitly concede
 with a reason. Bare disagreement does not overturn it. EXECUTED + REPRODUCED requires executed
 counter-evidence to refute. Where you agree but the severity is wrong, CONCEDE and state the
-corrected severity in Evidence; the auditor records it as `auditor_check.severity` when its check agrees. Refer to peer claims only by their `P` IDs, never inside an
+corrected severity in Evidence; the auditor records it as `auditor_check.severity` when its check agrees. A CONCEDE's Evidence is your own check, not the peer's evidence copied back. To concede a SOURCE_CITATION claim, open the cited page within your web cap and quote it, or write `Web fact not re-checked` in Evidence (always, in a repo-only review). In adversarial mode, add `Tried: <what you did to break the claim and what you found>` after Action. Refer to peer claims only by their `P` IDs, never inside an
 Evidence fence (a line such as `P1 success count was 3` inside a code block is refused; write it in the prose or leave the ID out). Use exactly this block per claim, every `P` claim covered once, in order, with
 a `###` heading (never `##`):
 
@@ -297,6 +298,7 @@ a `###` heading (never `##`):
 ### P<n>
 Claim: P<n>
 Action: CONCEDE | DISPUTE
+Tried: <adversarial mode only>
 Counter-fact: <only when Action is DISPUTE: quoted or cited>
 Basis: EXECUTED | STATIC_TRACE | SOURCE_CITATION | INFERENCE
 Evidence strength: REPRODUCED | DETERMINISTIC | SUPPORTED | PLAUSIBLE | SPECULATIVE

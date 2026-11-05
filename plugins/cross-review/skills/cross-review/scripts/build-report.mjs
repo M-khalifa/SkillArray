@@ -7,8 +7,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { parseFenceLines } from './blind-relabel.mjs';
+import { parseFenceLines, splitLineSpans } from './blind-relabel.mjs';
 import { parseSeatFile } from './seat-file.mjs';
+import { compareVersions } from './path-utils.mjs';
 import { makeIo, refuseDirectRun, runStep as runStepWith } from './step-io.mjs';
 
 // Which skill wrote a report or scorecard: its name and version from this copy's SKILL.md (the version that ran, from the
@@ -29,6 +30,11 @@ export function generatorInfo(version = null) {
 
 export function generatorLine(g = generatorInfo()) {
   return `Reviewed with ${g.skill}${g.version ? ` ${g.version}` : ''} (SkillArray, MIT license): ${g.url}`;
+}
+
+// The update line for a newer version in the local marketplace clone (preflight's update-check.json).
+export function updateNote(u) {
+  return `A newer SkillArray (${u.published}) is published; this run used ${u.installed}. Update: /plugin manage, ${u.plugin}, Update now, then /reload-plugins (or in a shell: claude plugin update ${u.plugin}@${u.marketplace}).`;
 }
 
 class ReportError extends Error {}
@@ -330,12 +336,66 @@ export function parseOutcome(line) {
 
 // A check line that reports a failure: negated phrases ("does not fail") are dropped first.
 const FAILED_CHECK_RE = /\b(?:fails?|failed|failing|violat\w+|broken|not met)\b/i;
-const NOT_A_FAILURE = [/`[^`]*`/g, /(?<![A-Za-z0-9])'[^']*'/g, /"[^"]*"/g, /\b\w+(?:[-_.]\w+)+\b/g, /\bfail(?:s|ed)?\s+(?:as intended|as expected|before the fix|without the fix|at HEAD|on HEAD)\b/gi];
-const failedCheck = (line) => FAILED_CHECK_RE.test(NOT_A_FAILURE.reduce((text, re) => text.replace(re, ' '), String(line ?? '')).replace(/\b(?:not|never|no|n't)\s+(?:\w+\s+)?(?:fail\w*|violat\w+|broken)\b/gi, ' '));
+const NOT_A_FAILURE = [/(?<![A-Za-z0-9])'[^']*'/g, /"[^"]*"/g, /\b\w+(?:[-_.]\w+)+\b/g, /\bfail(?:s|ed)?\s+(?:as intended|as expected|before the fix|without the fix|at HEAD|on HEAD)\b/gi];
+const failedCheck = (line) => FAILED_CHECK_RE.test(NOT_A_FAILURE.reduce((text, re) => text.replace(re, ' '), dropCode(String(line ?? ''), ' ')).replace(/\b(?:not|never|no|n't)\s+(?:\w+\s+)?(?:fail\w*|violat\w+|broken)\b/gi, ' '));
 
-// A seat that names a tag but says it could not do the check has not verified it.
+// The seat's own words: code spans (any backtick width), quoted and dotted names are dropped before a gap test.
+const ownWords = (line) => NOT_A_FAILURE.slice(0, 3).reduce((text, re) => text.replace(re, ' '), dropCode(String(line ?? ''), ' '));
+// A seat that says it could not do the check has not verified it.
 const INCOMPLETE_CHECK_RE = /\b(?:unverified|not verified|could not|couldn't|cannot|can't|not available|not run|unable to|skipped)\b/i;
-
+const incompleteCheck = (line) => INCOMPLETE_CHECK_RE.test(ownWords(line));
+// A list prefix: bullet (-, *, +), number ("1." or "**1.**"), task box, quote, table bar.
+const LEAD = String.raw`^[\s>|*+\`[-]*(?:\[[ xX]\]\s*)?(?:\*{0,2}\d+[.)]\*{0,2}\s+)?(?:\[[ xX]\]\s*)?[\s*\`[]*`;
+// Only two exact forms are a skipped check: "- NOT CHECKED: <what> (<why>)" and the tag first ("- AC-2: NOT CHECKED
+// (no box)"). Uppercase only (in * or _ emphasis or none), never inside backticks, never on a line with a verdict of its
+// own; other wordings are prose.
+const NOT_CHECKED_FIRST = new RegExp(String.raw`${LEAD}[*_]{0,2}(NOT CHECKED)(?=[*_]{0,2}\s*(?:$|[:(]))`, 'd');
+const NOT_CHECKED_TAG_FIRST = new RegExp(String.raw`${LEAD}([A-Za-z]+(?:-[A-Za-z0-9]+)+|H\d+)[\]` + '`' + String.raw`*]*\s*[:|–—-]?\s*[*_]{0,2}\s*(NOT CHECKED)(?=[*_]{0,2}\s*(?:$|[:(.;|]))`, 'd');
+const OWN_VERDICT_RE = /\b(?:UN-?MET|MET|PARTIAL(?:LY)?|REFUTED|CONFIRMED)\b/;
+// Inline code spans as CommonMark reads them (a run of N backticks closes at the next run of exactly N), shared by the skip and gap tests.
+const codeSpans = (text) => { let at = 0; return splitLineSpans(text, false).map((s) => ({ ...s, start: (at += s.text.length) - s.text.length })); };
+const inCode = (text, at) => codeSpans(text).some((s) => s.code && at >= s.start && at < s.start + s.text.length);
+const dropCode = (text, by) => codeSpans(text).map((s) => (s.code ? by : s.text)).join('');
+const skipForm = (line) => {
+  const text = String(line ?? '');
+  if (OWN_VERDICT_RE.test(text)) return null;
+  for (const re of [NOT_CHECKED_TAG_FIRST, NOT_CHECKED_FIRST]) {
+    const m = re.exec(text);
+    if (m && !inCode(text, m.indices[m.length - 1][0])) return { re, tag: m.length > 2 ? m[1] : undefined };
+  }
+  return null;
+};
+export const notCheckedLine = (line) => skipForm(line) !== null;
+// What a skipped line says was not checked: the text after the format word, the tag kept in front for a tag-first line.
+const skippedWhat = (line) => {
+  const { re, tag } = skipForm(line);
+  const rest = String(line).replace(re, '').replace(/^_{1,2}/, '').replace(/^[\s:*|–—-]*(?:[.;](?=\s|$))?[\s:*|–—-]*/, '').replace(/\s*\|\s*/g, ' ').trim();
+  return `${tag ? `${tag} ` : ''}${rest}`.trim().slice(0, 200);
+};
+// A pass line (MET, or REFUTED for a hypothesis) names its own gap only with an uppercase NOT CHECKED clause after
+// ; . , or a dash (* or _ emphasis allowed), or a bracket saying the web budget is spent. A gap in other words is not read.
+const SELF_GAP_RE = /[;.,–—-]\s*[*_]{0,2}NOT CHECKED[*_]{0,2}\s*(?:$|[:(])/;
+const WEB_BUDGET_SPENT_RE = /\(\s*(?:web budget (?:spent|used up|exhausted|ran out)|out of web budget)\s*\)/i;
+const selfGap = (line) => {
+  const text = NOT_A_FAILURE.slice(0, 2).reduce((t, re) => t.replace(re, ' code '), dropCode(String(line ?? ''), ' code ')).replace(new RegExp(LEAD), '');
+  return SELF_GAP_RE.test(text) || WEB_BUDGET_SPENT_RE.test(text);
+};
+// What a pass line rests on: a file:line (the name has a dot or slash, or is README, Makefile and the like), :L12, #L12,
+// file(12), "line 12", "l. 12", a quote closed before :12, a runner word before a file name, a backtick, a link, a claim
+// ID of the seat, or a finding ID of this report. A tag in backticks ("`AC-1`:") is not a citation.
+const BARE_FILES = /^(?:README|Makefile|Dockerfile|LICENSE|CHANGELOG|Justfile|Procfile|Gemfile|Rakefile)$/i;
+const fileName = (name) => /[./\\]/.test(name) || BARE_FILES.test(name);
+// A host and port (example.com:443, 10.0.0.1:8080) or a version (v1.2:3): no slash or leading dot; all digits or a host suffix.
+const HOST_SUFFIX = /\.(?:com|net|org|io|internal|local|localdomain|lan|corp|home|arpa|intra|dev|app|co|edu|gov|cloud|host|info|us|uk|de|fr|eu|ca|au|jp|cn|ru|nl|se|ch|it|es|br)$/i;
+const hostPort = (name, num) => /^:\d+$/.test(num) && !/[/\\]/.test(name) && !name.startsWith('.') && (/^v?\d+(?:\.\d+)+$/i.test(name) || HOST_SUFFIX.test(name));
+const RUNNER_FILE_RE = /\b(?:ran|node|npm|pytest|python|go test|cargo)\s+(?:\S+\s+){0,3}?[\w./\\-]*[\w-]\.[A-Za-z]\w*\b/i;
+const anchored = (line, seat, tag, findingIds = new Set()) => {
+  const text = String(line).replace(new RegExp(`\`${escapeRe(tag)}[:.]?\``, 'g'), tag);
+  const pathLine = [...text.matchAll(/(?:^|[\s(\["':])((?:[A-Za-z]:)?\.?[\w./\\-]*[A-Za-z][\w./\\-]*)(:L?\d+|#L\d+|\(\d+\))/g)]
+    .some((m) => m[1] !== tag && (m[2].startsWith('#') || (fileName(m[1]) && !hostPort(m[1], m[2]))));
+  return pathLine || /\blines?\s+\d+|[\w-]\.[A-Za-z]\w*\s+L\d+\b/i.test(text) || /\bll?\.\s*\d+|["']:\d+/.test(text) || RUNNER_FILE_RE.test(text) || text.includes('`')
+    || /https?:\/\//i.test(text) || new RegExp(`\\b${seat}\\d+\\b`).test(text) || [...text.matchAll(/\bF\d+\b(?![ -][Ss]cores?\b)/g)].some((m) => findingIds.has(m[0]));
+};
 // A seat's verdict on a criterion: MET, PARTIAL or NOT MET, read by lineVerdict; the tag itself is never a verdict.
 const VERDICT_RANK = { 'NOT MET': 3, PARTIAL: 2, MET: 1 };
 export function parseVerdict(line, tag = null) {
@@ -345,8 +405,8 @@ export function parseVerdict(line, tag = null) {
 }
 const worstVerdict = (list) => (list.length === 0 ? null : list.reduce((a, b) => (VERDICT_RANK[b] > VERDICT_RANK[a] ? b : a)));
 
-// A line that starts with the tag: a bullet, list number, quote, table bar, bracket, bold or code mark may come first.
-const leadRe = (tag) => new RegExp(`^[\\s>|*\`[-]*(?:\\d+[.)]\\s+)?[\\s*\`[]*${escapeRe(tag)}(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])`);
+// A line that starts with the tag after the same list prefix (LEAD) the skip forms accept.
+const leadRe = (tag) => new RegExp(`${LEAD}${escapeRe(tag)}(?![A-Za-z0-9_-]|\\.[A-Za-z0-9])`);
 
 // "- 6048: GO." or "6049 - NO GO, reason": a line that starts with the ticket id; the worst verdict over a seat's lines,
 // and a NO GO from any seat, wins.
@@ -449,13 +509,16 @@ export function buildCriteria(criteria, findings, headingTags, checksBySeat, tic
     }
   }
   // A seat's lines for a tag: those that start with it; when none does, those that mention it and start with no other packet tag.
+  // Skip lines are dropped after that choice, so a tag whose own lines are all skips has no lines.
   const known = [...criteria.keys()];
+  const findingIds = new Set(findings.map((f) => f.id));
   const leads = new Map(known.map((tag) => [tag, leadRe(tag)]));
   const linesBySeat = Object.fromEntries(Object.entries(checksBySeat).map(([seat, body]) => {
     const all = body.split(/\r?\n/);
     return [seat, Object.fromEntries(known.map((tag) => {
       const own = all.filter((l) => leads.get(tag).test(l));
-      return [tag, own.length > 0 ? own : all.filter((l) => tagPattern(tag).test(l) && !known.some((other) => leads.get(other).test(l)))];
+      const picked = own.length > 0 ? own : all.filter((l) => tagPattern(tag).test(l) && !known.some((other) => leads.get(other).test(l)));
+      return [tag, picked.filter((l) => !notCheckedLine(l))];
     }))];
   }));
   const rows = [...criteria.entries()].map(([tag, text]) => {
@@ -470,7 +533,8 @@ export function buildCriteria(criteria, findings, headingTags, checksBySeat, tic
     const seatVerdict = Object.fromEntries(named.map((seat) => [seat, hypothesis ? mergeOutcomes(linesOf(seat).map(parseOutcome)) : worstVerdict(linesOf(seat).map((l) => parseVerdict(l, tag)).filter(Boolean))]));
     // Failure and "could not" words only count on lines with no verdict word: an explicit verdict is what the seat decided.
     const failedSeats = status === 'clean' && !hypothesis ? named.filter((seat) => seatVerdict[seat] === 'NOT MET' || (seatVerdict[seat] === null && linesOf(seat).some(failedCheck))) : [];
-    const doubt = named.filter((seat) => seatVerdict[seat] === null && linesOf(seat).some((l) => INCOMPLETE_CHECK_RE.test(l)));
+    const passLine = (l) => (hypothesis ? parseOutcome(l) === 'REFUTED' : parseVerdict(l, tag) === 'MET');
+    const doubt = named.filter((seat) => linesOf(seat).some((l) => (seatVerdict[seat] === null && incompleteCheck(l)) || (passLine(l) && selfGap(l))));
     // A 1.1.0 re-review packet worded each hypothesis as a fix ("Confirm it is fixed") and never defined CONFIRMED, so there it
     // meant fixed: its outcomes are flipped and REFUTED keeps one meaning in every report, the suspected defect is gone.
     const fixWorded = fixWordedFlips && hypothesis && /\bconfirm it is fixed\b/i.test(text);
@@ -488,7 +552,7 @@ export function buildCriteria(criteria, findings, headingTags, checksBySeat, tic
           : values.length > 0 && values.length === seats.length ? 'confirmed' : 'unparsed';
     const reasonLine = hypothesis || found.length > 0 ? null : named.flatMap((seat) => linesOf(seat)).find((l) => ['NOT MET', 'PARTIAL'].includes(parseVerdict(l, tag)));
     const reason = reasonLine ? reasonOf(reasonLine, tag) : '';
-    return { fixWorded, refuted, doubt, failedSeats, outcomes, verdict, met, reason, tag, text, kind: hypothesis ? 'hypothesis' : 'criterion', group: groupsOf(tag, hypothesis, ticketMap)[0], groups: groupsOf(tag, hypothesis, ticketMap), status, findings: found, seats };
+    return { fixWorded, refuted, doubt, failedSeats, outcomes, verdict, met, reason, tag, text, kind: hypothesis ? 'hypothesis' : 'criterion', group: groupsOf(tag, hypothesis, ticketMap)[0], groups: groupsOf(tag, hypothesis, ticketMap), status, findings: found, seats, ...(verdict === 'split' ? { seatLines: Object.fromEntries(named.map((seat) => [seat, linesOf(seat)])) } : {}) };
   });
   const stats = (list) => ({ total: list.length, issue: list.filter((r) => r.status === 'issue').length, clean: list.filter((r) => r.status === 'clean').length, unmet: list.filter(isUnmet).length, doubtful: list.filter((r) => r.status === 'clean' && r.doubt.length > 0).length, failedClean: list.filter((r) => r.failedSeats.length > 0).length, notVerified: list.filter((r) => r.status === 'not-verified').length });
   const critRows = rows.filter((r) => r.kind === 'criterion');
@@ -498,9 +562,23 @@ export function buildCriteria(criteria, findings, headingTags, checksBySeat, tic
   const hypRows = rows.filter((r) => r.kind === 'hypothesis');
   const hyp = { ...stats(hypRows), ...Object.fromEntries(['refuted', 'split', 'partly', 'confirmed', 'unparsed'].map((v) => [v, hypRows.filter((r) => r.verdict === v).length])) };
   const all = stats(rows);
-  const silentSeats = Object.entries(checksBySeat).filter(([seat, body]) => body.trim() !== '' && known.every((tag) => linesBySeat[seat][tag].length === 0)).map(([seat]) => seat);
+  // A seat that named a tag only on NOT CHECKED lines did name it: its skipped checks have their own caveat.
+  const skippedTag = (body) => body.split(/\r?\n/).some((l) => notCheckedLine(l) && known.some((tag) => tagPattern(tag).test(l)));
+  const silentSeats = Object.entries(checksBySeat).filter(([seat, body]) => body.trim() !== '' && known.every((tag) => linesBySeat[seat][tag].length === 0) && !skippedTag(body)).map(([seat]) => seat);
+  // Per seat: the lines naming a tag with a pass (criterion MET, hypothesis REFUTED as written), and those citing nothing.
+  const passes = Object.fromEntries(Object.keys(checksBySeat).map((seat) => {
+    const seen = new Map();
+    for (const tag of known) {
+      for (const l of linesBySeat[seat][tag]) {
+        if (seen.has(l)) continue;
+        const pass = /^H\d+$/i.test(tag) ? parseOutcome(l) === 'REFUTED' : parseVerdict(l, tag) === 'MET';
+        if (pass) seen.set(l, anchored(l, seat, tag, findingIds));
+      }
+    }
+    return [seat, { passes: seen.size, bare: [...seen.values()].filter((a) => !a).length }];
+  }));
   const tickets = buildTickets(rows, checksBySeat);
-  return { tickets, silentSeats, total: all.total, criteriaCount: crit.total, hypothesisCount: hyp.total, issue: all.issue, clean: all.clean, notVerified: all.notVerified, criteriaStats: crit, hypothesisStats: hyp, rows };
+  return { tickets, silentSeats, passes, total: all.total, criteriaCount: crit.total, hypothesisCount: hyp.total, issue: all.issue, clean: all.clean, notVerified: all.notVerified, criteriaStats: crit, hypothesisStats: hyp, rows };
 }
 
 // "- F4: fixed after the snapshot, not re-reviewed" lines (or "| F4 | ... |" table rows) of the notes file's "Finding status" section.
@@ -657,7 +735,138 @@ function runTime(timing, m) {
 const minutes = (ms) => (ms === null ? 'unknown' : ms < 60000 ? 'under 1 min' : `${Math.round(ms / 60000)} min`);
 export const timeText = (t) => `${minutes(t.wallMs)} wall (first brief to findings.json; packet writing not counted); orchestrator working time ${minutes(t.orchestratorMs)}`;
 
-export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {}, timing = null, changeDiffs = [], briefText = null, staleManifest = false }) {
+// A seat's last "web: <n> queries, <m> page fetches" line before any rebuttal section, as numbers; null without one.
+export function seatWebLine(seatText) {
+  const own = [];
+  for (const l of parseFenceLines(String(seatText ?? '')).lines) {
+    if (l.inFence) continue;
+    if (/^##\s+Rebuttals\b/i.test(l.text)) break;
+    own.push(l.text);
+  }
+  const hit = [...own.join('\n').matchAll(/\bweb:\s*(\d+)\s+quer(?:y|ies)\s*,\s*(\d+)\s+page\s+fetch(?:es)?\b/gi)].at(-1);
+  return hit ? { queries: Number(hit[1]), fetches: Number(hit[2]) } : null;
+}
+
+// Per rebutting seat: its CONCEDE entries on a peer SOURCE_CITATION claim that cites a link, whose Evidence has no link or
+// says the web fact was not re-checked. Read from the phase1 files the exchange appended the rebuttal sections to.
+// The claim and rebuttal field names blind-relabel reads; any other "Word:" line (such as "Opened https:") stays in the field.
+const FIELD_LINE_RE = /^(?:Severity|Basis|Evidence strength|Evidence|Suggested fix|Trigger|Pre-existing|Same shape elsewhere|Claim|Action):/;
+export function unopenedWebConcedes(rebuttalTexts) {
+  const out = {};
+  for (const text of Object.values(rebuttalTexts ?? {})) {
+    const lines = parseFenceLines(String(text ?? '')).lines;
+    const basis = new Map();
+    const linked = new Set();
+    let claim = null;
+    let section = null;
+    let entry = null;
+    // Only the Evidence field counts: the "Evidence:" line and the fenced block after it, until the next field line.
+    let inEvidence = false;
+    // After the Evidence fence closes, a next fence continues it and any other non-blank line ends it (as blind-relabel reads it).
+    let closed = false;
+    const entries = [];
+    for (const { text: line, inFence, isOpen, isClose } of lines) {
+      if (closed && line.trim() !== '') {
+        closed = false;
+        if (!isOpen) inEvidence = false;
+      }
+      if (inEvidence && isClose) closed = true;
+      if (!inFence && /^##\s/.test(line)) {
+        const head = /^## Rebuttals \(from ([AB])\) of ([AB]) claims\s*$/.exec(line);
+        const c = /^##\s+([AB]\d+)\b/.exec(line);
+        section = head ? { rebutter: head[1], of: head[2] } : section && c ? section : null;
+        claim = !section && c ? c[1] : null;
+        entry = null;
+        inEvidence = false;
+        continue;
+      }
+      if (!inFence && FIELD_LINE_RE.test(line)) inEvidence = /^Evidence:/.test(line);
+      if (section) {
+        const h = !inFence ? /^###\s+([AB]\d+)\b/.exec(line) : null;
+        if (h) {
+          entry = { rebutter: section.rebutter, id: h[1], action: null, evidence: [] };
+          entries.push(entry);
+          inEvidence = false;
+        } else if (entry) {
+          const a = !inFence ? /^Action:\s*([A-Za-z_-]+)/.exec(line) : null;
+          if (a && entry.action === null) entry.action = a[1];
+          else if (inEvidence) entry.evidence.push(line);
+        }
+      } else if (claim) {
+        if (inEvidence && /https?:\/\//i.test(line)) linked.add(claim);
+        const b = !inFence ? /^Basis:\s*\**\s*([A-Z_]+)/.exec(line) : null;
+        if (b && !basis.has(claim)) basis.set(claim, b[1]);
+      }
+    }
+    for (const e of entries) {
+      if (e.action !== 'CONCEDE' || basis.get(e.id) !== 'SOURCE_CITATION' || !linked.has(e.id)) continue;
+      const evidence = e.evidence.join('\n');
+      if (/web fact not re-checked/i.test(evidence) || !/https?:\/\//i.test(evidence)) out[e.rebutter] = (out[e.rebutter] ?? 0) + 1;
+    }
+  }
+  return out;
+}
+
+const splitHypCaveat = (tags) => `${tags.join(', ')}: the seats disagree; the auditor rules on findings, not hypotheses, so no one decided between them: read both seats' lines for ${tags.length === 1 ? 'it' : 'them'}.`;
+// Under the split-hypothesis caveat the full report prints each seat's own check line, cut to 200 characters.
+const splitHypLines = (report, caveat) => {
+  const rows = (report.criteria?.rows ?? []).filter((r) => r.seatLines);
+  if (rows.length === 0 || caveat !== splitHypCaveat(rows.map((r) => r.tag))) return [];
+  return rows.flatMap((r) => Object.entries(r.seatLines).map(([seat, l]) => `${r.tag}, seat ${seat}: ${clip(l.map((x) => x.trim().replace(/^[-*]\s+/, '')).join(' '), 200)}`));
+};
+const idsOf = (list) => list.join(', ');
+const evidenceText = (f) => (Array.isArray(f.evidence) ? f.evidence.join('\n') : String(f.evidence ?? ''));
+
+// Caveats on how far the report's results were checked: web citations, skipped checks, pass lines with no evidence,
+// executed findings the auditor only read, and web-backed claims conceded unopened.
+function certaintyCaveats({ findingsDoc, withdrawnIds, seatTexts, checksBySeat, criteria, rebuttalTexts, lightAudit = false }) {
+  const out = [];
+  const standing = findingsDoc.findings.filter((f) => !withdrawnIds.has(f.id) && !WITHDRAWN_STATES.includes(f.final_state));
+  const web = standing.filter((f) => f.basis === 'SOURCE_CITATION' && /https?:\/\//i.test(evidenceText(f)));
+  if (web.length > 0) out.push(`${idsOf(web.map((f) => f.id))}: web citation, not re-checked by the auditor (it has no web access)`);
+  const searchOnly = web.filter((f) => {
+    const seats = [...new Set((f.origins ?? []).map((o) => String(o).charAt(0)))];
+    return seats.length > 0 && seats.every((s) => seatWebLine(seatTexts[s])?.fetches === 0);
+  });
+  // A seat that also ran no search quoted the link without looking it up at all.
+  const noSearch = (f) => [...new Set((f.origins ?? []).map((o) => String(o).charAt(0)))].every((s) => seatWebLine(seatTexts[s])?.queries === 0);
+  const searched = searchOnly.filter((f) => !noSearch(f));
+  const unlooked = searchOnly.filter(noSearch);
+  if (searched.length > 0) out.push(`${idsOf(searched.map((f) => f.id))}: ${searched.length === 1 ? 'its seat' : 'their seats'} reported opening no page (search results only)`);
+  if (unlooked.length > 0) out.push(`${idsOf(unlooked.map((f) => f.id))}: ${unlooked.length === 1 ? 'its seat' : 'their seats'} reported no search and no page opened`);
+  const skipped = Object.entries(checksBySeat).map(([seat, body]) => [seat, body.split(/\r?\n/).filter(notCheckedLine).map(skippedWhat)]).filter(([, list]) => list.length > 0);
+  const total = skipped.reduce((n, [, list]) => n + list.length, 0);
+  if (total > 0) {
+    let room = 8;
+    const parts = [];
+    for (const [seat, list] of skipped) {
+      const shown = list.slice(0, room);
+      room -= shown.length;
+      if (shown.length > 0) parts.push(`seat ${seat}: ${shown.join('; ')}`);
+    }
+    out.push(`Checks not done — ${parts.join('; ')}${total > 8 ? `; +${total - 8} more` : ''}`);
+  }
+  for (const [seat, p] of Object.entries(criteria?.passes ?? {})) {
+    if (p.bare > 0) out.push(`Seat ${seat}: ${p.bare} of ${p.passes} MET or REFUTED check lines cite no file:line, backticked command, link, claim ID or finding ID the report could find`);
+  }
+  // A hypothesis a seat refuted while saying its own check was incomplete (the hypothesis rows show no doubt marker).
+  const doubtedHyp = (criteria?.rows ?? []).filter((r) => r.kind === 'hypothesis' && r.doubt.length > 0 && ['refuted', 'split'].includes(r.verdict));
+  for (const r of doubtedHyp) out.push(`${r.tag}: seat ${r.doubt.join(', ')} said its check was incomplete`);
+  const readOnly = standing.filter((f) => f.basis === 'EXECUTED' && f.auditor_check?.result === 'CONFIRMED' && f.auditor_check?.basis && f.auditor_check.basis !== 'EXECUTED');
+  if (readOnly.length > 0) out.push(`${idsOf(readOnly.map((f) => f.id))}: the seat ran it; the auditor confirmed by reading only`);
+  const unrun = standing.filter((f) => ['HIGH', 'CRITICAL'].includes(finalSeverity(f)) && f.basis !== 'EXECUTED' && f.auditor_check?.basis !== 'EXECUTED'
+    && !(f.verifications ?? []).some((v) => v?.basis === 'EXECUTED'));
+  if (unrun.length > 0) out.push(`${idsOf(unrun.map((f) => f.id))}: HIGH or CRITICAL, but no one ran it (read only)`);
+  // A full audit re-checks agreed claims too; one it could not check stands on the seats' agreement alone.
+  const agreedUnchecked = lightAudit || findingsDoc.synthesized ? [] : standing.filter((f) => f.final_state === 'settled-agree' && f.auditor_check?.result === 'NOT_CHECKED');
+  if (agreedUnchecked.length > 0) out.push(`${idsOf(agreedUnchecked.map((f) => f.id))}: both seats agreed, but the auditor could not check ${agreedUnchecked.length === 1 ? 'it' : 'them'}`);
+  for (const [seat, n] of Object.entries(unopenedWebConcedes(rebuttalTexts)).sort()) {
+    out.push(`Seat ${seat} accepted ${n} web-backed finding${n === 1 ? '' : 's'} without opening the source`);
+  }
+  return out;
+}
+
+export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {}, timing = null, changeDiffs = [], briefText = null, staleManifest = false, rebuttalTexts = null, update = null }) {
   if (!findingsDoc || !Array.isArray(findingsDoc.findings)) throw new ReportError('findings.json has no "findings" array');
   const hunks = changeDiffs.map((d) => diffHunks(d.text));
   const findings = findingsDoc.findings.map((f) => ({
@@ -750,7 +959,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   if (status === 'INCOMPLETE') caveats.push(`The review is incomplete (manifest status "${m.status ?? 'missing'}"). Do not read it as a completed review.`);
   if (m.seat_blind_lines && typeof m.seat_blind_lines === 'object') {
     for (const [seat, lines] of Object.entries(m.seat_blind_lines)) {
-      if (Array.isArray(lines) && lines.length > 0) caveats.push(`Seat ${seat} may have reviewed blind: it reported a blocked read or command ("${String(lines[0]).slice(0, 140)}"). A short or clean result from it is weaker than it looks.`);
+      if (Array.isArray(lines) && lines.length > 0) caveats.push(`Seat ${seat} may have reviewed blind: it reported a blocked read or command ("${String(lines[0]).slice(0, 140)}"). Check whether the task packet already gave seat ${seat} that evidence; if it did, the block matters less.`);
     }
   }
   for (const seat of Array.isArray(m.blocked_no_findings) ? m.blocked_no_findings : []) {
@@ -814,10 +1023,11 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
       : `${split}; the exchange did not reconcile it, so read both seat files before you act.`);
   }
   const splitHyp = (criteria?.rows ?? []).filter((r) => r.kind === 'hypothesis' && r.verdict === 'split').map((r) => r.tag);
-  if (splitHyp.length > 0) caveats.push(`${splitHyp.join(', ')}: the seats disagree; the auditor rules on findings, not hypotheses, so no one decided between them: read both seats' lines for ${splitHyp.length === 1 ? 'it' : 'them'}.`);
+  if (splitHyp.length > 0) caveats.push(splitHypCaveat(splitHyp));
   const fixWorded = (criteria?.rows ?? []).filter((r) => r.fixWorded && r.status !== 'not-verified').map((r) => r.tag);
   if (fixWorded.length > 0) caveats.push(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a run whose seats were not told what CONFIRMED means (a 1.1.0 run), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`);
   if (criteria?.silentSeats.length > 0) caveats.push(`${criteria.silentSeats.map((x) => `Seat ${x}`).join(', ')} wrote checks but named no criterion or hypothesis tag, so the criteria and hypotheses counts reflect only the seat(s) that did.`);
+  caveats.push(...certaintyCaveats({ findingsDoc, withdrawnIds, seatTexts, checksBySeat, criteria, rebuttalTexts: rebuttalTexts ?? seatTexts, lightAudit: depth === 'light' }));
   // A CLI seat whose usage sits in seat_usage keeps its count on its reviewers[] or actors[] entry.
   const entryCommands = (role) => [...(m.reviewers ?? []), ...(m.actors ?? [])].find((x) => x?.role === role)?.commands;
   const cost = Object.entries(m.seat_usage ?? {}).map(([name, u]) => withCommands(seatCostRow(name === 'auditor' || name === 'orchestrator' ? name : `seat ${name}`, u), u?.commands ?? entryCommands(name)));
@@ -866,6 +1076,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
 
   return {
     generator: generatorInfo(m.skill_version),
+    ...(update?.newer === true && ['published', 'installed', 'plugin', 'marketplace'].every((k) => typeof update[k] === 'string' && update[k] !== '') && compareVersions(update.published, update.installed) > 0 ? { update } : {}),
     round,
     status,
     manifestStatus: m.status ?? null,
@@ -1020,7 +1231,7 @@ export function renderText(report, { color = false } = {}) {
 
   if (report.openItems) out.push(paint(['bold'], 'OPEN ITEMS (not findings)'), ...report.openItems.split('\n').map((l) => `  ${l}`), '');
   if (report.decisions) out.push(paint(['bold'], 'DECISIONS NEEDED'), ...report.decisions.split('\n').map((l) => `  ${l}`), '');
-  if (report.caveats.length > 0) out.push(paint(['bold'], 'CAVEATS'), ...report.caveats.map((c) => `  - ${c}`), '');
+  if (report.caveats.length > 0) out.push(paint(['bold'], 'CAVEATS'), ...report.caveats.flatMap((c) => [`  - ${c}`, ...splitHypLines(report, c).map((l) => `      ${l}`)]), '');
   if (report.cost.length > 0) {
     out.push(paint(['bold'], 'COST (tokens)'), ...costTableLines(report.cost).map((l) => `  ${l}`));
     if (costNote(report.cost)) out.push(paint(['dim'], `  ${costNote(report.cost)}`));
@@ -1031,6 +1242,7 @@ export function renderText(report, { color = false } = {}) {
   const fileList = Object.values(report.files).filter(Boolean);
   if (fileList.length > 0) out.push(paint(['dim'], `FILES  ${fileList.join(' | ')}`));
   out.push(paint(['dim'], generatorLine(report.generator ?? undefined)));
+  if (report.update) out.push(updateNote(report.update));
   return `${out.join('\n').replace(/\n+$/, '')}\n`;
 }
 
@@ -1080,7 +1292,7 @@ export function renderMarkdown(report) {
   out.push('');
   if (report.openItems) out.push('## Open items (not findings)', '', report.openItems, '');
   if (report.decisions) out.push('## Decisions needed', '', report.decisions, '');
-  if (report.caveats.length > 0) out.push('## Caveats', '', ...report.caveats.map((c) => `- ${c}`), '');
+  if (report.caveats.length > 0) out.push('## Caveats', '', ...report.caveats.flatMap((c) => [`- ${c}`, ...splitHypLines(report, c).map((l) => `  - ${mdEsc(l)}`)]), '');
   if (report.cost.length > 0) {
     const hasWrite = report.cost.some((r) => r.cacheWrite != null);
     const hasCmds = report.cost.some((r) => r.commands);
@@ -1092,6 +1304,7 @@ export function renderMarkdown(report) {
     out.push('');
   }
   out.push('', `_${mdEsc(generatorLine(report.generator))}_`);
+  if (report.update) out.push('', mdEsc(updateNote(report.update)));
   return `${out.join('\n').replace(/\n+$/, '')}\n`;
 }
 
@@ -1147,7 +1360,7 @@ export function renderHtml(report) {
     const calls = report.cost.filter((x) => x.perCall).map((r) => `<p class="meta">${esc(r.seat)} new input per call: ${esc(r.perCall.map(compactTokens).join(', '))}</p>`).join('');
     parts.push(`<section><h2>Cost (tokens)</h2><table><thead><tr><th>Seat</th><th>New input</th>${hasWrite ? '<th>Cache write</th>' : ''}<th>Cache read</th><th>Output</th><th>Calls</th>${hasCmds ? '<th>Commands</th>' : ''}</tr></thead><tbody>${rows}</tbody></table>${note}${calls}</section>`);
   }
-  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Review report</title><style>${HTML_CSS}</style></head><body><main>${parts.join('')}<footer class="meta">${esc(generatorLine({ ...gen, url: '' }).replace(/: $/, ':'))} <a href="${esc(gen.url)}">${esc(gen.url)}</a></footer></main></body></html>\n`;
+  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Review report</title><style>${HTML_CSS}</style></head><body><main>${parts.join('')}<footer class="meta">${esc(generatorLine({ ...gen, url: '' }).replace(/: $/, ':'))} <a href="${esc(gen.url)}">${esc(gen.url)}</a>${report.update ? `<p>${esc(updateNote(report.update))}</p>` : ''}</footer></main></body></html>\n`;
 }
 
 // ---- chat format: plain markdown that a chat window draws (quote, table, bars, a red/green diff block) ----
@@ -1274,8 +1487,11 @@ function trafficLight(report, groups) {
   }
   const flagged = (report.criteria?.rows ?? []).filter((r) => r.kind === 'criterion' && (r.status === 'issue' || r.met === 'NOT MET' || r.failedSeats.length > 0 || (r.status === 'clean' && r.met === 'PARTIAL')));
   const flagLabel = (r) => (r.status === 'issue' && r.met !== 'NOT MET' ? 'CRITERION' : r.met === 'PARTIAL' && r.status === 'clean' ? 'PARTIAL' : 'UNMET');
+  // An UNMET line names the worst severity among its findings, so one LOW finding does not read like a failed criterion.
+  const worst = (ids) => report.findings.filter((f) => ids.includes(f.id)).map((f) => f.severity).sort((a, b) => (SEV_ORDER.indexOf(a) + 1 || 9) - (SEV_ORDER.indexOf(b) + 1 || 9))[0];
   for (const r of flagged.slice(0, 8)) {
-    lines.push(clipTo(`${flagLabel(r) === 'PARTIAL' ? ' ' : '-'} ${flagLabel(r).padEnd(LABEL_WIDTH)}${r.tag}${r.findings.length > 0 ? `  findings ${r.findings.join(' ')}` : '  no finding tagged'}`, CHAT_LINE));
+    const sev = flagLabel(r) === 'UNMET' && r.findings.length > 0 ? worst(r.findings) : null;
+    lines.push(clipTo(`${flagLabel(r) === 'PARTIAL' ? ' ' : '-'} ${flagLabel(r).padEnd(LABEL_WIDTH)}${r.tag}${r.findings.length > 0 ? `  findings ${r.findings.join(' ')}${sev ? ` (${sev})` : ''}` : '  no finding tagged'}`, CHAT_LINE));
     if (r.findings.length === 0 && r.reason) for (const part of wrapText(r.reason, CHAT_LINE - LABEL_WIDTH - 4, 5)) lines.push(`  ${''.padEnd(LABEL_WIDTH)}${part}`);
   }
   if (flagged.length > 8) lines.push(clipTo(`- ${'MORE'.padEnd(LABEL_WIDTH)}${flagged.length - 8} more flagged: ${flagged.slice(8).map((r) => r.tag).join(' ')} (--all lists them)`, CHAT_LINE));
@@ -1347,9 +1563,10 @@ export function renderChat(report, { all = false } = {}) {
   if (light.length > 0) out.push('```diff', ...light, '```', '');
   if (report.decisions) out.push('**Decisions needed**', '', report.decisions, '');
   for (const caveat of report.caveats) out.push(`> Caveat: ${caveat}`, '');
-  if (!all) out.push('_Every finding, criterion and the cost: run with `--format chat --all`._');
+  if (!all) out.push('_Short report. Ask for the full one: every finding, every criterion and the cost._');
   else out.push('---', '', renderMarkdown(report).trimEnd());
   if (!all) out.push('', generatorLine(report.generator));
+  if (!all && report.update) out.push('', updateNote(report.update));
   return `${out.join('\n').replace(/\n+$/, '')}\n`;
 }
 
@@ -1433,9 +1650,12 @@ export async function loadRun(runDir, notesPath = null, changeDiffPaths = []) {
   const dir = path.resolve(runDir);
   const findingsFile = path.join(dir, 'phase3', 'findings.json');
   const seatTexts = {};
+  // The rebuttal sections are appended to phase1/<seat>-findings.md; phase1/original/ keeps the pre-exchange copies.
+  const rebuttalTexts = {};
   for (const seat of ['A', 'B']) {
     const original = path.join(dir, 'phase1', 'original', `${seat}-findings.md`);
-    seatTexts[seat] = await readOptional(existsSync(original) ? original : path.join(dir, 'phase1', `${seat}-findings.md`));
+    rebuttalTexts[seat] = await readOptional(path.join(dir, 'phase1', `${seat}-findings.md`));
+    seatTexts[seat] = existsSync(original) ? await readOptional(original) : rebuttalTexts[seat];
   }
   let findingsDoc;
   if (existsSync(findingsFile)) {
@@ -1464,12 +1684,14 @@ export async function loadRun(runDir, notesPath = null, changeDiffPaths = []) {
     manifest,
     packetText: await readOptional(path.join(dir, 'task-packet.md')),
     seatTexts,
+    rebuttalTexts,
     notesText: await readOptional(notesFile),
     files: { scorecard: existsSync(path.join(dir, 'phase3', 'scorecard.md')) ? 'phase3/scorecard.md' : null, findings: existsSync(findingsFile) ? 'phase3/findings.json' : null, manifest: manifest ? 'manifest.json' : null },
     timing: await runTiming(dir, findingsFile),
     changeDiffs: await readChangeDiffs(dir, changeDiffPaths),
     briefText: await firstBrief(dir),
     staleManifest,
+    update: await readOptional(path.join(dir, 'update-check.json')).then((t) => (t ? JSON.parse(t) : null)).catch(() => null),
   });
   if (!manifest) {
     if (report.status !== 'NOT FINAL') report.caveats.unshift('manifest.json was not found; status, pass counts and cost are unknown.');
