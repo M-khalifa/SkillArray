@@ -129,6 +129,7 @@ async function runOneArmTrial({ runArm, arm, caseDir, packet, runDir, config, tr
   await mkdir(armDir, { recursive: true });
 
   let result;
+  const startedMs = Date.now();
   try {
     result = await runArm({ arm, caseDir, packet, runDir: armDir, config, trialIndex });
     result = validateArmResult(result, arm);
@@ -142,6 +143,7 @@ async function runOneArmTrial({ runArm, arm, caseDir, packet, runDir, config, tr
       deviations: [],
     };
   }
+  const durationMs = Date.now() - startedMs;
 
   await writeFile(path.join(armDir, 'result.json'), JSON.stringify(result, null, 2) + '\n', 'utf8');
 
@@ -162,9 +164,41 @@ async function runOneArmTrial({ runArm, arm, caseDir, packet, runDir, config, tr
     trialIndex,
     status: result.status,
     score,
+    duration_ms: durationMs,
     usage: result.usage ?? { source: 'unavailable' },
     deviations: result.deviations ?? [],
   };
+}
+
+const mean = (xs) => (xs.length > 0 ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+const stddev = (xs) => { const m = mean(xs); return xs.length > 1 ? Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1)) : null; };
+// Nearest-rank percentile of a non-empty list, null for an empty one.
+const percentile = (xs, p) => { const s = [...xs].sort((a, b) => a - b); return s.length > 0 ? s[Math.max(0, Math.ceil((p / 100) * s.length) - 1)] : null; };
+const spread = (xs) => ({ mean: mean(xs), stddev: stddev(xs), n: xs.length });
+// New tokens of one provider-metered arm run, null when the adapter could not meter it. As the report's seatCostRow: input
+// that holds the cache (Codex cached_input_tokens) counts minus the cached part, a separate cache adds the cache write.
+const newTokens = (u) => {
+  if (u?.source !== 'provider' || ![u.input_tokens, u.output_tokens].every(Number.isFinite)) return null;
+  if (Number.isFinite(u.cached_input_tokens)) return u.cached_input_tokens > u.input_tokens ? null : u.input_tokens - u.cached_input_tokens + u.output_tokens;
+  return u.input_tokens + (u.cache_creation_input_tokens ?? u.cache_write_input_tokens ?? 0) + u.output_tokens;
+};
+
+// Per arm across trials: completed runs, the score spread over completed runs, p50/p95 wall time over every run, and tokens.
+export function aggregateArms(trials) {
+  const byArm = new Map();
+  for (const t of trials) for (const a of t.arms) byArm.set(a.arm, [...(byArm.get(a.arm) ?? []), a]);
+  return Object.fromEntries([...byArm].map(([arm, runs]) => {
+    const scored = runs.filter((r) => r.status === 'completed' && r.score && !r.score.error);
+    const pick = (k) => scored.map((r) => r.score[k]).filter(Number.isFinite);
+    const durations = runs.map((r) => r.duration_ms).filter(Number.isFinite);
+    const tokens = runs.map((r) => newTokens(r.usage)).filter(Number.isFinite);
+    return [arm, {
+      runs: runs.length, completed: scored.length,
+      recall: spread(pick('recall')), precision: spread(pick('precision')), f1: spread(pick('f1')),
+      duration_ms: { p50: percentile(durations, 50), p95: percentile(durations, 95) },
+      new_tokens: { ...spread(tokens), metered_runs: tokens.length },
+    }];
+  }));
 }
 
 async function run(args, { runArm }) {
@@ -194,6 +228,7 @@ async function run(args, { runArm }) {
     }
     summary.trials.push({ trial: trialIndex + 1, arms: trialResults });
   }
+  summary.aggregate = aggregateArms(summary.trials);
 
   await writeFile(path.join(args.out, 'summary.json'), JSON.stringify(summary, null, 2) + '\n', 'utf8');
   return summary;

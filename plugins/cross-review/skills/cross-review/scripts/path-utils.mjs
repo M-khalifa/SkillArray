@@ -315,3 +315,17 @@ export function gitRepoFromProbe({ code, stdout = '', stderr = '' }, dir) {
 // external diff or textconv, a/ and b/ prefixes, 3 context lines (git apply needs them), file names unquoted.
 export const GIT_PLAIN = ['-c', 'color.diff=false', '-c', 'core.quotepath=false', '-c', 'diff.context=3'];
 export const DIFF_PLAIN = ['--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
+
+// A plugin version: a string of dotted numbers (1.2.1); shared by preflight's update check and the report's update line.
+export const isVersion = (v) => typeof v === 'string' && /^\d+(\.\d+)*$/.test(v);
+
+// Dotted version compare: 1 when a is newer than b, -1 when older, 0 when equal or either is not a version.
+export function compareVersions(a, b) {
+  if (!isVersion(a) || !isVersion(b)) return 0;
+  const [pa, pb] = [a, b].map((v) => v.split('.').map(Number));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}

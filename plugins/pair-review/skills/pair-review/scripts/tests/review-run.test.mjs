@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { readRunDescriptor, writeRunDescriptor } from '../run-descriptor.mjs';
-import { parseArgs, run as runInProcess, clockLine, seatDepth, shallowSeatNote, execFailureCount, formatElapsed, seatStatusLines, otherPendingSeats, warnExtraRepos, failureDetail, tail, print, endedBadlyNow } from '../review-run.mjs';
+import { parseArgs, run as runInProcess, clockLine, seatDepth, shallowSeatNote, execFailureCount, formatElapsed, quietFor, seatStatusLines, otherPendingSeats, warnExtraRepos, failureDetail, tail, print, endedBadlyNow } from '../review-run.mjs';
 import { computeSnapshotHash } from '../preflight.mjs';
 import { runStep as relabelStep } from '../blind-relabel.mjs';
 import { evaluateSupport } from '../host-support.mjs';
@@ -2858,10 +2858,50 @@ test('seatStatusLines: a running CLI seat shows its elapsed time and live exec f
   const running = await seatStatusLines(desc, 'phase1', {}, now);
   assert.equal(running[0], 'seat A: native; pass --native-agent A=<agent id> to see its progress');
   assert.equal(running[1], 'seat B: codex running 8m30s, 2 exec_command failure(s) so far');
+  const quiet = new Date(Date.UTC(2026, 9, 8, 19, 36, 0));
+  await fs.utimes(path.join(dir, 'result.stderr.live.log'), quiet, quiet);
+  assert.equal((await seatStatusLines(desc, 'phase1', {}, now))[1], 'seat B: codex running 8m30s, 2 exec_command failure(s) so far, no stderr for 5m30s');
+  const recent = new Date(now - 60000);
+  await fs.utimes(path.join(dir, 'result.stderr.live.log'), recent, recent);
+  assert.equal((await seatStatusLines(desc, 'phase1', {}, now))[1], 'seat B: codex running 8m30s, 2 exec_command failure(s) so far', 'under 2 minutes is not shown');
+  await fs.rm(path.join(dir, 'result.stderr.live.log'));
+  assert.equal((await seatStatusLines(desc, 'phase1', {}, now))[1], 'seat B: codex running 8m30s, no stderr for 8m30s', 'no live log yet: idle since the seat started');
   await fs.writeFile(path.join(dir, 'result.json'), JSON.stringify({ status: 'completed', startedAt: started, durationMs: 77000 }));
   assert.equal((await seatStatusLines(desc, 'phase1', {}, now))[1], 'seat B: codex completed in 1m17s');
   await fs.rm(path.join(dir, 'result.json'));
   assert.equal((await seatStatusLines(desc, 'phase1', {}, now))[1], 'seat B: codex cli, no status record yet');
+});
+
+test('seatStatusLines: a running Claude CLI seat writes no live log, so it gets no idle text; a Codex seat beside it still does', async (t) => {
+  const s = await setup(t);
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  const desc = { ...JSON.parse(await fs.readFile(path.join(s.run, 'run.json'), 'utf8')), runDir: s.run };
+  assert.equal(desc.seatA.runtime, 'claude');
+  const now = Date.UTC(2026, 9, 8, 19, 41, 30);
+  const startedAt = new Date(now - 360000).toISOString();
+  for (const role of ['A', 'B']) {
+    await fs.mkdir(path.join(s.run, 'phase1', role), { recursive: true });
+    await fs.writeFile(path.join(s.run, 'phase1', role, 'result.json'), JSON.stringify({ status: 'running', startedAt }));
+    await fs.rm(path.join(s.run, 'phase1', role, 'result.stderr.live.log'), { force: true });
+  }
+  assert.deepEqual(await seatStatusLines(desc, 'phase1', {}, now), ['seat A: claude running 6m00s', 'seat B: codex running 6m00s, no stderr for 6m00s']);
+});
+
+test('quietFor: idle time from the file, else from the start time given, else none', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'quiet-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const now = Date.UTC(2026, 9, 8, 19, 41, 30);
+  const missing = path.join(dir, 'none.log');
+  assert.equal(await quietFor(missing, now, now - 510000), ', no output for 8m30s');
+  assert.equal(await quietFor(missing, now, now - 60000), '');
+  assert.equal(await quietFor(missing, now), '');
+  assert.equal(await quietFor(missing, now, Number.NaN), '');
+  const file = path.join(dir, 'live.log');
+  await fs.writeFile(file, 'x');
+  const touched = new Date(now - 180000);
+  await fs.utimes(file, touched, touched);
+  assert.equal(await quietFor(file, now, now - 510000), ', no output for 3m00s', 'the file time wins over the start time');
+  assert.equal(await quietFor(file, now, now - 510000, 'stderr'), ', no stderr for 3m00s', 'r4 F2: the text names what the file measures');
 });
 
 test('execFailureCount: counts exec_command failures in a seat stderr', () => {

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="version 1.2.0" src="https://img.shields.io/badge/version-1.2.0-0d7c86">
+  <img alt="version 1.2.1" src="https://img.shields.io/badge/version-1.2.1-0d7c86">
   <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-0d7c86">
   <img alt="Node.js 22+" src="https://img.shields.io/badge/node-22%2B-0d7c86">
   <img alt="hosts: Claude Code and Codex" src="https://img.shields.io/badge/hosts-Claude%20Code%20%7C%20Codex-0d7c86">
@@ -69,9 +69,15 @@ also needs the [Codex CLI](https://github.com/openai/codex), installed and signe
    /pair-review adversarial -- check this design doc against the ticket
    ```
 
-To update: run `/plugin marketplace update skillarray`, then `/plugin update pair-review@skillarray` and
-`/plugin update cross-review@skillarray`. While two builds carry the same version number, the updater may not see a change;
-then uninstall and install again.
+To get new versions automatically, turn on auto-update once: `/plugin`, Marketplaces, skillarray, Enable auto-update
+(Claude Code leaves it off for marketplaces outside Anthropic's own). A review report also ends with a one-line notice when
+the local marketplace copy holds a newer version than the one that ran; nothing is fetched from the network for it.
+
+To update by hand in a session: `/plugin`, Marketplaces, skillarray, Update marketplace (it also updates both installed
+plugins), then `/reload-plugins`. When the marketplace is already up to date, update each plugin: `/plugin manage`,
+pair-review (then cross-review), Update now. From a shell: `claude plugin marketplace update skillarray`, then
+`claude plugin update pair-review@skillarray` and `claude plugin update cross-review@skillarray`. While two builds carry
+the same version number, the updater may not see a change; then uninstall and install again.
 
 If it catches something for you, a star on this repository helps others find it.
 

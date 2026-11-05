@@ -6,6 +6,7 @@ description: >-
   Supports collaborative, adversarial, and independent passes, first-run
   model setup, saved preferences, and changing models anytime.
   Use for pair review, two Claude or two OpenAI reviewers, or /pair-review.
+argument-hint: "[setup | config | reset | collaborate | adversarial | none] -- <what to review>"
 license: MIT
 compatibility: >-
   Requires Node.js 22+ and a harness that can run two isolated reviewers of
@@ -13,7 +14,7 @@ compatibility: >-
   Claude seats need the Claude CLI or Claude Code agents, OpenAI seats need the
   Codex CLI. Claude Code is the primary target. Model access depends on the user's account.
 metadata:
-  version: 1.2.0
+  version: 1.2.1
 ---
 
 # Pair Review
@@ -22,6 +23,55 @@ Two distinct models from one vendor independently review the same target, then e
 findings. The vendor is Anthropic (two Claude models, the default) or OpenAI (two Codex
 models); a pair never mixes vendors. The orchestrator coordinates and verifies; it never fills
 either seat.
+
+## Rules that apply throughout
+
+1. **Keep the orchestrator's context small.** Run Phase 1 and Phase 2 in one
+   session (native seats resume only from the session that started them).
+   Every call re-sends the whole conversation, so the orchestrator's cost per
+   step grows with its context: between reviews, start a new session or
+   `/compact` once the context has grown large. Record the session's own cost
+   with `review-run manifest --seat-transcript orchestrator=<session .jsonl>@<review start>/<review end>` (or `orchestrator=auto@<start>/<end>`, which finds this session's transcript; when one session runs several reviews, `review-run status` prints each run's first brief time, the latest safe `<start>`)
+   (ISO times) on the review's first `review-run manifest`: in a session that runs
+   several reviews, the window counts only this review's calls. The host file names the transcript file to use.
+2. **Tell the user local time.** The scripts store times in UTC; whenever you
+   mention a time to the user, give this machine's local time first with UTC
+   in brackets ("started at 12:07 PM (17:07 UTC)").
+3. For a run that may last more than a day, keep the run directory and any
+   source snapshot outside the OS temporary folder.
+4. After the exchange has started, a seat is resumed or the review is reported
+   incomplete, never replaced. Before it, a seat whose model is unavailable may
+   be replaced (phase 1, Stalled or unavailable seats).
+5. Never hand-edit or retype reviewer or auditor output: return it to its seat
+   and apply the reply with `review-run splice`.
+6. A scan hit: delete the relabeled file and allow one redaction round. Each hit
+   names the matched token: if the second scan names the same token, stop the run and
+   report; if it names a different one, the first round fixed its token, so one more
+   round is allowed.
+7. Never fork the orchestrator's conversation into a seat, a verifier or the
+   auditor.
+8. Capture the output of every script: a non-zero exit states its reason
+   there. Windows PowerShell 5.1 shows a script's stderr WARNING as a
+   NativeCommandError even at exit 0.
+9. Falsification (deep verify) runs only when the user asks for it.
+10. Name in the report every fix made after the reviewed snapshot as not
+    re-reviewed.
+11. The manifest records what happened, never what was intended.
+12. The review never edits or commits the target; no sandbox enforces this for
+    Claude seats, so check the target after each phase (phase 1, Completion
+    gate).
+13. Every report you relay or write keeps its attribution line, `Reviewed with
+    <skill> <version> (SkillArray, MIT license): https://github.com/M-khalifa/SkillArray`,
+    exactly as `review-run report` printed it: chat (short or `--all`), text,
+    Markdown, HTML, JSON, and any PDF or document made from them. Paste the chat
+    report verbatim and put your own notes after it; never shorten a report in a
+    way that drops this line.
+
+A failed or unavailable seat means an incomplete review. Report what completed
+and the failure; never label a single pass as a completed pair review. Before
+the exchange, a seat whose model became unavailable may be replaced, or the run
+moved to cross-review, under phase-1-independent-passes.md's A provider
+becomes unavailable during Phase 1.
 
 ## Quickstart
 
@@ -193,55 +243,6 @@ names (its section index gives their lines), not the whole file.
    auditor, translate, the scorecard, cache and worktree cleanup); `joint-findings.md` in
    collaborate mode.
 6. `review-run manifest` and `review-run report`.
-
-## Rules that apply throughout
-
-1. **Keep the orchestrator's context small.** Run Phase 1 and Phase 2 in one
-   session (native seats resume only from the session that started them).
-   Every call re-sends the whole conversation, so the orchestrator's cost per
-   step grows with its context: between reviews, start a new session or
-   `/compact` once the context has grown large. Record the session's own cost
-   with `review-run manifest --seat-transcript orchestrator=<session .jsonl>@<review start>/<review end>` (or `orchestrator=auto@<start>/<end>`, which finds this session's transcript; when one session runs several reviews, `review-run status` prints each run's first brief time, the latest safe `<start>`)
-   (ISO times) on the review's first `review-run manifest`: in a session that runs
-   several reviews, the window counts only this review's calls. The host file names the transcript file to use.
-2. **Tell the user local time.** The scripts store times in UTC; whenever you
-   mention a time to the user, give this machine's local time first with UTC
-   in brackets ("started at 12:07 PM (17:07 UTC)").
-3. For a run that may last more than a day, keep the run directory and any
-   source snapshot outside the OS temporary folder.
-4. After the exchange has started, a seat is resumed or the review is reported
-   incomplete, never replaced. Before it, a seat whose model is unavailable may
-   be replaced (phase 1, Stalled or unavailable seats).
-5. Never hand-edit or retype reviewer or auditor output: return it to its seat
-   and apply the reply with `review-run splice`.
-6. A scan hit: delete the relabeled file and allow one redaction round. Each hit
-   names the matched token: if the second scan names the same token, stop the run and
-   report; if it names a different one, the first round fixed its token, so one more
-   round is allowed.
-7. Never fork the orchestrator's conversation into a seat, a verifier or the
-   auditor.
-8. Capture the output of every script: a non-zero exit states its reason
-   there. Windows PowerShell 5.1 shows a script's stderr WARNING as a
-   NativeCommandError even at exit 0.
-9. Falsification (deep verify) runs only when the user asks for it.
-10. Name in the report every fix made after the reviewed snapshot as not
-    re-reviewed.
-11. The manifest records what happened, never what was intended.
-12. The review never edits or commits the target; no sandbox enforces this for
-    Claude seats, so check the target after each phase (phase 1, Completion
-    gate).
-13. Every report you relay or write keeps its attribution line, `Reviewed with
-    <skill> <version> (SkillArray, MIT license): https://github.com/M-khalifa/SkillArray`,
-    exactly as `review-run report` printed it: chat (short or `--all`), text,
-    Markdown, HTML, JSON, and any PDF or document made from them. Paste the chat
-    report verbatim and put your own notes after it; never shorten a report in a
-    way that drops this line.
-
-A failed or unavailable seat means an incomplete review. Report what completed
-and the failure; never label a single pass as a completed pair review. Before
-the exchange, a seat whose model became unavailable may be replaced, or the run
-moved to cross-review, under phase-1-independent-passes.md's A provider
-becomes unavailable during Phase 1.
 
 ## Reviewing the same code again
 

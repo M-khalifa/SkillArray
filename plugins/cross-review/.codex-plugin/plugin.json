@@ -1,6 +1,6 @@
 {
   "name": "cross-review",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Two reviewers from different vendors review the same code, design or document blind, cross-examine each other's findings, and a fresh auditor settles each one: execution-gated, identity-blinded, refutation-asymmetric.",
   "author": {
     "name": "Mahmoud Khalifa"
