@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="version 1.2.1" src="https://img.shields.io/badge/version-1.2.1-0d7c86">
+  <img alt="version 1.2.2" src="https://img.shields.io/badge/version-1.2.2-0d7c86">
   <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-0d7c86">
   <img alt="Node.js 22+" src="https://img.shields.io/badge/node-22%2B-0d7c86">
   <img alt="hosts: Claude Code and Codex" src="https://img.shields.io/badge/hosts-Claude%20Code%20%7C%20Codex-0d7c86">
@@ -53,6 +53,9 @@ also needs the [Codex CLI](https://github.com/openai/codex), installed and signe
    /plugin install cross-review@skillarray
    ```
 
+   Then turn on auto-update once, so new versions arrive by themselves: `/plugin`, Marketplaces, skillarray, Enable
+   auto-update. Claude Code leaves it off for this marketplace; see [updates](#updates) below for the settings-file way.
+
 2. Pick the models each reviewer uses:
 
    ```text
@@ -69,9 +72,28 @@ also needs the [Codex CLI](https://github.com/openai/codex), installed and signe
    /pair-review adversarial -- check this design doc against the ticket
    ```
 
+### Updates
+
 To get new versions automatically, turn on auto-update once: `/plugin`, Marketplaces, skillarray, Enable auto-update
-(Claude Code leaves it off for marketplaces outside Anthropic's own). A review report also ends with a one-line notice when
-the local marketplace copy holds a newer version than the one that ran; nothing is fetched from the network for it.
+(Claude Code leaves it off for marketplaces outside Anthropic's own). There is no command for it. To set it without the
+menu, for example from a setup script, add `"autoUpdate": true` to the skillarray entry in `~/.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "skillarray": {
+      "source": { "source": "github", "repo": "M-khalifa/SkillArray" },
+      "autoUpdate": true
+    }
+  }
+}
+```
+
+Keep any other keys and marketplaces already in that file. Claude Code then checks for a new version up to ten minutes
+after your first message in a session, and the new version loads after `/reload-plugins` or at the next start.
+`DISABLE_UPDATES=1`, `DISABLE_AUTOUPDATER=1` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turn auto-update off unless
+`FORCE_AUTOUPDATE_PLUGINS=1` is also set. A review report also ends with a one-line notice when the local marketplace copy
+holds a newer version than the one that ran; nothing is fetched from the network for it.
 
 To update by hand in a session: `/plugin`, Marketplaces, skillarray, Update marketplace (it also updates both installed
 plugins), then `/reload-plugins`. When the marketplace is already up to date, update each plugin: `/plugin manage`,
@@ -167,7 +189,9 @@ codex plugin add cross-review@skillarray
 codex plugin add pair-review@skillarray
 ```
 
-`codex plugin list` then shows both as installed and enabled. Or copy the skill folders yourself:
+`codex plugin list` then shows both as installed and enabled. Codex has no auto-update setting for this marketplace. To
+update, run `codex plugin marketplace upgrade skillarray` (both plugins load from that marketplace copy), then start a
+new Codex session. Or copy the skill folders yourself:
 
 Codex reads skills from `.agents/skills` in the repository, or from `~/.agents/skills` for every project. Copy each complete
 skill folder, including its `scripts` and `references` directories. See

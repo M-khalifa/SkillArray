@@ -413,7 +413,7 @@ const leadRe = (tag) => new RegExp(`${LEAD}${escapeRe(tag)}(?![A-Za-z0-9_-]|\\.[
 export function buildTickets(rows, checksBySeat) {
   const ids = [...new Set(rows.flatMap((r) => (r.kind === 'hypothesis' ? [] : r.groups)).filter((g) => /^\d+$/.test(g)))];
   return ids.map((id) => {
-    const lineRe = new RegExp(`^[\\s>|-]*(?:\\d+[.)]\\s+)?(?:Ticket\\s+)?#?${id}(?![0-9]|-\\d)\\s*(?:\\([^)]*\\)\\s*)?[:|=-]`, 'i');
+    const lineRe = new RegExp(`${LEAD}(?:Ticket\\s+)?#?${id}(?![0-9]|-\\d)\\s*(?:\\([^)]*\\)\\s*)?[:|=-]`, 'i');
     const seats = {};
     for (const [seat, body] of Object.entries(checksBySeat)) {
       const said = body.split(/\r?\n/).map(verdictLine).filter((l) => lineRe.test(l)).map((l) => lineVerdict(l.replace(lineRe, l.startsWith('|') ? '| ' : '').trim(), TICKET_WORDS)).filter(Boolean)

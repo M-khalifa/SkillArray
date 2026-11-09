@@ -2533,3 +2533,32 @@ test('r5 F4 neighbours: emphasis does not widen the closed list: lowercase, "by"
     assert.deepEqual(r1Row(l).row.doubt, [], l);
   }
 });
+
+test('r1 F1: a quoted Windows folder path ending in a backslash still closes its quote, so a marker, phrase or failure word after it counts', () => {
+  const failing = (l) => r1Row(l).row.failedSeats;
+  for (const q of ['"', "'"]) {
+    const p = `${q}C:\\repo\\${q}`;
+    const later = `${q}ok${q}`;
+    assert.deepEqual(r1Row(`- AC-1: x.mjs:3 checked ${p} (web budget spent) then ${later}. MET`).row.doubt, ['A'], `${q} gap marker, later quote`);
+    assert.deepEqual(r1Row(`- AC-1: x.mjs:3 checked ${p}; NOT CHECKED: the rest, then ${later}. MET`).row.doubt, ['A'], `${q} NOT CHECKED, later quote`);
+    assert.deepEqual(r1Row(`- AC-1: x.mjs:3 in ${p} could not run, then ${later}`).row.doubt, ['A'], `${q} could not, later quote`);
+    assert.deepEqual(failing(`- AC-1: x.mjs:3 in ${p} failed, then ${later}`), ['A'], `${q} failure word, later quote`);
+    assert.deepEqual(r1Row(`- AC-1: x.mjs:3 checked ${p} (web budget spent). MET`).row.doubt, ['A'], `${q} gap marker, no later quote`);
+    assert.deepEqual(r1Row(`- AC-1: x.mjs:3 in ${p} could not run`).row.doubt, ['A'], `${q} could not, no later quote`);
+    assert.deepEqual(failing(`- AC-1: x.mjs:3 in ${p} failed`), ['A'], `${q} failure word, no later quote`);
+  }
+});
+
+test('ticket prefix: a ticket verdict line is read after a plus or star bullet, a task box or a bold number; mid-sentence mentions are not', () => {
+  const tick = (line) => buildTickets([{ kind: 'criterion', groups: ['6041'] }], { A: line })[0].verdict;
+  assert.equal(tick('+ 6041: GO'), 'GO');
+  assert.equal(tick('* 6041: NO GO'), 'NO GO');
+  assert.equal(tick('- [ ] 6041: GO'), 'GO');
+  assert.equal(tick('- [x] 6041: NO GO'), 'NO GO');
+  assert.equal(tick('**1.** 6041: GO'), 'GO');
+  assert.equal(tick('1. Ticket 6041: GO'), 'GO');
+  assert.equal(tick('- 6041: GO'), 'GO');
+  assert.equal(tick('| 6041 | GO |'), 'GO');
+  assert.equal(tick('see that 6041: GO was said'), null);
+  assert.equal(tick('We think ticket 6041 is a GO'), null);
+});

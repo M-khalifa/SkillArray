@@ -25,6 +25,7 @@ function printUsageAndExit(code) {
       `  A ground-truth defect is counted as found if any finding's evidence, id, or a human-supplied\n` +
       `  explicit mapping (see --mapping below) identifies it. Automatic substring matching on evidence\n` +
       `  text is a weak heuristic; prefer explicit ground-truth-to-finding mapping when available.\n` +
+      `  A finding is auto-matched to at most one defect (explicit mappings excepted).\n` +
       `--mapping <mapping.json>: optional { "defect_to_finding": { "<defect-id>": "<finding-id or null>" },\n` +
       `  "origin_to_defect": { "<origin-claim-id>": "<defect-id>" } }. defect_to_finding overrides\n` +
       `  substring-based auto-matching for the defects it lists; every referenced finding id must exist.\n` +
@@ -137,30 +138,58 @@ function isSurfaced(finding) {
 }
 
 // Matches each ground-truth defect against a candidate pool of findings.
-// Returns { "<defect-id>": "<finding-id>" | null }. Pure, order-preserving:
-// an explicit mapping entry always wins; otherwise the first candidate whose
-// text contains one of the defect's substring hints wins.
+// Returns { "<defect-id>": "<finding-id>" | null }. Pure and deterministic:
+// an explicit mapping entry always wins and reserves its finding; the other
+// defects get a maximum one-to-one matching on substring hints, so one finding
+// satisfies at most one of them.
 function matchAgainstPool(defects, pool, explicitMapping) {
   const texts = pool.map((f) => findingText(f));
   const result = {};
+  // One finding satisfies one defect: explicit picks are reserved, the rest is a maximum one-to-one matching.
+  const reserved = new Set();
+  const open = [];
   for (const defect of defects) {
     if (Object.hasOwn(explicitMapping, defect.id)) {
       const mappedId = explicitMapping[defect.id];
       // Honor the human's mapping only if it actually points into this pool;
       // otherwise this pass has nothing to match (the other pass may).
       result[defect.id] = mappedId !== null && pool.some((f) => f.id === mappedId) ? mappedId : null;
-      continue;
+      if (result[defect.id] !== null) reserved.add(mappedId);
+    } else {
+      open.push(defect);
     }
+  }
+  const edges = open.map((defect) => {
     const hints = (defect.matches ?? []).map((h) => h.toLowerCase());
-    let matchedId = null;
-    for (let i = 0; i < pool.length && matchedId === null; i++) {
-      if (hints.some((h) => h.length > 0 && texts[i].includes(h))) {
-        matchedId = pool[i].id;
+    const found = [];
+    for (let i = 0; i < pool.length; i++) {
+      if (!reserved.has(pool[i].id) && hints.some((h) => h.length > 0 && texts[i].includes(h))) found.push(i);
+    }
+    return found;
+  });
+  // Kuhn's augmenting paths: defects in input order, findings in pool order.
+  const owner = new Array(pool.length).fill(-1);
+  // A free finding is taken before any reassignment, so a conflict-free pool gives the plain first-come result.
+  const augment = (d, seen) => {
+    const free = edges[d].find((i) => owner[i] === -1);
+    if (free !== undefined) {
+      owner[free] = d;
+      return true;
+    }
+    for (const i of edges[d]) {
+      if (seen.has(i)) continue;
+      seen.add(i);
+      if (augment(owner[i], seen)) {
+        owner[i] = d;
+        return true;
       }
     }
-    result[defect.id] = matchedId;
-  }
-  return result;
+    return false;
+  };
+  for (let d = 0; d < open.length; d++) augment(d, new Set());
+  open.forEach((defect) => { result[defect.id] = null; });
+  owner.forEach((d, i) => { if (d !== -1) result[open[d].id] = pool[i].id; });
+  return Object.fromEntries(defects.map((d) => [d.id, result[d.id]]));
 }
 
 // Public helper retained for callers that only want "which finding, if any,

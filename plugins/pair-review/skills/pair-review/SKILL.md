@@ -14,7 +14,7 @@ compatibility: >-
   Claude seats need the Claude CLI or Claude Code agents, OpenAI seats need the
   Codex CLI. Claude Code is the primary target. Model access depends on the user's account.
 metadata:
-  version: 1.2.1
+  version: 1.2.2
 ---
 
 # Pair Review
@@ -25,6 +25,10 @@ models); a pair never mixes vendors. The orchestrator coordinates and verifies; 
 either seat.
 
 ## Rules that apply throughout
+
+After a context compaction during a review, re-read this whole file and the phase file of the step you are on before the
+next command: a compaction keeps only about the first 20,000 characters of a skill, and the phase steps and run checklist
+come later in this file.
 
 1. **Keep the orchestrator's context small.** Run Phase 1 and Phase 2 in one
    session (native seats resume only from the session that started them).

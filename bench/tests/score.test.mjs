@@ -39,6 +39,20 @@ test('matchDefectsToFindings: a defect with no matching finding maps to null, no
   assert.equal(result.D1, null);
 });
 
+test('matchDefectsToFindings: one finding satisfies only the first defect that hint-matches it', () => {
+  const defects = [{ id: 'D1', matches: ['x.mjs:10'] }, { id: 'D2', matches: ['x.mjs:10'] }];
+  const findings = [finding({ id: 'F1', evidence: ['x.mjs:10 breaks'] })];
+  assert.deepEqual(matchDefectsToFindings(defects, findings), { D1: 'F1', D2: null });
+  const two = [...findings, finding({ id: 'F2', evidence: ['also x.mjs:10'] })];
+  assert.deepEqual(matchDefectsToFindings(defects, two), { D1: 'F1', D2: 'F2' });
+});
+
+test('matchDefectsToFindings: an explicit mapping marks its finding used, even for an earlier defect', () => {
+  const defects = [{ id: 'D1', matches: ['x.mjs:10'] }, { id: 'D2', matches: ['nothing'] }];
+  const findings = [finding({ id: 'F1', evidence: ['x.mjs:10 breaks'] })];
+  assert.deepEqual(matchDefectsToFindings(defects, findings, { defect_to_finding: { D2: 'F1' } }), { D1: null, D2: 'F1' });
+});
+
 test('scoreRun: perfect match yields precision 1, recall 1, f1 1', () => {
   const defects = [{ id: 'D1', severity: 'HIGH', matches: ['xyz'] }];
   const findings = [finding({ id: 'F1', evidence: ['found xyz bug'] })];
@@ -439,4 +453,24 @@ test('scoreRun: a valid-but-adversarial input never produces a NaN or Infinity m
       assert.ok(Number.isFinite(value), `${key} must be finite, got ${value}`);
     }
   }
+});
+
+test('r1 F2: matching is maximum one-to-one, so a defect is not a miss when another assignment covers every defect', () => {
+  const defects = [{ id: 'D1', severity: 'HIGH', matches: ['retry'] }, { id: 'D2', severity: 'HIGH', matches: ['timeout'] }];
+  const broad = finding({ id: 'F5', evidence: ['retry loop ignores timeout'] });
+  const narrow = finding({ id: 'F6', evidence: ['retry count off'] });
+  assert.deepEqual(matchDefectsToFindings(defects, [broad, narrow]), { D1: 'F6', D2: 'F5' });
+  assert.deepEqual(matchDefectsToFindings(defects, [narrow, broad]), { D1: 'F6', D2: 'F5' });
+  assert.deepEqual(matchDefectsToFindings([...defects].reverse(), [broad, narrow]), { D2: 'F5', D1: 'F6' });
+  for (const findings of [[broad, narrow], [narrow, broad]]) {
+    const r = scoreRun({ findings, defects });
+    assert.deepEqual([r.recall, r.precision], [1, 1]);
+  }
+});
+
+test('r1 F2: explicit mappings stay reserved and may share a finding; unmatched defects stay null', () => {
+  const defects = [{ id: 'D1', matches: ['zzz'] }, { id: 'D2', matches: ['zzz'] }, { id: 'D3', matches: ['zzz'] }];
+  const findings = [finding({ id: 'F1', evidence: ['zzz'] }), finding({ id: 'F2', evidence: ['zzz'] })];
+  assert.deepEqual(matchDefectsToFindings(defects, findings, { defect_to_finding: { D1: 'F1', D2: 'F1' } }), { D1: 'F1', D2: 'F1', D3: 'F2' });
+  assert.deepEqual(matchDefectsToFindings(defects, findings), { D1: 'F1', D2: 'F2', D3: null });
 });
