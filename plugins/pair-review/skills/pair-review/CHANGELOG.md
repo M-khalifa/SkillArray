@@ -10,6 +10,9 @@
   note under Checks performed).
 - Code profile: new "Unasked change" lens for behavior, flags, files or refactors the named change did not ask for; a
   change a review finding, a class sweep or a standing rule requires counts as asked.
+- README: how to turn on auto-update without the `/plugin` menu (`"autoUpdate": true` on the skillarray entry under
+  `extraKnownMarketplaces` in `~/.claude/settings.json`; Claude Code has no command for it), when the update runs, and
+  the environment variables that turn it off.
 - Task packet template: a Scope line for the callers of each changed function (`git grep -n <name>`, including
   registries, route tables and configs that name it as a string).
 - A ticket verdict line is now also read after a `+` bullet or a task box, as a criterion line already was

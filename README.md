@@ -70,8 +70,25 @@ also needs the [Codex CLI](https://github.com/openai/codex), installed and signe
    ```
 
 To get new versions automatically, turn on auto-update once: `/plugin`, Marketplaces, skillarray, Enable auto-update
-(Claude Code leaves it off for marketplaces outside Anthropic's own). A review report also ends with a one-line notice when
-the local marketplace copy holds a newer version than the one that ran; nothing is fetched from the network for it.
+(Claude Code leaves it off for marketplaces outside Anthropic's own). There is no command for it. To set it without the
+menu, for example from a setup script, add `"autoUpdate": true` to the skillarray entry in `~/.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "skillarray": {
+      "source": { "source": "github", "repo": "M-khalifa/SkillArray" },
+      "autoUpdate": true
+    }
+  }
+}
+```
+
+Keep any other keys and marketplaces already in that file. Claude Code then checks for a new version up to ten minutes
+after your first message in a session, and the new version loads after `/reload-plugins` or at the next start.
+`DISABLE_UPDATES=1`, `DISABLE_AUTOUPDATER=1` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turn auto-update off unless
+`FORCE_AUTOUPDATE_PLUGINS=1` is also set. A review report also ends with a one-line notice when the local marketplace copy
+holds a newer version than the one that ran; nothing is fetched from the network for it.
 
 To update by hand in a session: `/plugin`, Marketplaces, skillarray, Update marketplace (it also updates both installed
 plugins), then `/reload-plugins`. When the marketplace is already up to date, update each plugin: `/plugin manage`,
