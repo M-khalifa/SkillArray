@@ -53,6 +53,9 @@ also needs the [Codex CLI](https://github.com/openai/codex), installed and signe
    /plugin install cross-review@skillarray
    ```
 
+   Then turn on auto-update once, so new versions arrive by themselves: `/plugin`, Marketplaces, skillarray, Enable
+   auto-update. Claude Code leaves it off for this marketplace; see [updates](#updates) below for the settings-file way.
+
 2. Pick the models each reviewer uses:
 
    ```text
@@ -68,6 +71,8 @@ also needs the [Codex CLI](https://github.com/openai/codex), installed and signe
    /cross-review -- review the changes in this branch
    /pair-review adversarial -- check this design doc against the ticket
    ```
+
+### Updates
 
 To get new versions automatically, turn on auto-update once: `/plugin`, Marketplaces, skillarray, Enable auto-update
 (Claude Code leaves it off for marketplaces outside Anthropic's own). There is no command for it. To set it without the
@@ -184,7 +189,9 @@ codex plugin add cross-review@skillarray
 codex plugin add pair-review@skillarray
 ```
 
-`codex plugin list` then shows both as installed and enabled. Or copy the skill folders yourself:
+`codex plugin list` then shows both as installed and enabled. Codex has no auto-update setting for this marketplace. To
+update, run `codex plugin marketplace upgrade skillarray` (both plugins load from that marketplace copy), then start a
+new Codex session. Or copy the skill folders yourself:
 
 Codex reads skills from `.agents/skills` in the repository, or from `~/.agents/skills` for every project. Copy each complete
 skill folder, including its `scripts` and `references` directories. See
