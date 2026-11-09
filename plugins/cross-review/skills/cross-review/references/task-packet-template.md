@@ -24,6 +24,7 @@ Read-only review: do not edit, create or delete any file in the target; do not c
 
 ## Scope
 - In scope: <files, folders, tickets, the diff against <base>>
+- Callers of each changed function: <list from `git grep -n <name>`, including registries, route tables and configs that name it as a string; or "none outside the diff">
 - Out of scope: <what the seats must not spend claims on>
 Keep one run to about three components (or a few thousand changed lines): in a field run one review of 14 apps got 8 claims and the same apps split into 4 runs got 72. Split a larger scope into runs (review-run status follows several).
 
@@ -89,7 +90,7 @@ Profile: Code. Target: C:/work/sync-worker, branch fix/retry, the diff `git diff
 Read-only review: do not edit, create or delete any file in the target; do not commit.
 
 ## Scope
-- In scope: the diff and every caller of the functions it changes.
+- In scope: the diff and every caller of the functions it changes (`git grep -n <name>`, string registries included).
 - Out of scope: style, naming, files the diff does not touch except as callers.
 
 ## Acceptance criteria (tag each one so claims can cite it)

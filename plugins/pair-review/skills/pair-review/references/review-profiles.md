@@ -42,6 +42,10 @@ Secondary lenses, in addition to the shared rubric:
   deserialization; anything on the OWASP-adjacent list for this language/stack.
 - **Regression** — does this break an existing caller, contract, or test that
   the diff didn't touch.
+- **Unasked change** — when the packet names a change and what it was for (a
+  ticket, criteria): behavior, flags, files or refactors in the diff that were
+  not asked for. A change that a review finding, a class sweep or a standing
+  rule requires counts as asked. Report it at the severity of its effect.
 - **Differential** — when the target changes existing behavior (a fix, a
   refactor), run the release version and the changed version on the same
   inputs, each changed failure path included (a partial failure, a killed

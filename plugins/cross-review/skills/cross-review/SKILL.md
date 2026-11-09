@@ -12,7 +12,7 @@ compatibility: >-
   an isolated Claude reviewer and background shell processes.
   Git is recommended for source-change auditing. Claude Code is the primary target.
 metadata:
-  version: 1.2.1
+  version: 1.2.2
 ---
 
 # Cross Review
@@ -25,6 +25,10 @@ enforces this. State the resolved provider, runtime, model, and effort before
 dispatch. Do not change authentication or provider configuration during setup.
 
 ## Rules that apply throughout
+
+After a context compaction during a review, re-read this whole file and the phase file of the step you are on before the
+next command: a compaction keeps only about the first 20,000 characters of a skill, and the phase steps and run checklist
+come later in this file.
 
 1. **Keep the orchestrator's context small.** Run Phase 1 and Phase 2 in one
    session (a native seat resumes only from the session that started it).

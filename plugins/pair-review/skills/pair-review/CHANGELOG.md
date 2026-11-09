@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.2 - 2026-11-09
+
+- SKILL.md tells the orchestrator to re-read the whole file and the current phase file after a context compaction
+  during a review: a compaction keeps only about the first 20,000 characters of a skill, and the phase steps and run
+  checklist come later in the file. In one session the re-attached cross-review text stopped inside Preflight.
+- A HIGH or CRITICAL claim's `Trigger:` line also names the strongest existing guard on the path and why it does not
+  stop the defect; a defect a working guard already stops is not a finding (a missing second guard can be a hardening
+  note under Checks performed).
+- Code profile: new "Unasked change" lens for behavior, flags, files or refactors the named change did not ask for; a
+  change a review finding, a class sweep or a standing rule requires counts as asked.
+- Task packet template: a Scope line for the callers of each changed function (`git grep -n <name>`, including
+  registries, route tables and configs that name it as a string).
+- A ticket verdict line is now also read after a `+` bullet or a task box, as a criterion line already was
+  (`+ 6041: GO`, `- [ ] 6041: GO`).
+- Bench scorer: a finding is auto-matched to at most one known defect (explicit mappings excepted), using a maximum
+  one-to-one matching, so the number of matched defects no longer depends on the order of the defects or findings.
+  When several matchings of that size exist, which defect gets which finding still follows input order, as in 1.2.1,
+  so the severity-weighted recall and the false-positive list can still change with the order.
+- review-protocol.md no longer promises a settling check for unresolved low-stakes findings; the report never printed
+  one.
+- Known issue: a citation such as `settings.dev:4` or `strings.es:4` (no folder, a name ending in a host-like suffix) is
+  read as a host and port, so it does not count as a citation.
+- Known issue: a gap marker (`NOT CHECKED`, a web-budget bracket), a "could not" phrase or a failure word inside quoted
+  text that itself holds an escaped quote (`"the \"(web budget spent)\" label"`) is still read as the seat's own words,
+  so the check can be marked incomplete or failing when it was not. The mark errs toward caution: read the quoted line.
+
 ## 1.2.1 - 2026-11-03
 
 The fixes added to the 1.2.0 tag between 2026-11-01 and 2026-11-03, under a new version number so a plugin update

@@ -16,16 +16,16 @@ This file is longer than one Read returns. Read it in two parts: up to the
 - line 75: Three label layers
 - line 93: Model identity
 - line 116: Evidence and findings: reviewer-authored fields
-- line 209: Standard seat instructions
-- line 314: Web verification
-- line 382: Blind exchange
-- line 391: Interaction modes
-- line 421: Synthesis: adjudication-added fields
-- line 467: Falsification pass
-- line 570: Canonical findings
-- line 642: findings.json
-- line 823: Fresh-context auditor
-- line 1011: Manifest and final output
+- line 213: Standard seat instructions
+- line 318: Web verification
+- line 386: Blind exchange
+- line 395: Interaction modes
+- line 425: Synthesis: adjudication-added fields
+- line 471: Falsification pass
+- line 574: Canonical findings
+- line 646: findings.json
+- line 827: Fresh-context auditor
+- line 1015: Manifest and final output
 <!-- /section-index -->
 
 ## Scope and independence
@@ -135,7 +135,7 @@ your own seat's IDs only):
 Severity: CRITICAL | HIGH | MEDIUM | LOW
 Basis: EXECUTED | STATIC_TRACE | SOURCE_CITATION | INFERENCE
 Evidence strength: REPRODUCED | DETERMINISTIC | SUPPORTED | PLAUSIBLE | SPECULATIVE
-Trigger: <the input or state that makes it happen, and how often a real deployment meets it, or "unknown">
+Trigger: <the input or state that makes it happen, and how often a real deployment meets it, or "unknown"; for HIGH or CRITICAL also the strongest existing guard on the path and why it does not stop the defect>
 Pre-existing: yes | no | unknown
 Evidence:
 ```
@@ -155,7 +155,11 @@ evidence is not on lines the change added, and it is not a blocker: a HIGH or CR
 fence. `translate` copies it into the finding's `suggested_fix` array, never
 into `evidence`. `Trigger:` is required for HIGH and CRITICAL and optional
 otherwise; it goes before `Evidence:`, and `validate` warns when a HIGH or
-CRITICAL claim has none. `Same shape elsewhere:` is required in every claim:
+CRITICAL claim has none. For HIGH and CRITICAL the line also names the strongest
+existing guard on the path (a caller's check, a type, a framework default, a
+setting) and why it does not stop the defect. A defect that a working guard
+already stops is not a finding; a missing second guard behind it can go under
+`## Checks performed` as a hardening note. `Same shape elsewhere:` is required in every claim:
 `validate` and the format check refuse a claim without it, and the seat gets
 one rewrite. `translate` copies the `Trigger:` line and the `Same shape
 elsewhere:` text into the finding's `trigger` and `same_shape` arrays.
@@ -445,7 +449,7 @@ granularity is deferred.
 |---|---|
 | settled-agree | Same claim settled in its favor — both sides align, or a falsification-pass verifier returned CONFIRMED — reported with its actual evidence basis |
 | settled-refuted | Specific counter-evidence settles the original claim, whether from the peer's rebuttal or a falsification-pass verifier's REFUTED verdict |
-| unresolved-low-stakes | Unresolved; report both positions and a settling check |
+| unresolved-low-stakes | Unresolved; report both positions |
 | unresolved-high-stakes | Unresolved money/auth/pagination/user-flagged issue, including one a falsification-pass verifier returned INCONCLUSIVE on |
 | dropped-speculative | SPECULATIVE claim neither corroborated, attacked, nor independently checked by a falsification-pass verifier; retained in `findings.json` for the artifact, never in the report's own findings list; never a CRITICAL claim (an unchecked CRITICAL is `unresolved-high-stakes`) |
 
