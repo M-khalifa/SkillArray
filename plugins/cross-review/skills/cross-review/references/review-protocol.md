@@ -25,7 +25,7 @@ This file is longer than one Read returns. Read it in two parts: up to the
 - line 574: Canonical findings
 - line 646: findings.json
 - line 827: Fresh-context auditor
-- line 1015: Manifest and final output
+- line 1021: Manifest and final output
 <!-- /section-index -->
 
 ## Scope and independence
@@ -896,7 +896,13 @@ it). Instruct the auditor to:
    (a rebuttal only overturns a claim with a specific checkable counter-fact,
    never bare disagreement) and its SPECULATIVE-claim-drop rule, then produce
    the adjudication-added fields (Peer response, Verification, Final state)
-   defined in review-protocol.md's Synthesis section. A claim whose `Basis:
+   defined in review-protocol.md's Synthesis section. A counter-fact that
+   covers only some of the cases a claim names overturns only those: when you
+   can name a case it does not cover that still produces the defect, the
+   finding is not `settled-refuted`; record `auditor_check.result` as
+   `CONFIRMED` or `INCONCLUSIVE` for that case, give the finding the unresolved
+   state its stakes call for (or `settled-agree` when a `verifications[]` entry
+   for it is `CONFIRMED`), and name that case in `summary`. A claim whose `Basis:
    SOURCE_CITATION` includes a URL and quoted text per review-protocol.md's Web
    verification section is a checkable counter-fact like any other citation —
    weigh it against a peer's text-only rebuttal the same way any cited source

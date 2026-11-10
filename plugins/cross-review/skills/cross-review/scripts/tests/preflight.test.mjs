@@ -12,6 +12,7 @@ import {
   assertNodeVersion, parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, repoFreshness, freshnessWarnings, findReviewArtifacts, summaryLine,
   jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs, claudeProjectsWritable,
 } from '../preflight.mjs';
+import { jobSpawn, readJobReport } from '../spawn-utils.mjs';
 
 function git(args, cwd) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -968,6 +969,70 @@ test('Mac round 4 F5: for a subfolder target, status and the summary line count 
   assert.deepEqual(tier1.changedFiles, ['new.txt']);
   assert.equal(tier1.status, '?? sub/new.txt\n');
   assert.match(summaryLine({ snapshotHash: 'h', tier1 }, 'out.json'), /; 1 changed file\(s\) \(1 untracked: new\.txt\); no Tier 2 command$/);
+});
+
+test('job wrapper: a process that exits by itself shortly after the command is not reported as left running [slow]', { skip: process.platform !== 'win32' && 'Windows job wrapper' }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'job-settle-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'start-short-lived.mjs');
+  await writeFile(script, `import { spawn } from 'node:child_process';
+spawn(process.execPath, ['-e', 'setTimeout(() => {}, 400)'], { detached: true, stdio: 'ignore' }).unref();
+`);
+  const { child, dir: jobDir } = jobSpawn(`"${process.execPath}" "${script}"`, { cwd: dir });
+  t.after(() => rm(jobDir, { recursive: true, force: true }));
+  const code = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(code, 0);
+  assert.deepEqual(readJobReport(path.join(jobDir, 'job.txt')), { left: [] });
+});
+
+test('job wrapper: the report says the command ended before the leftover check finishes, then names the leftover [slow]', { skip: process.platform !== 'win32' && 'Windows job wrapper' }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'job-exit-first-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'start-leftover.mjs');
+  await writeFile(script, `import { spawn } from 'node:child_process';
+spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'ignore' }).unref();
+process.exitCode = 3;
+`);
+  const { child, dir: jobDir } = jobSpawn(`"${process.execPath}" "${script}"`, { cwd: dir });
+  t.after(() => rm(jobDir, { recursive: true, force: true }));
+  const report = path.join(jobDir, 'job.txt');
+  const seen = [];
+  const poll = setInterval(() => { const r = readJobReport(report); if (!r.unreadable && JSON.stringify(seen.at(-1)) !== JSON.stringify(r)) seen.push(r); }, 10);
+  const code = await new Promise((resolve) => child.on('close', resolve));
+  clearInterval(poll);
+  assert.equal(code, 3);
+  const final = readJobReport(report);
+  assert.equal(final.left?.length, 1, 'the 30 s child is a real leftover');
+  assert.deepEqual(seen[0], { exited: 3 }, 'the command\'s exit code is in the report while the wrapper still checks for leftovers');
+});
+
+test('job report: "exit <code>" means the leftover check is not done; afterJobSettles waits once for it, else runs now', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'job-settle-unit-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const report = path.join(dir, 'job.txt');
+  const { afterJobSettles } = await import('../spawn-utils.mjs');
+  const logged = [];
+  await writeFile(report, 'exit 0');
+  assert.deepEqual(readJobReport(report), { exited: 0 });
+  assert.equal(jobLeftovers(report, { log: (m) => logged.push(m) }), null, 'a wrapper killed between its two writes: the scan runs');
+  assert.match(logged.at(-1), /ended before it checked for leftover processes/);
+  const ran = [];
+  const set = (fn, ms) => { ran.push(`deferred ${ms}`); return 'timer'; };
+  assert.equal(afterJobSettles(report, () => ran.push('now'), { set, ms: 3000 }), 'timer');
+  assert.deepEqual(ran, ['deferred 3000'], 'the command ended: the kill waits for the wrapper');
+  for (const text of ['left 7', 'nojob CreateJobObject failed: 5', '']) {
+    await writeFile(report, text);
+    ran.length = 0;
+    assert.equal(afterJobSettles(report, () => ran.push('now'), { set }), null);
+    assert.deepEqual(ran, ['now'], `report "${text}": no wait`);
+  }
+  ran.length = 0;
+  assert.equal(afterJobSettles(null, () => ran.push('now'), { set }), null, 'no job (POSIX): no wait');
+  assert.deepEqual(ran, ['now']);
+  await writeFile(report, 'exi');
+  assert.match(readJobReport(report).unreadable, /unexpected report text/, 'a partly written report is unreadable, not a refused job');
+  await writeFile(report, '');
+  assert.ok(readJobReport(report).unreadable);
 });
 
 test('round 5: the job report gives the leftover pids; without a usable job the parent-chain scan runs and stops only the command\'s tree', async (t) => {

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.3 - Unreleased
+
+- On Windows, the job wrapper waits up to about 1 s for processes still exiting before it lists leftovers, so a process that
+  ends by itself is no longer reported (and stopped) as left running; this caused a false warning and two flaky Windows CI tests.
+- On Windows, a detached seat worker records the start time the OS reports instead of Node's own start time. `--wait`
+  compares the two with a 10 s tolerance, so on a loaded machine where Node took longer to start, a running seat was
+  reported "gone ... dispatch again".
+- Auditor instructions: a counter-fact that covers only some of the cases a claim names overturns only those. When the
+  auditor can name a case it does not cover that still produces the defect, the finding is not settled as refuted: it
+  stays unresolved (or settled-agree when a falsification verifier confirmed it), with that case in its summary. In a
+  bench trial the auditor refuted a real defect while its own check named the exact case the refutation did not cover.
+- On Windows, the job wrapper writes the command's exit code to its report before that wait. A `--exec` timeout, a seat
+  timeout or a seat's answer grace that fires during the wait now waits once more (3 s, `REVIEW_JOB_SETTLE_MS`), so a
+  command that ended just in time keeps its own exit code and its leftover report instead of being reported as timed out
+  or stopped. A wrapper still running after that is stopped as before.
+
 ## 1.2.2 - 2026-11-09
 
 - SKILL.md tells the orchestrator to re-read the whole file and the current phase file after a context compaction
