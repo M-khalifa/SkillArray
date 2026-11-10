@@ -33,7 +33,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { buildChildEnv, NETWORK_ENV_ALLOWLIST } from './env-filter.mjs';
 import { DEFAULT_MAX_FILES, diffInventories, hashInventory } from './snapshot-utils.mjs';
-import { hasExited, jobSpawn, killGroupOnExit, killTree as killTreeShared, readJobReport, spawnCli, stopMarkedProcesses } from './spawn-utils.mjs';
+import { afterJobSettles, hasExited, jobSpawn, killGroupOnExit, killTree as killTreeShared, readJobReport, spawnCli, stopMarkedProcesses } from './spawn-utils.mjs';
 
 // An exited child is not signalled again: its pid may belong to another process by now.
 const killTree = (child, options) => (hasExited(child) ? Promise.resolve() : killTreeShared(child, options));
@@ -651,6 +651,10 @@ export function jobLeftovers(report, { log = (m) => process.stderr.write(m) } = 
     log(`preflight: WARNING: the command could not run in a job object (${read.refused}); scanning for leftover processes instead\n`);
     return null;
   }
+  if (read.exited !== undefined) {
+    log('preflight: WARNING: the job wrapper ended before it checked for leftover processes; scanning for them instead\n');
+    return null;
+  }
   return read.left;
 }
 
@@ -699,7 +703,7 @@ function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platfo
     // callback's resolve() actually wins that race.
     let timedOut = false;
     if (timeout) {
-      timer = setTimeout(() => {
+      const onTimeout = () => {
         timedOut = true;
         killTree(child, { waitForGroup: true }).finally(() => {
           const marked = sweepMarked();
@@ -708,7 +712,9 @@ function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platfo
           settled = true;
           resolve({ code: null, stdout, stderr, timedOut: true, ...(marked.length > 0 ? { leftoversStopped: marked } : {}) });
         });
-      }, timeout * 1000);
+      };
+      // A command that ended just before the timeout is not timed out: the wrapper is only checking for leftovers.
+      timer = setTimeout(() => { timer = afterJobSettles(report, onTimeout) ?? timer; }, timeout * 1000);
     }
     // On the shell's exit, not on close: a leftover process holds the output pipes open, so close waits until it ends.
     let leftovers = [];

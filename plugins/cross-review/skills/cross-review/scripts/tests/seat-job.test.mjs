@@ -153,3 +153,33 @@ test('a job the wrapper cannot create is named in result.json, and the orphan wa
   assert.equal(hangRecord.stoppedAfterAnswer, true);
   assert.equal(typeof hangRecord.jobRefused, 'string');
 });
+
+// A CLI that ended just before its timeout or answer grace, while its job wrapper still checks for leftovers (the
+// report says "exit <code>"), keeps its own result: the stop waits once for the wrapper. A real child stands in for the
+// wrapper, so this runs on every system.
+async function runWithExitedReport(t, { timeoutS = 0, answerAt = null, liveMs }) {
+  const { runCli } = await import('../cli-run.mjs');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'job-settle-cli-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const report = path.join(dir, 'job.txt');
+  await fs.writeFile(report, 'exit 0');
+  const { spawn } = await import('node:child_process');
+  const body = `${answerAt === null ? '' : `console.log('ANSWER');`} setTimeout(() => {}, ${liveMs});`;
+  const start = () => Object.assign(spawn(process.execPath, ['-e', body], { stdio: ['pipe', 'pipe', 'pipe'] }), { jobReport: report, jobDir: path.join(dir, 'keep') });
+  return runCli({ command: 'fake', args: [], input: '', timeoutS, onLine: (l) => l === 'ANSWER', start, job: false, exit: () => {} });
+}
+
+test('F1: a CLI that ends while its job wrapper checks for leftovers is not timed out', async (t) => {
+  const out = await runWithExitedReport(t, { timeoutS: 1, liveMs: 1600 });
+  assert.equal(out.timedOut, false);
+  assert.equal(out.code, 0);
+});
+
+test('F1: the answer grace does not stop a CLI whose wrapper is checking for leftovers', async (t) => {
+  const before = process.env.REVIEW_ANSWER_GRACE_MS;
+  process.env.REVIEW_ANSWER_GRACE_MS = '300';
+  t.after(() => { if (before === undefined) delete process.env.REVIEW_ANSWER_GRACE_MS; else process.env.REVIEW_ANSWER_GRACE_MS = before; });
+  const out = await runWithExitedReport(t, { answerAt: 0, liveMs: 1200 });
+  assert.equal(out.stoppedAfterAnswer, false);
+  assert.equal(out.code, 0);
+});

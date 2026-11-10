@@ -331,7 +331,11 @@ $p = [System.Diagnostics.Process]::Start($psi)
 $p.WaitForExit()
 $code = $p.ExitCode
 if ($inJob) {
+  # The command has ended; a timer that fires while the leftovers are checked below waits for the final report (afterJobSettles).
+  [IO.File]::WriteAllText($report, "exit " + $code)
   $left = @([PreflightJob]::Pids() | Where-Object { $_ -ne $PID })
+  # A process still exiting on its own is not a leftover: look again for up to about 1 s.
+  for ($i = 0; $i -lt 20 -and $left.Count -gt 0; $i++) { Start-Sleep -Milliseconds 50; $left = @([PreflightJob]::Pids() | Where-Object { $_ -ne $PID }) }
   [IO.File]::WriteAllText($report, "left " + ($left -join ' '))
   foreach ($id in $left) { try { [System.Diagnostics.Process]::GetProcessById($id).Kill() } catch { } }
 }
@@ -355,7 +359,8 @@ export function jobSpawn(command, { cwd, env, spawnFn = spawn } = {}) {
   return { child, report, dir };
 }
 
-// The job wrapper's report: { left: [pids it stopped] }, { refused: why no job could be used }, or { unreadable: why }.
+// The job wrapper's report: { left: [pids it stopped] }, { exited: code } (the command ended, leftovers not yet checked),
+// { refused: why no job could be used }, or { unreadable: why } (also text read while the wrapper rewrites it).
 export function readJobReport(report) {
   let text = '';
   try {
@@ -363,8 +368,24 @@ export function readJobReport(report) {
   } catch (err) {
     return { unreadable: err.code || err.message };
   }
-  if (!text.startsWith('left')) return { refused: text.replace(/^nojob\s*/, '').trim() };
+  if (text.startsWith('nojob')) return { refused: text.slice(5).trim() };
+  const exited = /^exit (-?\d+)$/.exec(text.trim());
+  if (exited) return { exited: Number(exited[1]) };
+  if (!text.startsWith('left')) return { unreadable: `unexpected report text "${text.slice(0, 40)}"` };
   return { left: text.slice(4).trim().split(/\s+/).filter(Boolean).map(Number).filter(Number.isFinite) };
+}
+
+// How long a timeout or answer grace waits, once, when it fires after the command ended but before the wrapper finished
+// checking for leftovers (about 1 s), so the run keeps the command's own result and the wrapper's leftover report.
+export function jobSettleMs(env = process.env) {
+  return Number(env.REVIEW_JOB_SETTLE_MS) || 3000;
+}
+
+// Runs `fn` now, or once after jobSettleMs when the job report says the command already ended; returns the new timer or null.
+export function afterJobSettles(report, fn, { set = setTimeout, ms = jobSettleMs() } = {}) {
+  if (report && readJobReport(report).exited !== undefined) return set(fn, ms);
+  fn();
+  return null;
 }
 
 // child.killed means the signal was sent, not that the process exited, so it

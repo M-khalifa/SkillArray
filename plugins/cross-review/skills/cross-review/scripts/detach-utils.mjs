@@ -381,7 +381,9 @@ export function createDetachHandlers({ scriptPath, dispatch, runningRecord, atom
     for (const k of Object.keys(process.env)) if (workerEnvNames.some((name) => name.toLowerCase() === k.toLowerCase())) delete process.env[k];
     Object.assign(process.env, job.env ?? {});
     process.chdir(job.cwd);
-    const workerStartedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
+    // On Windows no start token exists, so the record holds the start time the OS reports, the one --wait compares with.
+    const osStart = process.platform === 'win32' ? processStartMs(process.pid) : null;
+    const workerStartedAt = new Date(osStart ?? Date.now() - process.uptime() * 1000).toISOString();
     return dispatch(job.argv, { worker: { detached: true, workerPid: process.pid, workerStartedAt, workerStartToken: processStartToken(process.pid), workerLog: logPath } });
   }
 
