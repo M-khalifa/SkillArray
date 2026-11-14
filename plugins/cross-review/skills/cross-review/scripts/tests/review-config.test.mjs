@@ -270,7 +270,8 @@ test('seats CLI: --host is required, an output file is never overwritten, and th
   const noHost = run('seats');
   assert.notEqual(noHost.status, 0);
   assert.match(noHost.stderr, /seats needs --host/);
-  const out = path.join(dir, 'seats.json');
+  // Field feedback: --out into a folder that does not exist yet creates it.
+  const out = path.join(dir, 'work-missing', 'seats.json');
   const written = run('seats', '--host', 'claude-code', '--out', out);
   assert.equal(written.status, 0, written.stderr);
   const seats = JSON.parse(await fs.readFile(out, 'utf8'));

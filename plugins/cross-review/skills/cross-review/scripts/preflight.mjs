@@ -2312,6 +2312,7 @@ async function main() {
     }
     const text = JSON.stringify(result, null, 2) + '\n';
     if (args.out) {
+      await mkdir(path.dirname(path.resolve(args.out)), { recursive: true });
       await writeFile(args.out, text, 'utf8');
       // With --out stdout is plain lines, so the notes go there: on stderr PowerShell 5.1 shows them as an error at exit 0.
       process.stdout.write([summaryLine(result, args.out), ...notes].map((l) => `${l}\n`).join(''));

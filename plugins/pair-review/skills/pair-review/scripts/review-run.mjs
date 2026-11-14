@@ -336,13 +336,17 @@ function endedAs(record) {
 
 // A CLI actor that changed the real target fails its step, whichever attempt recorded the write; an unrecorded
 // inventory is reported, not assumed clean.
-async function checkTouched(label, file) {
+async function checkTouched(label, file, nativePeer = null) {
   const dir = path.dirname(file);
   const attempts = (await fs.readdir(dir).catch(() => [])).filter((f) => /^result\.attempt-\d+\.json$/.test(f)).sort();
   for (const name of [path.basename(file), ...attempts]) {
     const touched = (await readResultAt(path.join(dir, name)))?.touchedFiles;
     if (Array.isArray(touched) && touched.length > 0) {
-      throw new StepError(`${label} touched files`, `${label} wrote into the target (${touched.slice(0, 5).join(', ')}${touched.length > 5 ? ', ...' : ''}; recorded in ${name}); a review must leave the target unchanged`);
+      // The record compares the target before and after this CLI actor's run, so a native seat working in the same target meanwhile counts too.
+      const peer = nativePeer
+        ? `. ${nativePeer} is a native agent working in the same target at the same time and may have made these writes (Python writes __pycache__ unless it runs with -B); a new run with --transport cli gives a Claude seat its own worktree, out of the real target`
+        : '';
+      throw new StepError(`${label} touched files`, `${label} wrote into the target (${touched.slice(0, 5).join(', ')}${touched.length > 5 ? ', ...' : ''}; recorded in ${name}); a review must leave the target unchanged${peer}`);
     }
   }
   const record = await readResultAt(file);
@@ -593,6 +597,8 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
   const budget = () => Math.max(0, Math.floor(maxWait - (Date.now() - began) / 1000));
   for (const role of roles) {
     const actor = desc[`seat${role}`];
+    const otherRole = ['A', 'B'].find((r) => r !== role && desc[`seat${r}`] && !isCli(desc[`seat${r}`]));
+    const nativePeer = otherRole ? `seat ${otherRole}` : null;
     if (isCli(actor)) {
       const prior = await recheckGone(resultFile(desc, phase, role), await readResult(desc, phase, role));
       rateLimitGate(`seat ${role}`, prior);
@@ -613,7 +619,7 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
       if (ended) rateLimitGate(`seat ${role}`, ended);
       if (ended || neverStarted) {
         stopRecordedChild(prior);
-        await checkTouched(`seat ${role}`, resultFile(desc, phase, role));
+        await checkTouched(`seat ${role}`, resultFile(desc, phase, role), nativePeer);
         await assertFingerprint(desc, { report, step: phase });
         // A format rewrite that failed is dispatched again as the rewrite, on the same session, not as a new pass.
         const rewriteBrief = path.join(dispatchDir(desc, phase, role), 'rewrite-brief.txt');
@@ -635,7 +641,7 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
         throw err;
       }
       if (!done) throw new StillRunning(`seat ${role} (${actor.runtime}) is still running; rerun this command`);
-      const note = await checkTouched(`seat ${role}`, resultFile(desc, phase, role));
+      const note = await checkTouched(`seat ${role}`, resultFile(desc, phase, role), nativePeer);
       report.lines.push(`seat ${role}: completed (cli ${actor.runtime})${note ? `; ${note}` : ''}`);
       await noteAnswerStop(desc, await readResult(desc, phase, role), `seat ${role}`, phase, report);
     } else {

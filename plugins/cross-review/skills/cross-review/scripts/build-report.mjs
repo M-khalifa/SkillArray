@@ -1,6 +1,6 @@
 // Builds the review report from the run's own files, so IDs, counts and states are never retyped.
 // The terminal report is the default output; --out writes a markdown copy, --html an optional standalone page.
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -1713,9 +1713,13 @@ async function main(argv, tty = false) {
     const forced = process.env.FORCE_COLOR !== undefined && process.env.FORCE_COLOR !== '' && process.env.FORCE_COLOR !== '0';
     const color = args.color === 'always' || (args.color === 'auto' && !process.env.NO_COLOR && (forced || tty));
     // The files first: a reader that closes stdout early must not cost a requested file.
-    if (args.out) await writeFile(path.resolve(args.out), renderMarkdown(report), 'utf8');
-    if (args.json) await writeFile(path.resolve(args.json), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-    if (args.html) await writeFile(path.resolve(args.html), renderHtml(report), 'utf8');
+    const writeOut = async (file, text) => {
+      await mkdir(path.dirname(path.resolve(file)), { recursive: true });
+      await writeFile(path.resolve(file), text, 'utf8');
+    };
+    if (args.out) await writeOut(args.out, renderMarkdown(report));
+    if (args.json) await writeOut(args.json, `${JSON.stringify(report, null, 2)}\n`);
+    if (args.html) await writeOut(args.html, renderHtml(report));
     io.out(args.format === 'chat' ? renderChat(report, { all: args.all }) : renderText(report, { color }));
     return 0;
   } catch (err) {

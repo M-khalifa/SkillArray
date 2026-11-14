@@ -1401,7 +1401,9 @@ test('self-review fixes: a reader that closes stdout early keeps the exit code a
     child.stdout.destroy();
     child.on('close', resolve);
   });
-  assert.equal(await run(['--out', path.join(dir, 'missing-folder', 'r.md')]), 2, 'a write error is still exit 2');
+  assert.equal(await run(['--out', path.join(dir, 'phase1')]), 2, 'a write error (the path is a folder) is still exit 2');
+  assert.equal(await run(['--out', path.join(dir, 'missing-folder', 'r.md')]), 0, 'field feedback: a missing folder is created');
+  assert.equal(existsSync(path.join(dir, 'missing-folder', 'r.md')), true);
   assert.equal(await run(['--out', path.join(dir, 'r.md'), '--json', path.join(dir, 'r.json')]), 0);
   assert.equal(existsSync(path.join(dir, 'r.json')), true, 'the --json file is written');
 });

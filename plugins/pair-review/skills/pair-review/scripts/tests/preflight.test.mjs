@@ -191,8 +191,11 @@ test('run(): --source-snapshot records a plain export\'s stated repo and ref wit
   assert.equal(cli.status, 0, cli.stderr);
   assert.match(cli.stderr, /WARNING: .* holds 3 Python or Gradle cache item\(s\) \(\.pytest_cache\/, pkg\/__pycache__\/, stray\.pyc\); left out of its snapshotHash/);
   // With --out stdout is plain lines, so the note goes there (PowerShell 5.1 shows any stderr line as an error).
-  const withOut = spawnSync(process.execPath, [fileURLToPath(new URL('../preflight.mjs', import.meta.url)), '--cd', target, '--source-snapshot', `${snap}=org/svc@1a2b3c4`, '--out', path.join(target, '..', 'pf-out.json')], { encoding: 'utf8' });
+  // Field feedback: --out into a folder that does not exist yet creates it.
+  const outFile = path.join(target, '..', 'evidence-missing', 'pf-out.json');
+  const withOut = spawnSync(process.execPath, [fileURLToPath(new URL('../preflight.mjs', import.meta.url)), '--cd', target, '--source-snapshot', `${snap}=org/svc@1a2b3c4`, '--out', outFile], { encoding: 'utf8' });
   assert.equal(withOut.status, 0, withOut.stderr);
+  assert.equal(JSON.parse(await readFile(outFile, 'utf8')).sourceSnapshots.length, 1);
   assert.match(withOut.stdout, /^preflight: wrote .*\npreflight: WARNING: .* holds 3 Python or Gradle cache item\(s\)/);
   assert.equal(withOut.stderr, '');
   assert.throws(() => parseArgs(['--cd', target, '--source-snapshot', `${snap}=org/svc`]), /must look like <folder>=<repo>@<commit or tag>/);

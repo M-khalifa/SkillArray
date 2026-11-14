@@ -46,7 +46,7 @@ resembling GPT. The curated choices are whatever `review-config.mjs catalog`
 returns; `codex debug models` shows what the installed CLI can run, with each
 model's supported effort levels. It prints one very long JSON line, so parse
 it rather than grep it (Windows PowerShell 5.1 adds a BOM when it pipes one program into
-another, so strip it first), e.g. `codex debug models | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{for(const m of JSON.parse(d.replace(/^\uFEFF/,'')).models)console.log(m.slug,m.visibility)})"`. The installed CLI and account entitlement
+another, so strip it first), e.g. `codex debug models | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{for(const m of JSON.parse(d.trimStart()).models)console.log(m.slug,m.visibility)})"`. The installed CLI and account entitlement
 remain authoritative. On a Codex host `codex` does not run inside the sandbox shell: there the models the agent
 spawn tool offers are the list to choose from (`references/hosts/codex.md`).
 

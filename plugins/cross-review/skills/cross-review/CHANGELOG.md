@@ -15,6 +15,19 @@
   timeout or a seat's answer grace that fires during the wait now waits once more (3 s, `REVIEW_JOB_SETTLE_MS`), so a
   command that ended just in time keeps its own exit code and its leftover report instead of being reported as timed out
   or stopped. A wrapper still running after that is stopped as before.
+- From field reports of other review sessions: when a CLI seat fails the step because the target changed during its run
+  and the other seat is a native agent working in the same target, the error now says that native seat may have made
+  the writes (Python writes `__pycache__` unless run with `-B`) and that `--transport cli` gives a Claude seat its own
+  worktree, out of the real target. Runs with native seat A and a Codex CLI seat B failed with "seat B touched files" on
+  `.pyc` files; with seat A on CLI transport, seat B recorded no writes in 3 of 3 runs on the same target.
+  The check itself is unchanged: any write to the target during a CLI seat's run still fails the step.
+- `preflight --out`, `review-config seats --out` and the report's `--out`, `--json` and `--html` create a missing parent
+  folder instead of stopping with a Node error.
+- The `codex debug models` example strips the BOM with `trimStart()` instead of a regex escape that a session turned into
+  the invisible character itself, which Claude Code's PowerShell tool then refused to run.
+- `review-config --help` names `--a-effort` and `--b-effort` among the one-run overrides of `seats`.
+- The Claude Code host file says that auto mode can refuse `phase1 --start` as data exfiltration (it sends target
+  content to the Codex seat) and that the user then runs the command with `!`.
 
 ## 1.2.2 - 2026-11-09
 

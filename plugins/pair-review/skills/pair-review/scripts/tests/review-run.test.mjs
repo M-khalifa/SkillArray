@@ -1169,10 +1169,21 @@ test('F4: a seat that wrote into the target fails the Phase 1 wait; an unavailab
   const bad = await s.rr('phase1', '--run-dir', s.run, '--wait');
   assert.equal(bad.code, 1, bad.out);
   assert.match(bad.lines.at(-2), /^FAILED seat A touched files: .*src\/app\.js/);
+  assert.doesNotMatch(bad.out, /native agent working in the same target/, 'no native seat, no hint');
   await fs.writeFile(path.join(s.run, 'phase1', 'A', 'result.json'), JSON.stringify({ status: 'completed', sessionId: 'sess-A', touchedFiles: null }));
   const unknown = await s.rr('phase1', '--run-dir', s.run, '--wait');
   assert.equal(unknown.code, 0, unknown.out);
   assert.ok(unknown.lines.some((l) => /^seat A: completed .*touchedFiles unavailable/.test(l)), unknown.out);
+});
+
+test('field feedback: a CLI seat blamed for target writes names the native seat that works in the same target meanwhile', async (t) => {
+  const s = await setup(t, { seatA: { transport: 'native' } });
+  assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
+  await fs.writeFile(path.join(s.run, 'phase1', 'A-findings.md'), '# Seat A findings\n\n## No findings\n\nBlocked: none\n');
+  await fs.writeFile(path.join(s.run, 'phase1', 'B', 'result.json'), JSON.stringify({ status: 'completed', sessionId: 'sess-B', touchedFiles: ['pkg/__pycache__/m.cpython-311.pyc'] }));
+  const bad = await s.rr('phase1', '--run-dir', s.run, '--wait', '--max-wait', '1', '--native-done', 'A');
+  assert.equal(bad.code, 1, bad.out);
+  assert.match(bad.lines.at(-2), /^FAILED seat B touched files: .*__pycache__.*seat A is a native agent working in the same target at the same time and may have made these writes .*--transport cli/);
 });
 
 test('F4: a seat that wrote into the target fails the Phase 2 wait', async (t) => {
