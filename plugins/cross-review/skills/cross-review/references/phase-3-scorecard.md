@@ -323,7 +323,7 @@ the Phase 1 files: status, blockers, findings by severity,
 every packet criterion as issue found, not met or partial (no finding), no issue found or NOT VERIFIED, coverage, caveats and cost. IDs, counts and
 states are never retyped. Status is COMPLETE only when the manifest's status is `completed`; no merge or ship verdict is printed.
 A missing cost figure prints as unknown, never an estimate. `--format chat` prints plain markdown for a chat window (paste it
-verbatim as your reply); `--all` adds every finding, criterion and the cost to it. `--notes <file>` names the notes file when it
+verbatim as your reply); `--all`, only when the user asks for the full report, adds every finding, criterion and the cost to it. `--notes <file>` names the notes file when it
 is not `<run-dir>/phase3/report-notes.md`. `--change-diff <diff>` (repeat it for a second repository; default `<run-dir>/since.diff`,
 which `review-run recheck` writes; for a first round the preflight's `tier1.diff` log) adds a Where hint per finding (added lines, near the
 change (within 20 lines of a hunk), changed file, outside the change, unknown); it never moves a finding. `--out report.md` adds a plain

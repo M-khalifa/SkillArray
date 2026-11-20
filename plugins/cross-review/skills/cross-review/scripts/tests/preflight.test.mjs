@@ -1180,6 +1180,20 @@ test('field feedback S2: the Codex seat tool probe names a tool the sandbox cann
   assert.equal(warnings.length, 3);
   assert.match(warnings[2], /can run none of python, rg: it will review by reading files only, so expect fewer claims/);
   assert.equal(toolProbeWarnings({ python: result.python, git: result.git }, { home, platform: 'win32' }).length, 1, 'one missing tool gets no summary line');
+  // Field runs: a WinGet rg (a link into a folder the sandbox cannot read) gets a ready copy command, on Windows only.
+  const wingetRg = path.join(home, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links', 'rg.exe');
+  const linked = { rg: { ok: false, why: "Program 'rg.exe' failed to run: No application is associated with the specified file for this operation", host: wingetRg } };
+  const [rgLine] = toolProbeWarnings(linked, { home, platform: 'win32' });
+  assert.ok(rgLine.includes(`Copy-Item -ErrorAction Stop '${wingetRg}' 'C:\\Program Files\\ripgrep\\rg.exe'`), rgLine);
+  // An rg already in the copy target (or outside the profile, like a Chocolatey shim) gets no copy command.
+  for (const host of ['C:\\Program Files\\ripgrep\\rg.exe', 'C:\\ProgramData\\chocolatey\\bin\\rg.exe']) {
+    assert.doesNotMatch(toolProbeWarnings({ rg: { ...linked.rg, host } }, { home, platform: 'win32' })[0], /Copy-Item/, host);
+  }
+  assert.match(rgLine, /put C:\\Program Files\\ripgrep first in the system Path .* open a new terminal; or run the tests in preflight --exec/);
+  assert.doesNotMatch(rgLine, /SetEnvironmentVariable|setx/, 'the command never rewrites PATH');
+  const quoted = toolProbeWarnings({ rg: { ...linked.rg, host: path.join(home, "O'Neil", 'rg.exe') } }, { home, platform: 'win32' })[0];
+  assert.ok(quoted.includes(`Copy-Item -ErrorAction Stop '${path.join(home, "O''Neil", 'rg.exe')}'`), quoted);
+  assert.doesNotMatch(toolProbeWarnings(linked, { home, platform: 'linux' })[0], /Copy-Item/);
   const outside = ['/x/a.log', '/x/b.log', '/x/c.log'];
   assert.match(outsideReadWarning(outside, { platform: 'win32' }), /names 3 path\(s\) outside the target \(\/x\/a\.log, \/x\/b\.log, \.\.\.\)/);
   assert.ok(outsideReadWarning(outside, { platform: 'linux' }));

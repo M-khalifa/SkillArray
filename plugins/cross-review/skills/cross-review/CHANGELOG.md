@@ -2,32 +2,16 @@
 
 ## 1.2.3 - Unreleased
 
-- On Windows, the job wrapper waits up to about 1 s for processes still exiting before it lists leftovers, so a process that
-  ends by itself is no longer reported (and stopped) as left running; this caused a false warning and two flaky Windows CI tests.
-- On Windows, a detached seat worker records the start time the OS reports instead of Node's own start time. `--wait`
-  compares the two with a 10 s tolerance, so on a loaded machine where Node took longer to start, a running seat was
-  reported "gone ... dispatch again".
-- Auditor instructions: a counter-fact that covers only some of the cases a claim names overturns only those. When the
-  auditor can name a case it does not cover that still produces the defect, the finding is not settled as refuted: it
-  stays unresolved (or settled-agree when a falsification verifier confirmed it), with that case in its summary. In a
-  bench trial the auditor refuted a real defect while its own check named the exact case the refutation did not cover.
-- On Windows, the job wrapper writes the command's exit code to its report before that wait. A `--exec` timeout, a seat
-  timeout or a seat's answer grace that fires during the wait now waits once more (3 s, `REVIEW_JOB_SETTLE_MS`), so a
-  command that ended just in time keeps its own exit code and its leftover report instead of being reported as timed out
-  or stopped. A wrapper still running after that is stopped as before.
-- From field reports of other review sessions: when a CLI seat fails the step because the target changed during its run
-  and the other seat is a native agent working in the same target, the error now says that native seat may have made
-  the writes (Python writes `__pycache__` unless run with `-B`) and that `--transport cli` gives a Claude seat its own
-  worktree, out of the real target. Runs with native seat A and a Codex CLI seat B failed with "seat B touched files" on
-  `.pyc` files; with seat A on CLI transport, seat B recorded no writes in 3 of 3 runs on the same target.
-  The check itself is unchanged: any write to the target during a CLI seat's run still fails the step.
-- `preflight --out`, `review-config seats --out` and the report's `--out`, `--json` and `--html` create a missing parent
-  folder instead of stopping with a Node error.
-- The `codex debug models` example strips the BOM with `trimStart()` instead of a regex escape that a session turned into
-  the invisible character itself, which Claude Code's PowerShell tool then refused to run.
-- `review-config --help` names `--a-effort` and `--b-effort` among the one-run overrides of `seats`.
-- The Claude Code host file says that auto mode can refuse `phase1 --start` as data exfiltration (it sends target
-  content to the Codex seat) and that the user then runs the command with `!`.
+- Step 0 (Claude Code): `/code-review` runs before a code review of a change; the author fixes findings that fail through the real entry point. `/code-review ultra` is offered, never run.
+- REVIEW.md is read for code reviews only. New `review-run rules-write` creates or updates it with lines the user approved; an approved copy is used without a commit, and any later edit drops the approval.
+- New `review-run outcome` records what the author did with each finding; new `review-run rules-suggest` lists repeat bugs per repository. The report groups findings by outcome.
+- An untracked REVIEW.md is reported as "not in git" with the fix, also in the evidence preflight.
+- A known deviation in the packet excuses only itself, not new effects it has with the change.
+- Auditor: a counter-fact that covers only some cases refutes only those cases.
+- Windows: the job wrapper waits for exiting processes and keeps a command's own exit code; a detached worker records the OS start time; the `rg` advice copies a WinGet or user-profile `rg.exe` to `C:\Program Files\ripgrep`.
+- Target writes: Python/Gradle cache files are a warning, not a failure; the error names a native seat as a possible writer and suggests `--transport cli`.
+- Seats: a command the packet already answered, or one the brief forbids, is not a block.
+- `--out`, `--json` and `--html` create a missing folder. Docs: `!` for `phase1 --start` in auto mode, `report --all` only on request, a BOM-safe `codex debug models` example, `--a-effort`/`--b-effort` in `--help`.
 
 ## 1.2.2 - 2026-11-09
 

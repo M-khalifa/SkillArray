@@ -26,6 +26,24 @@ export function checklistDir(env = process.env, home = os.homedir()) {
   return path.join(path.dirname(configPath(SKILLS[0], env, home)), 'checklists');
 }
 
+// REVIEW.md copies the user approved with `review-run rules-write`: {"version":1,"approved":[{"path","sha256","at"}]}, outside every repository.
+export function approvedRulesFile(env = process.env, home = os.homedir()) {
+  return path.join(path.dirname(configPath(SKILLS[0], env, home)), 'review-rules-approved.json');
+}
+
+// The approved entries; none when the file is missing. A file that does not parse throws, so the caller can warn.
+export async function readApprovedRules(file = approvedRulesFile()) {
+  let text;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const doc = JSON.parse(text.replace(/^\uFEFF/, ''));
+  return Array.isArray(doc?.approved) ? doc.approved.filter((e) => typeof e?.path === 'string' && typeof e?.sha256 === 'string') : [];
+}
+
 const CHECKLIST_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
 
 export async function listChecklists(dir) {

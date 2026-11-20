@@ -219,6 +219,14 @@ test('buildReport: a native seat with no transcript says its model and usage are
   assert.equal(empty.filter((c) => /no transcript/.test(c)).length, 2, 'an empty or unknown entry records nothing');
 });
 
+test('notesSections: a leading UTF-8 BOM does not hide the first heading', async () => {
+  const { notesOutcomes } = await import('../build-recheck-packet.mjs');
+  const text = String.fromCharCode(0xfeff) + lines('## Finding status', '- F1: fixed', '- F2: wrong: no', '', '## Why', 'One sentence.');
+  const n = notesSections(text);
+  assert.deepEqual(Object.keys(n), ['finding status', 'why']);
+  assert.deepEqual([...notesOutcomes(text)].map(([id, o]) => `${id}=${o.word}`), ['F1=fixed', 'F2=wrong']);
+});
+
 test('notesSections: Why and Decisions needed come from the notes file', () => {
   const n = notesSections(lines('## Why', 'One sentence.', '', '## Decisions needed', '| a | b |', '|---|---|'));
   assert.equal(n.why, 'One sentence.');
@@ -877,6 +885,18 @@ test('chat: the banner blocker count is the report blocker count; decide items a
     else if (inCode) assert.ok(line.length <= 100, `code line within 100 characters: ${line.length}`);
   }
   assert.doesNotMatch(odd, /null|undefined/);
+});
+
+test('an outcome word decides the group and the not-re-reviewed caveat: "intentional: the old path fixed this already" is not Fixed', () => {
+  const notesText = ['## Finding status', '- F1: intentional: the old path fixed this already', '- F2: fixed', '- F3: not-worth-it: fixed upstream', ''].join(String.fromCharCode(10));
+  const report = buildReport({
+    findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH' }), finding({ id: 'F2', severity: 'HIGH' }), finding({ id: 'F3', severity: 'HIGH' })] },
+    manifest: MANIFEST, notesText,
+  });
+  const g = groupFindings(report);
+  assert.deepEqual(g.fixed.map((f) => f.id), ['F2']);
+  assert.deepEqual(g.canWait.map((f) => f.id), ['F1', 'F3']);
+  assert.ok(report.caveats.some((c) => /not re-reviewed \(F2\)/.test(c)), 'only the fixed outcome is named');
 });
 
 test('chat: report-notes drive the groups (needs decision, fixed after the snapshot, disclosure only), the decisions text is shown, and the audit line states disputes', () => {

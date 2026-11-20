@@ -40,6 +40,7 @@ const killTree = (child, options) => (hasExited(child) ? Promise.resolve() : kil
 import { readRunDescriptor, RunDescriptorError, writeRunDescriptor, seatOutputDir } from './run-descriptor.mjs';
 import { evaluateSupport, hostStatusOf } from './host-support.mjs';
 import { projectsDir } from './native-agent.mjs';
+import { approvedRulesFile, readApprovedRules } from './review-config.mjs';
 import { compareVersions, comparablePath, realPath, expandPathVars, expandWorkingFolderForms, probeFoldsCase, setFoldsCase, decodeFileUrls, DIFF_PLAIN, entryKey, entryPath, entrySha256, GIT_C_LOCALE, gitNames, GIT_PLAIN, gitRepoFromProbe, isInsidePath, isMainModule, nameBytes } from './path-utils.mjs';
 
 class RelayError extends Error {}
@@ -238,7 +239,7 @@ ${SAMPLE_SEATS}
 --review-rules head|worktree  Where to read each repository's REVIEW.md (--cd, each folder above it up to its
                      repository root when --cd is a subfolder, and each --repo). head (default): the copy at the merge-base with the default branch
                      (origin/HEAD), so a branch cannot rewrite its own rules; HEAD, with a WARNING, when no default
-                     branch resolves; worktree: the file on disk. A plain folder is read from disk. The text goes to <run-dir>/review-rules.md and into the seat and auditor briefs;
+                     branch resolves; worktree: the file on disk. A plain folder is read from disk; a working-tree REVIEW.md (untracked or edited) is used in head mode only when approved with review-run rules-write (commit it on the default branch, the base the review compares with, or use worktree). The text goes to <run-dir>/review-rules.md and into the seat and auditor briefs;
                      run.json records reviewRules. Above 8 KB in total it is refused. A WARNING names a REVIEW.md that
                      the working tree or the branch changed (reviewRules.changedByTarget).
 --review-rules-only <dir>  Read REVIEW.md only from these of --cd and --repo (repeat it), for example when a --repo is
@@ -1390,7 +1391,11 @@ export function toolProbeWarnings(results, { home = homedir(), platform = proces
   const failed = Object.entries(results).filter(([, v]) => v?.ok === false);
   const lines = failed.map(([tool, { why, host }]) => {
     const inProfile = platform === 'win32' && host !== null && isInsidePath(host, home);
+    const needsCopy = platform === 'win32' && host !== null && (inProfile || /[\\/]winget[\\/]links[\\/]/i.test(String(host))) && !isInsidePath(host, 'C:\\Program Files\\ripgrep');
+    // A WinGet rg is a link into a Packages folder the sandbox account cannot read; a plain copy of the program runs.
+    const rgCopy = `New-Item -ItemType Directory -Force 'C:\\Program Files\\ripgrep' | Out-Null; Copy-Item -ErrorAction Stop '${String(host).replaceAll("'", "''")}' 'C:\\Program Files\\ripgrep\\rg.exe'`;
     const fix = host === null ? `${tool} is not on this host's PATH either: install it, or run the tests`
+      : tool === 'rg' && needsCopy ? `This host has it at ${host}; give the sandbox a plain copy: run once in an admin PowerShell ${rgCopy}, put C:\\Program Files\\ripgrep first in the system Path (System Properties, Environment Variables) and open a new terminal; or run the tests`
       : inProfile ? `This host has it under the user profile (${host}), which the Windows sandbox account cannot start: install it for all users, or put a copy under Program Files on PATH (the per-user one can stay first), or run the tests`
         : 'Run the tests';
     return `the Codex seat's sandbox cannot run ${tool} (${why}); a seat that needs it reviews by reading only. ${fix} in preflight --exec and paste the result lines into the packet (every seat's brief holds the packet; a log outside the target may not be readable).`;
@@ -1961,6 +1966,35 @@ async function runClaudeSessionProbe({ cdAbs, runDir }) {
 }
 
 const REVIEW_RULES_CAP = 8192;
+const NOT_IN_GIT_WARNING = 'is not in git (untracked), so it is not used: a change under review could have written it.';
+
+// WARNING lines for the evidence preflight: a REVIEW.md the second (--host) preflight would not use, or would refuse. Never throws.
+export async function reviewRulesEarlyWarnings(dirs) {
+  const lines = [];
+  try {
+    const warnings = [];
+    const head = await readReviewRules(dirs, 'head', warnings);
+    lines.push(...warnings.map((w) => `preflight: WARNING: ${w}`));
+    for (const f of head?.record.files.filter((x) => !x.used) ?? []) {
+      const file = path.join(f.dir, f.path);
+      lines.push(f.ref === 'not in git'
+        ? `preflight: WARNING: ${file} ${NOT_IN_GIT_WARNING} If it is your own rules file, commit it on the default branch (the base the review compares with), or pass --review-rules worktree to the second preflight (--host), or approve this copy with review-run rules-write --repo ${f.dir} --approve-existing.`
+        : f.ref === 'not committed yet'
+          ? `preflight: WARNING: ${file} is not used by the second preflight (--host) in head mode (${f.ref}); --review-rules worktree reads the file on disk.`
+          : `preflight: WARNING: ${file} is not used by the second preflight (--host) in head mode (${f.ref}: ${f.ref === 'deleted in the working tree' ? 'the working tree deleted it' : 'the base of the branch has no REVIEW.md there'}).`);
+    }
+  } catch (err) {
+    lines.push(`preflight: WARNING: REVIEW.md could not be checked for the second preflight (--host): ${err.message}`);
+  }
+  try {
+    await readReviewRules(dirs, 'worktree');
+  } catch (err) {
+    lines.push(err instanceof RelayError && /the limit is/.test(err.message)
+      ? `preflight: WARNING: with --review-rules worktree the second preflight (--host) would refuse REVIEW.md: ${err.message}`
+      : `preflight: WARNING: REVIEW.md could not be read from the working tree: ${err.message}`);
+  }
+  return lines;
+}
 
 // Lines with a claim-shaped label (P, A, B, X or Y plus digits) the review would rewrite or refuse: only "<declared
 // checklist>-P1" is exempt, as in blind-relabel.
@@ -1971,12 +2005,33 @@ export function peerLabelLines(text, checklists = []) {
   return text.split('\n').filter((l) => /\b[ABPXY]\d+\b/.test(masked ? l.replace(masked, '') : l));
 }
 
+// The packet's Profile line ("Profile: Code", "**Profile:** Document. Target: ..."): its text before "Target:", or null when there is none or it is empty.
+export function packetProfile(text) {
+  const m = /^\W*Profile\W*:[ \t*_]*(.*)$/im.exec(String(text ?? ''));
+  if (m === null) return null;
+  return m[1].split(/target:/i)[0].trim().replace(/[.\s]+$/, '') || null;
+}
+
+// null (no Profile line) reads as a code review.
+export function isCodeProfile(profile) {
+  return profile === null || /\bcode\b/i.test(profile);
+}
+
 // Each repository's REVIEW.md. head: the copy at the merge-base with origin/HEAD (so a branch cannot rewrite its own rules), or
 // HEAD when no default branch resolves (baseUnknown); worktree: the file on disk; plain folders from disk. A file is "changed"
 // when the branch (since the merge-base) or the working tree changed it; a file only the change added is not used in head mode.
-export async function readReviewRules(dirs, mode = 'head') {
+// A disk copy whose bytes hash to an entry approved for its path (review-run rules-write) is used in head mode; `warnings` collects a bad approvals file.
+export async function readReviewRules(dirs, mode = 'head', warnings = []) {
   const files = [];
   let baseUnknown = false;
+  let approvals = [];
+  if (mode === 'head') {
+    try {
+      approvals = await readApprovedRules(approvedRulesFile(process.env));
+    } catch (err) {
+      warnings.push(`the approved REVIEW.md copies file could not be read, so no copy is approved: ${err.message}`);
+    }
+  }
   const decode = (buf) => buf.toString('utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
   const line = async (args, dir) => {
     const r = await runCapture('git', args, dir);
@@ -2004,15 +2059,24 @@ export async function readReviewRules(dirs, mode = 'head') {
       const atRef = await runCapture('git', ['show', `${ref}:${rel}`], dir);
       const disk = await readFile(path.join(top, rel)).catch(() => null);
       const bytes = mode === 'worktree' ? disk : atRef.code === 0 ? atRef.stdout : null;
-      const changed = (await runCapture('git', ['diff', '--quiet', ref, '--', spec], dir)).code !== 0 || (atRef.code !== 0 && disk !== null);
+      const gitDiffers = (await runCapture('git', ['diff', '--quiet', ref, '--', spec], dir)).code !== 0;
+      const changed = gitDiffers || (atRef.code !== 0 && disk !== null);
+      const approved = mode === 'head' && disk !== null && (atRef.code !== 0 || !disk.equals(atRef.stdout))
+        ? approvals.find((e) => comparablePath(e.path) === comparablePath(path.join(top, rel)) && e.sha256 === sha256(disk))
+        : undefined;
+      if (approved) {
+        files.push({ dir: top, path: rel, ref: 'approved copy', text: decode(disk), changed: true, used: true, ...(approved.at ? { at: approved.at } : {}) });
+        continue;
+      }
       if (bytes === null) {
         // A REVIEW.md that cannot be used is named in the warning with why: the change added it, the working tree deleted
-        // it, or the repository has no commit yet. It never becomes rules.
-        const why = disk === null && atRef.code === 0 ? 'deleted in the working tree' : short === null ? 'not committed yet' : 'added by the change';
+        // it, the repository has no commit yet, or git does not track it. It never becomes rules.
+        const untracked = disk !== null && short !== null && (await runCapture('git', ['ls-files', '--error-unmatch', '--', spec], dir)).code !== 0;
+        const why = disk === null && atRef.code === 0 ? 'deleted in the working tree' : short === null ? 'not committed yet' : untracked ? 'not in git' : 'added by the change';
         if (changed && (disk !== null || (await runCapture('git', ['cat-file', '-e', `HEAD:${rel}`], dir)).code === 0)) files.push({ dir: top, path: rel, ref: why, text: '', changed: true, used: false });
         continue;
       }
-      files.push({ dir: top, path: rel, ref: mode === 'worktree' ? 'working tree' : `${base ? 'merge-base' : 'HEAD'} ${short}`, text: decode(bytes), changed, used: true });
+      files.push({ dir: top, path: rel, ref: mode === 'worktree' ? 'working tree' : `${base ? 'merge-base' : 'HEAD'} ${short}`, text: decode(bytes), changed, used: true, edited: mode === 'head' && atRef.code === 0 && disk !== null && gitDiffers });
     }
   }
   if (files.length === 0) return null;
@@ -2028,7 +2092,7 @@ export async function readReviewRules(dirs, mode = 'head') {
     record: {
       mode, sha256: text === null ? null : sha256(Buffer.from(text, 'utf8')), changedByTarget: files.some((f) => f.changed),
       ...(mode === 'head' && baseUnknown ? { baseUnknown: true } : {}),
-      files: files.map((f) => ({ dir: f.dir, path: f.path, ref: f.ref, changed: f.changed, used: f.used })),
+      files: files.map((f) => ({ dir: f.dir, path: f.path, ref: f.ref, changed: f.changed, used: f.used, ...(f.at ? { at: f.at } : {}), ...(f.edited ? { edited: true } : {}) })),
     },
   };
 }
@@ -2125,7 +2189,15 @@ async function hostPreflight(args) {
   const onlyDirs = args.reviewRulesOnly.map((d) => comparablePath(path.resolve(d)));
   const unknownOnly = args.reviewRulesOnly.filter((d, i) => !ruleDirs.some((dir) => comparablePath(dir) === onlyDirs[i]));
   if (unknownOnly.length > 0) throw new RelayError(`--review-rules-only ${unknownOnly.join(', ')} is not --cd or a --repo of this run; nothing was written`);
-  const rules = await readReviewRules(onlyDirs.length === 0 ? ruleDirs : ruleDirs.filter((dir) => onlyDirs.includes(comparablePath(dir))), args.reviewRules ?? 'head');
+  const packetText = await readFile(path.join(runDir, 'task-packet.md'), 'utf8').catch(() => '');
+  const nl = String.fromCharCode(10);
+  const profile = packetProfile(packetText);
+  const skipRules = !isCodeProfile(profile);
+  if (skipRules) process.stderr.write(`preflight: REVIEW.md not read: the packet's profile is ${profile}; REVIEW.md rules are for code reviews${nl}`);
+  else if (packetText && profile === null) process.stderr.write(`preflight: WARNING: the task packet has no Profile line, so REVIEW.md was read as for a code review${nl}`);
+  const rulesWarnings = [];
+  const rules = skipRules ? null : await readReviewRules(onlyDirs.length === 0 ? ruleDirs : ruleDirs.filter((dir) => onlyDirs.includes(comparablePath(dir))), args.reviewRules ?? 'head', rulesWarnings);
+  for (const w of rulesWarnings) process.stderr.write(`preflight: WARNING: ${w}${nl}`);
   // Every audit re-checks every claim: a seats file from an older review-config may still name a depth.
   if (seats.flags && Object.hasOwn(seats.flags, 'auditDepth')) throw new RelayError(`${args.seats}: flags.auditDepth is not a setting; every audit re-checks every claim. Write the seats file again with review-config seats, or delete the key; nothing was written`);
   const descriptor = {
@@ -2203,16 +2275,23 @@ async function hostPreflight(args) {
   if (seatTools) await writeFile(path.join(runDir, 'seat-tools.json'), `${JSON.stringify(seatTools, null, 2)}\n`, 'utf8');
   if (rules) {
     if (rules.text) await writeFile(path.join(runDir, 'review-rules.md'), rules.text, 'utf8');
-    const nl = String.fromCharCode(10);
     for (const f of rules.record.files.filter((x) => x.changed)) {
+      const approve = `or approve this copy with review-run rules-write --repo ${f.dir} --approve-existing`;
+      if (f.ref === 'not in git') {
+        process.stderr.write(`preflight: WARNING: ${path.join(f.dir, f.path)} ${NOT_IN_GIT_WARNING} If it is your own rules file, commit it on the default branch (the base the review compares with), or start a new run folder and pass --review-rules worktree (this run.json is already written), ${approve}.${nl}`);
+        continue;
+      }
+      if (f.ref === 'approved copy') {
+        process.stderr.write(`preflight: ${path.join(f.dir, f.path)}: the seats get the working-tree copy approved with review-run rules-write (${f.at ?? 'no time recorded'})${nl}`);
+        continue;
+      }
       const used = !f.used ? `it is not used (${f.ref}: ${{ 'deleted in the working tree': 'the working tree deleted it', 'not committed yet': 'the repository has no commit yet; --review-rules worktree reads the file on disk' }[f.ref] ?? 'the base of the branch has no REVIEW.md there'})` : rules.record.mode === 'head' ? `the seats get the copy at the ${rules.record.baseUnknown ? 'branch tip (HEAD)' : 'merge-base with the default branch'}` : 'the seats get the working-tree copy';
-      process.stderr.write(`preflight: WARNING: ${path.join(f.dir, f.path)} was changed by the working tree or the branch under review; ${used}${nl}`);
+      process.stderr.write(`preflight: WARNING: ${path.join(f.dir, f.path)} was changed by the working tree or the branch under review; ${used}${f.edited ? `, ${approve}` : ''}${nl}`);
     }
     for (const l of peerLabelLines(rules.text ?? '', descriptor.flags.checklists ?? [])) process.stderr.write(`preflight: WARNING: REVIEW.md line "${l.slice(0, 120)}" holds a label like P1 or A2 (one of the letters P, A, B, X or Y followed by digits), which the review reads as a claim label and refuses when a seat or the auditor repeats it; write it as <name>-P1 and list <name> in the seats file's flags.checklists${nl}`);
     if (rules.record.baseUnknown && rules.text) process.stderr.write(`preflight: WARNING: no default branch (origin/HEAD) to compare with, so REVIEW.md was read at HEAD and a branch commit that changed it cannot be detected; run "git remote set-head origin --auto" if the repository has a remote${nl}`);
   }
   // The seats copy the packet's own tags and names into their files; a P<n> among them stops the audit as a peer label.
-  const packetText = await readFile(path.join(runDir, 'task-packet.md'), 'utf8').catch(() => '');
   // build-brief refuses such a packet at phase1 --start; imported here so a skill folder missing it reaches the refusal above.
   const namesRun = packetText ? (await import('./build-brief.mjs')).runDirNamedIn(packetText, runDir, cdAbs) : null;
   if (namesRun) process.stderr.write(`preflight: WARNING: the task packet names this run folder (${namesRun}); "review-run phase1 --start" will refuse it. Keep the evidence folder (preflight --out logs) outside the run folder and cite it from there${String.fromCharCode(10)}`);
@@ -2310,6 +2389,7 @@ async function main() {
         );
       }
     }
+    notes.push(...await reviewRulesEarlyWarnings([path.resolve(args.cd), ...(args.repos ?? []).map((r) => path.resolve(r))]));
     const text = JSON.stringify(result, null, 2) + '\n';
     if (args.out) {
       await mkdir(path.dirname(path.resolve(args.out)), { recursive: true });

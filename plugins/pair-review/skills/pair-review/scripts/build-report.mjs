@@ -595,7 +595,9 @@ export function findingStatus(text) {
 export function notesSections(text) {
   const sections = {};
   let name = null;
-  for (const line of text.split(/\r?\n/)) {
+  // A UTF-8 BOM in front of the first heading would hide it.
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  for (const line of body.split(/\r?\n/)) {
     const h = /^##\s+(.+?)\s*$/.exec(line);
     if (h) {
       name = h[1].toLowerCase();
@@ -606,7 +608,7 @@ export function notesSections(text) {
 }
 
 // "A1: text" lines from translate joined into one; with skipNone, "A1: none found ..." entries are left out.
-function seatLines(list, skipNone = false) {
+export function seatLines(list, skipNone = false) {
   if (!Array.isArray(list)) return '';
   return list.map((s) => String(s).replace(/\s+/g, ' ').trim())
     .filter((s) => s !== '' && !(skipNone && /^(?:[AB]\d+:\s*)?none\b/i.test(s))).join(' | ');
@@ -1067,8 +1069,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   for (const f of findings.filter((x) => x.blocker && outcomeOf(x.status)?.word === 'wrong' && outcomeOf(x.status).reason === '')) {
     caveats.push(`${f.id} is marked wrong in the report notes with no reason, so it stays a blocker; write the reason after "wrong:" to withdraw it.`);
   }
-  const isFixed = (text) => noteKinds(text).fixed;
-  if ([...statusById.values()].some(isFixed)) caveats.push(`Changes made after the reviewed snapshot were not re-reviewed (${[...statusById.entries()].filter(([, s]) => isFixed(s)).map(([id]) => id).join(', ')}); the findings describe the code the reviewers read.`);
+  if ([...statusById.values()].some(isFixedNote)) caveats.push(`Changes made after the reviewed snapshot were not re-reviewed (${[...statusById.entries()].filter(([, s]) => isFixedNote(s)).map(([id]) => id).join(', ')}); the findings describe the code the reviewers read.`);
   const blockers = findings.filter((f) => f.blocker);
   // build-recheck-packet writes "Review round: N" under the packet title.
   const round = Number(/^Review round:\s*(\d+)\s*$/m.exec(packetText)?.[1]) || null;
@@ -1398,6 +1399,12 @@ export function outcomeOf(note) {
   return { word: m[1].toLowerCase(), reason: m[2].trim() };
 }
 
+// An outcome word decides whether a note means fixed; free-text kinds are read only for a note with no outcome word.
+const isFixedNote = (note) => {
+  const o = outcomeOf(note);
+  return o ? o.word === 'fixed' : noteKinds(note).fixed;
+};
+
 // A "wrong" outcome withdraws a finding only with a reason when the finding is a blocker.
 const authorWithdrawn = (f) => {
   const o = outcomeOf(f.status);
@@ -1411,7 +1418,7 @@ export function groupFindings(report) {
     const kinds = noteKinds(f.status);
     const outcome = outcomeOf(f.status)?.word;
     if (WITHDRAWN_STATES.includes(f.state) || authorWithdrawn(f)) groups.withdrawn.push(f);
-    else if (kinds.fixed) groups.fixed.push(f);
+    else if (isFixedNote(f.status)) groups.fixed.push(f);
     else if (['intentional', 'not-worth-it', 'decided'].includes(outcome)) groups.canWait.push(f);
     // An unresolved blocker is a decision, not a fix: the seats still disagree, and the report gives both positions.
     else if (f.state === 'unresolved-high-stakes' || (String(f.state).startsWith('unresolved') && f.blocker) || kinds.decide) groups.decide.push(f);

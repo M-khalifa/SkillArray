@@ -36,7 +36,7 @@ Each seat also writes one line per tag it checked under `## Checks performed`, s
 When criteria come from several tickets and a tag does not carry its ticket number, add one line `Tickets: 6041 = AC-OWN-C, AC-OWN-D; 6045 = AC-OWN-E`; the report then groups those tags under their ticket, and a seat line per ticket that ends with GO or NO GO (`- 6041: GO`) is shown per ticket.
 
 ## Known deviations from the criteria
-<each one, or "none": an undisclosed deviation is a finding the seats will spend a claim on>
+<each one, or "none": an undisclosed deviation is a finding the seats will spend a claim on. A deviation excuses only itself: a new effect of the deviation combined with this change is still a claim>
 <For a later round of the same target, also list every finding of earlier rounds that is fixed or decided, one line each,
 with "do not spend a claim on these unless the fix is wrong or incomplete". Leave out what is still open, so the seats look for it.>
 
@@ -60,12 +60,16 @@ author-reported, not verified.>
 Items of your own bug checklist (`review-config.mjs checklists --name NAME`) go here, one hypothesis each.
 - [H1] <...>
 - Optional, for a round that reviews fixes: `[Hn] At least one guard this change added is untested: name up to 5 guards;
-  for each, revert it in a disposable copy, run the tests that should cover it, and report red or green. CONFIRMED when a
+  for each, revert it in a disposable copy (only a seat with a scratch folder; a Codex seat has none: give it the pre-flight
+  result lines instead), run the tests that should cover it, and report red or green. CONFIRMED when a
   revert stays green (that guard is untested), REFUTED when every revert goes red.` A seat reports each guard on its Checks
   performed line.
 
 ## Checks
-<the target's own test, lint and build commands, and which of them a seat may run. A write-heavy suite runs in a disposable folder.>
+<the target's own test, lint and build commands, and which of them a seat may run. A write-heavy suite runs in a disposable folder,
+which only a seat with a scratch folder can make: a Codex seat has none and writes no file, and its sandbox may lack the
+target's packages. When the pre-flight result lines under "Evidence both seats may cite" already cover a command,
+write "running it is not needed: see Evidence", so a seat cites those lines instead of reporting a block.>
 
 ## Severity note
 <the default rubric, or what is worse than usual here, and who or what reads a wrong result>
@@ -104,7 +108,8 @@ Read-only review: do not edit, create or delete any file in the target; do not c
 - [H1] The new retry loop can retry a request that already succeeded on the server (a duplicate write).
 
 ## Checks
-- `npm test` in the target; a seat may run it in a disposable copy.
+- `npm test` in the target; a seat with a scratch folder may run it in a disposable copy. Running it is not needed: the
+  pre-flight run gave 212 pass, 0 fail (preflight.json, tier2 log).
 
 ## Output
 Findings in the required schema in your own findings file. Then exactly `## Checks performed` (or, with no claim, only `## No findings`) for checks that found nothing, holding exactly one line `Blocked: none` or `Blocked: <what>: <the error>` (the format in review-protocol.md, "All seats").

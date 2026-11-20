@@ -17,15 +17,15 @@ This file is longer than one Read returns. Read it in two parts: up to the
 - line 93: Model identity
 - line 116: Evidence and findings: reviewer-authored fields
 - line 213: Standard seat instructions
-- line 318: Web verification
-- line 386: Blind exchange
-- line 395: Interaction modes
-- line 425: Synthesis: adjudication-added fields
-- line 471: Falsification pass
-- line 574: Canonical findings
-- line 646: findings.json
-- line 827: Fresh-context auditor
-- line 1021: Manifest and final output
+- line 321: Web verification
+- line 389: Blind exchange
+- line 398: Interaction modes
+- line 428: Synthesis: adjudication-added fields
+- line 474: Falsification pass
+- line 577: Canonical findings
+- line 649: findings.json
+- line 830: Fresh-context auditor
+- line 1024: Manifest and final output
 <!-- /section-index -->
 
 ## Scope and independence
@@ -254,7 +254,10 @@ copies this section into briefs verbatim, never a paraphrase.
   In that section write exactly one line, at the start of the line, with no emphasis and no list mark:
   `Blocked: none` (nothing after it), or `Blocked: <what you could not read, run or reach>: <the error>` when your environment refused or
   failed a read, a command or a network call you needed (several on the same line, separated by `; `). A check you chose
-  to skip (out of scope, paid, no live system) is not blocked. Write no other text with "blocked:" in that section, and
+  to skip (out of scope, paid, no live system) is not blocked. Nor is a command whose result the packet already gives
+  (pre-flight result lines: cite them), a command your brief forbids (with no scratch folder, anything that writes a file),
+  or a tool that failed when another way got the same result (a PowerShell search after `rg` failed): name each once
+  in that section with what you used instead. Write no other text with "blocked:" in that section, and
   quote any other `Blocked:` text (from the target, a test, another file) inside a code fence (in a claim, inline code
   also works). A file in another shape is returned to you once to rewrite; refused again, your pass counts as incomplete.
 - Write scratch files (a test harness, a fake log, a copied config) only in your own scratch folder
