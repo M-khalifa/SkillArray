@@ -382,7 +382,7 @@ is the check. `review-run audit --finish` reads every verifier's `result.json` a
 ## Re-review
 
 `review-run recheck` writes a draft task packet for a new review of an earlier run's target after
-fixes. Write it into the new run folder:
+fixes. On a dense document or a long change one run rarely finds everything: a second run (or recheck round) on the same section is expected to find more. Write it into the new run folder:
 
 ```text
 node "<skill-dir>/scripts/review-run.mjs" recheck --from-run "<old-run-dir>" --out "<new-run-dir>/task-packet.md" --since-diff "<diff file>"
@@ -396,7 +396,8 @@ It reads `<old-run-dir>/task-packet.md` and `<old-run-dir>/phase3/findings.json`
   new one;
 - "Hypotheses to test": every previous finding as `[H1]`, `[H2]`, ..., worded as a suspected defect,
   CONFIRMED if it is still present, REFUTED if the change removed it. Hypotheses of the old packet are
-  dropped, because their numbers would clash. After them one more hypothesis, not a previous finding: a
+  dropped, because their numbers would clash. After them one more hypothesis, not a previous finding
+  (for a packet whose Profile includes Code, or has no Profile line): a
   field the changed code reads is handled wrongly when null, missing, empty, zero or negative;
 - "Known deviations" gets a FILL line;
 - "Evidence both seats may cite" is reset to FILL, because the old snapshot hash and test counts

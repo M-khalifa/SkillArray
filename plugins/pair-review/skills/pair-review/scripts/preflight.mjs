@@ -32,7 +32,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { buildChildEnv, NETWORK_ENV_ALLOWLIST } from './env-filter.mjs';
-import { DEFAULT_MAX_FILES, diffInventories, hashInventory } from './snapshot-utils.mjs';
+import { DEFAULT_MAX_FILES, diffInventories, hashInventory, isCachePath } from './snapshot-utils.mjs';
 import { afterJobSettles, hasExited, jobSpawn, killGroupOnExit, killTree as killTreeShared, readJobReport, spawnCli, stopMarkedProcesses } from './spawn-utils.mjs';
 
 // An exited child is not signalled again: its pid may belong to another process by now.
@@ -447,12 +447,12 @@ async function isGitRepo(cwd) {
 
 // Tier 1: pure repository-state inspection, no execution of anything the
 // target repo defines. Runs unconditionally, no opt-in required.
-// inventory: an already computed hashInventory(cd) for a plain folder, so run() hashes it once.
+// inventory: an already computed sourceInventory(cd) for a plain folder, so run() hashes it once.
 async function runTier1(cd, inventory = null, base = null) {
   const gitTracked = await isGitRepo(cd);
   if (!gitTracked) {
     if (base) throw new RelayError(`--base ${base} needs a git repository; "${cd}" is not one`);
-    inventory ??= await hashInventory(cd);
+    inventory ??= await sourceInventory(cd);
     return {
       gitRepo: false,
       fileCount: Object.keys(inventory.files).length,
@@ -537,11 +537,16 @@ async function gitOutAll(argsList, cd) {
   return results.map((res, i) => gitChecked(res, argsList[i], cd));
 }
 
+// A plain folder's source inventory leaves Python and Gradle caches out, so a seat's test run does not read as drift.
+function sourceInventory(cd) {
+  return hashInventory(cd, { skipCaches: true });
+}
+
 // Scoped to --cd: the committed tree of that folder, its binary diff against HEAD (so a binary
 // change is distinguishable), and a content hash per untracked file (so a created file counts).
 // A commit or edit elsewhere in a monorepo does not make this target's evidence stale.
 async function computeSnapshotHash(cd, inventory = null) {
-  if (!(await isGitRepo(cd))) return (inventory ?? (await hashInventory(cd))).snapshotHash;
+  if (!(await isGitRepo(cd))) return (inventory ?? (await sourceInventory(cd))).snapshotHash;
   const headRes = await runCapture('git', ['rev-parse', 'HEAD'], cd);
   if (headRes.code !== 0) {
     throw new RelayError(`could not resolve HEAD in "${cd}" (not a git repo, or no commits yet)`);
@@ -552,7 +557,7 @@ async function computeSnapshotHash(cd, inventory = null) {
   const treeId = treeRes.code === 0 ? treeRes.stdout.toString('utf8').trim() : 'no-committed-tree';
   const diffRes = await gitOut([...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
   const untrackedRes = await gitOut(['ls-files', '--others', '--exclude-standard', '-z'], cd);
-  const untrackedEntries = gitNames(untrackedRes.stdout).filter((e) => !e.text.endsWith('/')).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+  const untrackedEntries = gitNames(untrackedRes.stdout).filter((e) => !e.text.endsWith('/') && !isCachePath(e.text)).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
 
   const hash = createHash('sha256');
   hash.update(treeId);
@@ -1088,7 +1093,7 @@ async function run(args) {
   // The earlier --out file cites the logs just deleted; a rerun that is stopped before it writes must not leave it behind.
   if (clearedLogs.length > 0 && args.out) await rm(path.resolve(args.out), { force: true });
   // A plain folder is hashed file by file; do it once for Tier 1 and the snapshot hash.
-  const inventory = (await isGitRepo(cdAbs)) ? null : await hashInventory(cdAbs);
+  const inventory = (await isGitRepo(cdAbs)) ? null : await sourceInventory(cdAbs);
   const tier1 = await runTier1(cdAbs, inventory, args.base ?? null);
 
   let snapshotHash = await computeSnapshotHash(cdAbs, inventory);
@@ -1343,13 +1348,13 @@ export function sandboxArgs(tool, platform = process.platform) {
   return platform === 'win32' ? ['sandbox', '--', 'powershell', '-NoProfile', '-Command', `${tool} --version`] : ['sandbox', '--', tool, '--version'];
 }
 
-function sandboxRun(tool, cwd) {
+function sandboxRun(tool, cwd, args = sandboxArgs(tool)) {
   return new Promise((resolve) => {
     let text = '';
     let child;
     try {
       // No -C: "codex sandbox -C" requires --permission-profile; the working folder is set on the process instead.
-      child = spawnCli('codex', sandboxArgs(tool), { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawnCli('codex', args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) {
       resolve({ code: null, text: err.message });
       return;
@@ -1381,11 +1386,27 @@ export async function codexToolProbe(cwd, { tools = SEAT_TOOLS, run = sandboxRun
       continue;
     }
     const lines = String(r.text ?? '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const why = (lines.find((l) => /sandbox failed|panicked|not found|not recognized|denied|No such file/i.test(l)) ?? lines[0] ?? `exit ${r.code}`).split(' | ')[0].slice(0, 160);
+    const why = (lines.find((l) => /sandbox failed|panicked|not found|not recognized|denied|dubious ownership|No such file/i.test(l)) ?? lines[0] ?? `exit ${r.code}`).split(' | ')[0].slice(0, 160);
     out[tool] = { ok: false, why, host: where(tool) };
   }
   return out;
 }
+
+const POWERSHELL_MODE_ARGS = ['sandbox', '--', 'powershell', '-NoProfile', '-Command', '$ExecutionContext.SessionState.LanguageMode'];
+
+// Windows only: whether the sandbox's PowerShell runs in Constrained Language mode (a seat's .NET calls fail there). A probe
+// that fails or times out reports false.
+export async function codexPowerShellConstrained(cwd, { run = (dir) => sandboxRun(null, dir, POWERSHELL_MODE_ARGS), platform = process.platform } = {}) {
+  if (platform !== 'win32') return false;
+  try {
+    const r = await run(cwd);
+    return r?.code === 0 && /ConstrainedLanguage/.test(String(r.text ?? ''));
+  } catch {
+    return false;
+  }
+}
+
+export const POWERSHELL_CONSTRAINED_WARNING = "the Codex seat's sandbox runs PowerShell in Constrained Language mode: .NET method calls such as [Math]::Min fail there; a seat should use plain cmdlets or python for arithmetic and text work";
 
 export function toolProbeWarnings(results, { home = homedir(), platform = process.platform } = {}) {
   const failed = Object.entries(results).filter(([, v]) => v?.ok === false);
@@ -1398,7 +1419,7 @@ export function toolProbeWarnings(results, { home = homedir(), platform = proces
       : tool === 'rg' && needsCopy ? `This host has it at ${host}; give the sandbox a plain copy: run once in an admin PowerShell ${rgCopy}, put C:\\Program Files\\ripgrep first in the system Path (System Properties, Environment Variables) and open a new terminal; or run the tests`
       : inProfile ? `This host has it under the user profile (${host}), which the Windows sandbox account cannot start: install it for all users, or put a copy under Program Files on PATH (the per-user one can stay first), or run the tests`
         : 'Run the tests';
-    return `the Codex seat's sandbox cannot run ${tool} (${why}); a seat that needs it reviews by reading only. ${fix} in preflight --exec and paste the result lines into the packet (every seat's brief holds the packet; a log outside the target may not be readable).`;
+    return `the Codex seat's sandbox cannot run ${tool} (${why}); a seat that needs it reviews by reading only.${tool === 'rg' ? ' Without rg the seat searches more slowly; this matters mostly on large targets.' : ''} ${fix} in preflight --exec and paste the result lines into the packet (every seat's brief holds the packet; a log outside the target may not be readable).`;
   });
   // Field runs: a seat with neither python nor rg made fewer claims; say so once, before Phase 1 is paid for.
   if (failed.length >= 2) lines.push(`the Codex seat can run none of ${failed.map(([t]) => t).join(', ')}: it will review by reading files only, so expect fewer claims from it. Give it executed evidence (preflight --exec result lines pasted into the packet), or move the seat to a host where these run, before phase1 --start.`);
@@ -1563,7 +1584,10 @@ async function packetPaths(text, baseDir) {
     const m = !t.includes('](') && /^(_{1,2})(.+)\1$/.exec(t);
     return m ? trimEnd(m[2]) : t;
   };
-  const wordsOf = (s) => s.split(/\s+/).map(trimWord);
+  // A "<name>" segment inside a path ("out/<cluster>/tables.json") is a placeholder: the word is neither found nor missing.
+  // An HTML tag after a file name ("a.md</td>", "a.md<sup>1</sup>", "a.md<br>") is not one.
+  const hasPlaceholder = (w) => /[\\/][^\\/\s<>]*<(?!br\b)[^<>\s\\/]+>[^\\/\s<>]*(?=[\\/]|$)/i.test(w);
+  const wordsOf = (s) => s.split(/\s+/).filter((w) => !hasPlaceholder(w)).map(trimWord);
   const words = wordsOf(raw.replace(/`[^`\r\n]+`/g, ' ').replace(/<br\s*\/?>/gi, ' '));
   // True when the word named a path that exists or (with missingToo) a missing file.
   const look = async (word, quoted, missingToo = true) => {
@@ -1577,7 +1601,8 @@ async function packetPaths(text, baseDir) {
     return false;
   };
   // A backticked item that is neither (a command, "`<file> --all`") is read word by word like the rest.
-  for (const m of raw.matchAll(/`([^`\r\n]+)`/g)) if (!(await look(m[1].trim(), true))) words.push(...wordsOf(m[1]));
+  // One with a placeholder is read word by word too, so a real path beside it is still checked.
+  for (const m of raw.matchAll(/`([^`\r\n]+)`/g)) if (hasPlaceholder(m[1]) || !(await look(m[1].trim(), true))) words.push(...wordsOf(m[1]));
   // A bare word that is no existing path may hold one or more: "[a.log](C:\x\a.log)", "--log=C:\x\a.log",
   // "a.log,C:\x\b.log", "C:\x\a.md|C:\x\b.md"; it is a missing file only when none of its parts is a path.
   for (const word of words) {
@@ -1811,11 +1836,12 @@ function readCommandFile(file, flag) {
 // mismatch can name what changed (diffInventories of two of these); a changed file that is gone is "deleted".
 async function fingerprintFiles(cd) {
   // A build or test run in a plain folder writes caches; they are not a change to the code under review.
-  if (!(await isGitRepo(cd))) return { head: null, files: (await hashInventory(cd, { skipCaches: true })).files };
+  if (!(await isGitRepo(cd))) return { head: null, files: (await sourceInventory(cd)).files };
   const head = (await gitOut(['rev-parse', 'HEAD'], cd)).stdout.toString('utf8').trim();
   const [changed, untracked] = await gitOutAll([['diff', '--no-ext-diff', '--no-renames', '--name-only', '-z', '--relative', 'HEAD', '--', '.'], ['ls-files', '--others', '--exclude-standard', '-z']], cd);
   const files = {};
-  for (const entry of [...gitNames(changed.stdout), ...gitNames(untracked.stdout)]) {
+  const untrackedSource = gitNames(untracked.stdout).filter((e) => !isCachePath(e.text));
+  for (const entry of [...gitNames(changed.stdout), ...untrackedSource]) {
     if (entry.text.endsWith('/')) continue;
     files[entryKey(entry)] = await entrySha256(entryPath(cd, entry)).catch((err) => { if (err.code === 'ENOENT') return 'deleted'; throw err; });
   }
@@ -1834,7 +1860,7 @@ async function computeFingerprint(cd) {
   const head = (await gitOut(['rev-parse', 'HEAD'], cd)).stdout.toString('utf8').trim();
   const diff = await gitOut([...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
   const untracked = await gitOut(['ls-files', '--others', '--exclude-standard', '-z'], cd);
-  const entries = gitNames(untracked.stdout).filter((e) => !e.text.endsWith('/')).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+  const entries = gitNames(untracked.stdout).filter((e) => !e.text.endsWith('/') && !isCachePath(e.text)).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
   const lines = [];
   for (const entry of entries) lines.push(`${entry.text}:${await entrySha256(entryPath(cd, entry))}`);
   return { head, diffSha256: sha256(diff.stdout), untrackedSha256: sha256(Buffer.from(lines.join('\n'))), snapshotHash };
@@ -2161,6 +2187,7 @@ async function hostPreflight(args) {
   // Skipped with --skip-codex-doctor: on a Codex host a nested codex command is blocked, as for doctor.
   const seatTools = codexCli && !args.skipCodexDoctor ? await codexToolProbe(cdAbs) : null;
   for (const w of toolProbeWarnings(seatTools ?? {})) process.stderr.write(`preflight: WARNING: ${w}${String.fromCharCode(10)}`);
+  if (seatTools && Object.values(seatTools).some((v) => v?.ok) && await codexPowerShellConstrained(cdAbs))process.stderr.write(`preflight: WARNING: ${POWERSHELL_CONSTRAINED_WARNING}${String.fromCharCode(10)}`);
   const actorsAll = [seats.seatA, seats.seatB, seats.auditor, ...(Array.isArray(seats.verifiers) ? seats.verifiers : [])];
   if (args.probeReach) {
     if (!actorsAll.some((a) => a?.runtime === 'codex' && a?.transport !== 'native')) throw new RelayError('--probe-reach checks what a Codex CLI seat can reach, and no actor runs on the Codex CLI; nothing was run');

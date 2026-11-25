@@ -134,7 +134,7 @@ function inProcessRunner(hook) {
   };
 }
 
-async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = {}, seatB = {}, auditor = {}, flags = {}, verifiers = [], fingerprint = null, git = false, probed = false } = {}) {
+async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = {}, seatB = {}, auditor = {}, flags = {}, verifiers = [], fingerprint = null, git = false, probed = false, phase1Done = true } = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'review run '));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   const hook = path.join(base, 'hook');
@@ -146,6 +146,8 @@ async function setup(t, { skill = 'cross-review', host = 'claude-code', seatA = 
   await fs.mkdir(target);
   await fs.writeFile(path.join(target, 'file.txt'), 'content\n');
   await fs.writeFile(path.join(run, 'task-packet.md'), '# packet\n');
+  // A hand-built run starts after Phase 1 was validated; phase1Done: false leaves its marker out.
+  if (phase1Done) await fs.writeFile(path.join(run, 'phase1-done.json'), '{}\n');
   if (git) {
     for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'one']]) {
       assert.equal(spawnSync('git', args, { cwd: target }).status, 0);
@@ -1221,6 +1223,59 @@ test('field feedback: target writes that are only Python cache items are a warni
   assert.match(bad.lines.at(-2), /^FAILED seat B touched files: /);
 });
 
+// A plain-folder run whose Phase 1 fingerprint was recorded, as preflight records it.
+async function recordedPlainRun(t, { cachesAtPreflight = false } = {}) {
+  const { computeSnapshotHash, fingerprintFiles } = await import('../preflight.mjs');
+  const s = await setup(t);
+  for (const role of ['A', 'B']) {
+    await fs.mkdir(path.join(s.run, 'phase1', role), { recursive: true });
+    await fs.writeFile(path.join(s.run, 'phase1', role, 'result.json'), JSON.stringify({ status: 'completed', sessionId: `sess-${role}` }));
+  }
+  if (cachesAtPreflight) {
+    await fs.mkdir(path.join(s.target, '__pycache__'), { recursive: true });
+    await fs.writeFile(path.join(s.target, '__pycache__', 'file.cpython-311.pyc'), 'zz');
+  }
+  s.desc.fingerprint = { head: null, diffSha256: null, untrackedSha256: null, snapshotHash: await computeSnapshotHash(s.target) };
+  await fs.rm(path.join(s.run, 'run.json'));
+  await writeRunDescriptor(s.run, s.desc);
+  await fs.writeFile(path.join(s.run, 'fingerprint-files.json'), JSON.stringify(await fingerprintFiles(s.target)));
+  return s;
+}
+
+test('plain folder: cache items present at preflight, or written by a seat afterwards, are not drift', async (t) => {
+  const present = await recordedPlainRun(t, { cachesAtPreflight: true });
+  const a = await present.rr('phase2', '--run-dir', present.run, '--start');
+  assert.equal(a.code, 0, a.out + a.err);
+  const later = await recordedPlainRun(t);
+  await fs.mkdir(path.join(later.target, 'pkg', '__pycache__'), { recursive: true });
+  await fs.writeFile(path.join(later.target, 'pkg', '__pycache__', 'm.cpython-311.pyc'), 'zz');
+  const b = await later.rr('phase2', '--run-dir', later.run, '--start');
+  assert.equal(b.code, 0, b.out + b.err);
+  await assert.rejects(fs.access(path.join(later.run, 'phase3', 'drift-accepted.json')));
+});
+
+test('plain folder: a source file changed next to a new cache item still stops the step and is named', async (t) => {
+  const s = await recordedPlainRun(t);
+  await fs.mkdir(path.join(s.target, '__pycache__'), { recursive: true });
+  await fs.writeFile(path.join(s.target, '__pycache__', 'file.cpython-311.pyc'), 'zz');
+  await fs.writeFile(path.join(s.target, 'file.txt'), 'changed by another session\n');
+  const r = await s.rr('phase2', '--run-dir', s.run, '--start');
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /changed: file\.txt/);
+  assert.ok(!/__pycache__/.test(r.out.split('changed:')[1] ?? ''), r.out);
+});
+
+test('audit --prepare before Phase 1 finished names Phase 1 and leaves no mapping or auditor folder behind', async (t) => {
+  const s = await setup(t, { phase1Done: false });
+  const r = await s.rr('audit', '--run-dir', s.run, '--prepare');
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /audit-prep/);
+  assert.match(r.out, /Phase 1 has not finished[\s\S]*phase1 --run-dir .* --wait/);
+  assert.equal((await s.calls()).length, 0, 'no step ran');
+  assert.deepEqual((await fs.readdir(s.run)).sort(), ['run.json', 'task-packet.md']);
+  await assert.rejects(fs.access(`${s.run}-audit-input`));
+});
+
 test('F4: a seat that wrote into the target fails the Phase 2 wait', async (t) => {
   const s = await setup(t);
   assert.equal((await s.rr('phase1', '--run-dir', s.run, '--start')).code, 0);
@@ -2272,6 +2327,16 @@ test('Linux round F4: phase1 --start warns about a path the packet names that do
   const r = await s.rr('phase1', '--run-dir', s.run, '--start');
   assert.equal(r.code, 0, r.out);
   assert.ok(r.lines.some((l) => l.startsWith('warning: the packet names 1 path(s) that do not exist here') && l.includes(gone)), r.out);
+});
+
+test('phase1 --start does not call a path with a <placeholder> segment missing, bare or in backticks', async (t) => {
+  const s = await setup(t, { seatA: { transport: 'native' } });
+  const holder = path.join(s.base, 'bughunter', 'out', '<cluster>', 'tables.json');
+  await fs.appendFile(path.join(s.run, 'task-packet.md'), `\nEvidence: \`${holder}\` and ../bughunter/out/<cluster>/tables.json and \`${path.join(s.base, 'gone', 'real.log')}\`\nRun \`diff ../gone/two.log out/<x>/a.json\`\n`);
+  const r = await s.rr('phase1', '--run-dir', s.run, '--start');
+  assert.equal(r.code, 0, r.out);
+  const line = r.lines.find((l) => l.startsWith('warning: the packet names') && l.includes('do not exist here'));
+  assert.ok(line && line.startsWith('warning: the packet names 2 path(s)') && line.includes('real.log') && line.includes('two.log') && !line.includes('<cluster>') && !line.includes('<x>'), r.out);
 });
 
 test('Linux round linux-r1 O1: phase2 --start moves a seat\'s leftover Phase 1 scratch folder out of the run folder before the exchange', async (t) => {

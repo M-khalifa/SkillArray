@@ -1323,6 +1323,12 @@ async function finishZeroClaimRun(desc, report, args) {
 }
 
 async function auditPrepare(desc, args, report) {
+  // A run whose exchange finished passed Phase 1 before the marker existed; any other run needs the marker.
+  if (!(await finishedRecord(phase1DoneFile(desc))) && !(await finishedRecord(path.join(desc.runDir, 'phase2', 'exchange-result.json')))) {
+    const err = new StepError('audit-prep', `Phase 1 has not finished (no ${phase1DoneFile(desc)}): a seat may still be running, or its findings were not validated yet (a run started before this version has no marker: one phase1 --wait validates it and writes it)`);
+    err.next = `run: review-run phase1 --run-dir ${desc.runDir} --wait (rerun it while it exits 3), then audit --prepare`;
+    throw err;
+  }
   const p1 = path.join(desc.runDir, 'phase1');
   const p2 = path.join(desc.runDir, 'phase2');
   const mapping = mappingFile(desc);

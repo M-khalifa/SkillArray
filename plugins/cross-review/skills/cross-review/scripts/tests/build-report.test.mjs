@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   expandTagRange, parseArgs, isBlocker, shortTitle, compactTokens, seatCostRow, perCallNewInput, costTableLines, packetCriteria, criteriaGroup, buildCriteria, notesSections,
   parseOutcome, packetTicketMap, noteKinds, findingStatus, costNote, parseVerdict, buildTickets, groupFindings, renderChat, buildReport, renderText, renderMarkdown, renderHtml, loadRun, headingTags, outcomeOf, diffHunks, whereInChange,
-  notCheckedLine, unopenedWebConcedes,
+  notCheckedLine, unopenedWebConcedes, selectOpenFindings,
 } from '../build-report.mjs';
 
 // The step in-process, as the script was run: env holds the variables set (or, undefined, removed) for the call.
@@ -26,6 +26,7 @@ async function runCli(args, env = {}) {
 }
 const NL = String.fromCharCode(10);
 const lines = (...l) => l.join(NL) + NL;
+const chatAll = (r) => renderChat(r, { all: true });
 
 const finding = (over) => ({
   id: 'F1', origins: ['A1'], severity: 'LOW', basis: 'EXECUTED', evidence_strength: 'REPRODUCED', final_state: 'settled-agree',
@@ -127,19 +128,19 @@ test('buildReport: a withdrawn HIGH is counted as withdrawn, not in the HIGH bar
   });
   assert.equal(report.counts.high, 1);
   assert.equal(report.counts.withdrawn, 1);
-  const chat = renderChat(report);
+  const chat = chatAll(report);
   assert.match(chat, /HIGH +█+ +1\n/);
   assert.match(renderMarkdown(report), /\*\*Findings:\*\* 2 \(0 critical, 1 high, 0 medium, 0 low, 1 withdrawn\)/);
   assert.ok(report.caveats.some((c) => /changed after Phase 1 .*--accept-drift \(vsiclient\/collectors\/ContosoV4Api\.py\)/.test(c)), report.caveats.join('\n'));
   // Every finding withdrawn: no severity bar, so no empty code block in chat.
   const allGone = buildReport({ findingsDoc: { audit_depth: 'full', findings: [finding({ id: 'F1', severity: 'HIGH', final_state: 'settled-refuted' })] }, manifest: MANIFEST, packetText: '', seatTexts: {} });
-  assert.doesNotMatch(renderChat(allGone), /```\n```/);
+  assert.doesNotMatch(chatAll(allGone), /```\n```/);
   // Every output ends with one line naming the skill, the version that ran (the manifest's) and the project page.
   const stamped = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, skill_version: '9.8.7' }, packetText: '', seatTexts: {} });
   assert.deepEqual({ ...stamped.generator, skill: 'x' }, { skill: 'x', version: '9.8.7', url: 'https://github.com/M-khalifa/SkillArray' });
   const line = /Reviewed with (pair|cross)-review 9\.8\.7 \(SkillArray, MIT license\): https:\/\/github\.com\/M-khalifa\/SkillArray/;
-  for (const text of [renderText(stamped), renderMarkdown(stamped), renderChat(stamped)]) assert.match(text.trimEnd().split('\n').at(-1), line);
-  assert.equal(renderChat(stamped, { all: true }).match(new RegExp(line.source, 'g')).length, 1, 'chat --all prints it once, from the markdown part');
+  for (const text of [renderText(stamped), renderMarkdown(stamped), chatAll(stamped)]) assert.match(text.trimEnd().split('\n').at(-1), line);
+  assert.equal(chatAll(stamped, { all: true }).match(new RegExp(line.source, 'g')).length, 1, 'chat --all prints it once, from the markdown part');
   assert.match(renderHtml(stamped), /<footer class="meta">Reviewed with (pair|cross)-review 9\.8\.7 \(SkillArray, MIT license\): <a href="https:\/\/github\.com\/M-khalifa\/SkillArray">/);
   assert.match(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: '', seatTexts: {} }).generator.version, /^\d+\.\d+\.\d+$/, 'without a manifest version, this copy\'s SKILL.md version');
   const blind = buildReport({ findingsDoc: { findings: [] }, manifest: { ...MANIFEST, seat_blind_lines: { B: ['- H2: pytest failed: No usable temporary directory found. PARTIAL'] } }, packetText: '', seatTexts: {} });
@@ -156,12 +157,12 @@ test('buildReport: a withdrawn HIGH is counted as withdrawn, not in the HIGH bar
 test('chat: under a light audit the CHECKED line says how many agreed findings were not re-checked, so 0 confirmed is not read as a failure', () => {
   const nc = { result: 'NOT_CHECKED', basis: null, evidence: null };
   const report = buildReport({ findingsDoc: { audit_depth: 'light', findings: [finding({ id: 'F1', severity: 'LOW', auditor_check: nc }), finding({ id: 'F2', severity: 'LOW', origins: ['B1'], auditor_check: nc })] }, manifest: MANIFEST, packetText: '', seatTexts: {} });
-  assert.match(renderChat(report), /CHECKED +0 of 2 findings confirmed by the auditor; 2 not re-checked \(light audit\)/);
+  assert.match(chatAll(report), /CHECKED +0 of 2 findings confirmed by the auditor; 2 not re-checked \(light audit\)/);
   // With many findings the line is cut at 100 characters: the unresolved and withdrawn counts come first and stay.
   const many = [...Array.from({ length: 12 }, (_, i) => finding({ id: `F${i + 1}`, severity: 'LOW', origins: [`A${i + 1}`], auditor_check: nc })),
     ...Array.from({ length: 3 }, (_, i) => finding({ id: `F${13 + i}`, severity: 'LOW', origins: [`B${i + 1}`], final_state: 'unresolved-low-stakes', auditor_check: nc })),
     ...Array.from({ length: 2 }, (_, i) => finding({ id: `F${16 + i}`, severity: 'LOW', origins: [`B${i + 4}`], final_state: 'settled-refuted' }))];
-  const big = renderChat(buildReport({ findingsDoc: { audit_depth: 'light', findings: many }, manifest: MANIFEST, packetText: '', seatTexts: {} }));
+  const big = chatAll(buildReport({ findingsDoc: { audit_depth: 'light', findings: many }, manifest: MANIFEST, packetText: '', seatTexts: {} }));
   assert.match(big, /CHECKED +\d+ of 15 findings confirmed by the auditor; 3 unresolved \(F13 F14 F15\); 2 withdrawn/);
 });
 
@@ -790,10 +791,10 @@ test('chat: the exact layout for a small run (a drift check)', () => {
     '- CONFIRMED    H1',
     '```',
   ];
-  const out = renderChat(CHAT_FIXTURE());
+  const out = chatAll(CHAT_FIXTURE());
   const lines = out.split(nl);
   assert.deepEqual(lines.slice(0, expected.length), expected);
-  assert.match(out, /_Short report\. Ask for the full one: every finding, every criterion and the cost\._/);
+  assert.match(renderChat(CHAT_FIXTURE()), /Ask for the full report for each finding's evidence and fix, the requirements check, the cost/);
 });
 
 test('chat: no colour codes, no emoji, code lines within 100 characters, severities as words, whatever the run', () => {
@@ -806,7 +807,7 @@ test('chat: no colour codes, no emoji, code lines within 100 characters, severit
     buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: PACKET, seatTexts: { A: SEAT_B, B: SEAT_B } }),
   ];
   for (const report of runs) {
-    const out = renderChat(report);
+    const out = chatAll(report);
     assert.equal(out.includes(String.fromCharCode(27)), false, 'no escape codes');
     assert.equal(emoji.test(out), false, 'no emoji');
     let inCode = false;
@@ -815,12 +816,12 @@ test('chat: no colour codes, no emoji, code lines within 100 characters, severit
       else if (inCode) assert.ok(line.length <= 100, `code line within 100 characters: ${line.length}`);
     }
   }
-  assert.match(renderChat(runs[0]), /^HIGH {5}/m, 'a severity is a word in the bars');
-  assert.match(renderChat(runs[1]), /^> \*\*REVIEW INCOMPLETE \u00b7 no blockers \u00b7 no findings\*\*/);
-  const blockers = renderChat(runs[2]).split(String.fromCharCode(10)).filter((l) => l.startsWith('- FIX NOW'));
+  assert.match(chatAll(runs[0]), /^HIGH {5}/m, 'a severity is a word in the bars');
+  assert.match(chatAll(runs[1]), /^> \*\*REVIEW INCOMPLETE \u00b7 no blockers \u00b7 no findings\*\*/);
+  const blockers = chatAll(runs[2]).split(String.fromCharCode(10)).filter((l) => l.startsWith('- FIX NOW'));
   assert.equal(blockers.length, 12, 'every blocker has its own row');
   assert.ok(blockers.some((l) => /\bF12\b/.test(l)) && !blockers.some((l) => /more\)/.test(l)), 'none is hidden behind "(+N more)"');
-  assert.match(renderChat(runs[3]), /^> Caveat: /m, 'the zero-claim caveat is kept');
+  assert.match(chatAll(runs[3]), /^> Caveat: /m, 'the zero-claim caveat is kept');
 });
 
 test('chat: an unresolved HIGH finding (low stakes too) is a decision under DECIDE, not a FIX NOW row', () => {
@@ -831,7 +832,7 @@ test('chat: an unresolved HIGH finding (low stakes too) is a decision under DECI
     ] },
     manifest: MANIFEST,
   });
-  const out = renderChat(report).split(String.fromCharCode(10));
+  const out = chatAll(report).split(String.fromCharCode(10));
   assert.ok(out.some((l) => l.startsWith('- DECIDE') && /\bF1\b/.test(l)), out.join(String.fromCharCode(10)));
   assert.ok(!out.some((l) => l.startsWith('- FIX NOW') && /\bF1\b/.test(l)));
   assert.ok(out.some((l) => l.startsWith('- FIX NOW') && /\bF2\b/.test(l)));
@@ -844,12 +845,12 @@ test('chat: withdrawn claims, a checked-but-not-fully-confirmed audit, and --all
     ] },
     manifest: MANIFEST,
   });
-  const out = renderChat(report);
+  const out = chatAll(report);
   assert.match(out, /\| Withdrawn \| F2 \| 1 \|/);
   assert.match(out, /^ {2}WITHDRAWN {4}1 claim\(s\) refuted or dropped: F2/m);
   assert.match(out, /^ {2}CHECKED {6}0 of 1 findings confirmed by the auditor/m);
   assert.match(out, /^> \*\*REVIEW COMPLETE \u00b7 no blockers \u00b7 2 findings\*\*/m);
-  const all = renderChat(CHAT_FIXTURE(), { all: true });
+  const all = chatAll(CHAT_FIXTURE(), { all: true });
   assert.match(all, /^---$/m);
   assert.match(all, /^## Cost \(tokens\)/m);
   assert.doesNotMatch(all, /run with `--format chat --all`/);
@@ -867,10 +868,10 @@ test('CLI: --format chat prints the chat layout, --all needs it, a bad format is
   assert.throws(() => parseArgs(['--run-dir', 'x', '--format', 'pdf']), /--format must be text or chat/);
 });
 test('chat: the banner blocker count is the report blocker count; decide items are named apart; odd ids stay within the line', () => {
-  const decideOnly = renderChat(buildReport({ findingsDoc: { findings: [finding({ id: 'F2', severity: 'LOW', final_state: 'unresolved-high-stakes' })] }, manifest: MANIFEST }));
+  const decideOnly = chatAll(buildReport({ findingsDoc: { findings: [finding({ id: 'F2', severity: 'LOW', final_state: 'unresolved-high-stakes' })] }, manifest: MANIFEST }));
   assert.ok(decideOnly.includes('> **REVIEW COMPLETE '+String.fromCharCode(183)+' 1 blocker '+String.fromCharCode(183)+' 1 to decide (F2) '+String.fromCharCode(183)+' 1 finding**'), 'an unresolved-high-stakes finding is a blocker in every format');
   assert.match(decideOnly, /1 of 1 findings confirmed by the auditor; 1 unresolved \(F2\)/);
-  const mixed = renderChat(buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH' }), finding({ id: 'F2', severity: 'LOW', final_state: 'unresolved-high-stakes' })] }, manifest: MANIFEST }));
+  const mixed = chatAll(buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH' }), finding({ id: 'F2', severity: 'LOW', final_state: 'unresolved-high-stakes' })] }, manifest: MANIFEST }));
   assert.ok(mixed.includes('2 blockers (fix F1 first) '+String.fromCharCode(183)+' 1 to decide (F2)'));
   const odd = renderChat(buildReport({
     findingsDoc: { findings: [
@@ -914,13 +915,13 @@ test('chat: report-notes drive the groups (needs decision, fixed after the snaps
   assert.deepEqual(ids(g.fixed), ['F2']);
   assert.deepEqual(ids(g.canWait), ['F3']);
   assert.deepEqual(ids(g.fixNext), ['F4', 'F5']);
-  const out = renderChat(report);
+  const out = chatAll(report);
   assert.ok(out.includes('| Fixed, not re-reviewed | F2 | 1 |'));
   assert.ok(out.split(String.fromCharCode(10)).includes('**Decisions needed**'));
   assert.match(out, /- F1: delete or keep/);
   assert.ok(out.includes('> **REVIEW COMPLETE ' + String.fromCharCode(183) + ' 2 blockers (F2 marked fixed in the report notes, not fix now) ' + String.fromCharCode(183) + ' 1 to decide (F1)'));
   assert.match(out, /^ {2}CHECKED {6}5 of 5 findings confirmed by the auditor; 1 unresolved \(F4\); 1 withdrawn/m);
-  const bare = renderChat(buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'LOW' })] }, manifest: MANIFEST, notesText: ['## Decisions needed', '', '- pick one', ''].join(String.fromCharCode(10)) }));
+  const bare = chatAll(buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'LOW' })] }, manifest: MANIFEST, notesText: ['## Decisions needed', '', '- pick one', ''].join(String.fromCharCode(10)) }));
   assert.ok(bare.includes('| Decide | see Decisions needed below | - |'), 'a count of 0 next to a written decision read as no decision (field: website)');
 });
 
@@ -935,11 +936,11 @@ test('criteria verdicts: MET, PARTIAL and NOT MET are read from a bullet line or
   const report = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB } });
   const cs = report.criteria.criteriaStats;
   assert.deepEqual([cs.met, cs.partial, cs.notMet, cs.notVerified], [1, 1, 1, 1]);
-  const out = renderChat(report);
+  const out = chatAll(report);
   assert.match(out, /^- NOT VERIFIED 1 of 4 criteria\n- VERDICTS {5}1 met, 1 partial, 1 not met$/m, 'the NOT VERIFIED line keeps the partial count');
   assert.doesNotMatch(out, /FAILING/, 'a NOT MET verdict is counted once, as not met');
   const done = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [AC-3] three'), seatTexts: { A: seatA, B: seatB } });
-  assert.match(renderChat(done), /^- COVERED {6}2 of 2 criteria checked by a seat\n- VERDICTS {5}1 met, 0 partial, 1 not met$/m);
+  assert.match(chatAll(done), /^- COVERED {6}2 of 2 criteria checked by a seat\n- VERDICTS {5}1 met, 0 partial, 1 not met$/m);
 });
 
 test('ticket verdicts: GO / NO GO after the ticket id, a NO GO from either seat wins, the verdict that ends a line is taken, no ticket lines means no ticket rows', () => {
@@ -954,11 +955,11 @@ test('ticket verdicts: GO / NO GO after the ticket id, a NO GO from either seat 
   assert.equal(byId['6049'].text, 'live run missing');
   assert.equal(byId['6041'].text, 'for a staged rollout. Non-blocking: later.');
   assert.equal(byId['6040'].verdict, 'GO');
-  const out = renderChat(report);
+  const out = chatAll(report);
   assert.match(out, /^- NO GO {8}6049 \(A GO, B NO GO\)  live run missing$/m);
   assert.match(out, /^\+ GO {11}6048/m);
   const quiet = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA.replace(/6\d{3}: .*/g, ''), B: SEAT_B } });
-  assert.doesNotMatch(renderChat(quiet), /NO VERDICT/);
+  assert.doesNotMatch(chatAll(quiet), /NO VERDICT/);
   assert.deepEqual(buildTickets([], {}), []);
 });
 
@@ -1005,7 +1006,7 @@ test('chat: a blocker the notes mark pre-existing stays in the blocker count, as
     notesText: ['## Finding status', '- F2: pre-existing, not from this diff', ''].join(String.fromCharCode(10)),
     changeDiffs: [{ name: 'since.diff', text: '--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n' }],
   });
-  const out = renderChat(report);
+  const out = chatAll(report);
   assert.ok(out.includes('2 blockers (fix F1 first; F2 marked pre-existing in the report notes, not fix now)'));
   assert.match(renderText(report), /Blockers: 2/);
   assert.ok(out.includes('| Pre-existing | F2 | 1 |'));
@@ -1107,14 +1108,14 @@ test('review fixes: a Claude CLI seat keeps input, cache read and cache write ap
   assert.equal(seatCostRow('seat B', { input_tokens: 851000, cached_input_tokens: 750000, output_tokens: 6000 }).newInput, 101000, 'Codex input still includes the cached part');
   const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [AC-2] two', '- [AC-3] three');
   const seat = lines('# A', '', '## No findings', '', '- AC-1 MET: x', '- AC-2: looked, no verdict word', '- AC-3: looked too');
-  const out = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: SEAT_B } }));
+  const out = chatAll(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: SEAT_B } }));
   assert.match(out, /^ {2}COVERED {6}3 of 3 criteria checked by a seat\n {2}VERDICTS {5}1 met, 0 partial, 0 not met, 2 no issue found$/m);
   const many = [
     ...Array.from({ length: 12 }, (_, i) => finding({ id: 'F' + (i + 1), severity: 'MEDIUM' })),
     ...Array.from({ length: 3 }, (_, i) => finding({ id: 'F' + (i + 13), severity: 'LOW', final_state: 'unresolved-low-stakes' })),
     ...Array.from({ length: 10 }, (_, i) => finding({ id: 'F' + (i + 20), final_state: 'settled-refuted' })),
   ];
-  const wide = renderChat(buildReport({ findingsDoc: { findings: many }, manifest: MANIFEST }));
+  const wide = chatAll(buildReport({ findingsDoc: { findings: many }, manifest: MANIFEST }));
   for (const line of wide.split(String.fromCharCode(10))) if (line.startsWith('  CHECKED') || line.startsWith('+ VERIFIED')) assert.ok(line.length <= 100, line.length);
 });
 
@@ -1133,7 +1134,7 @@ test('live-run fixes: a claim heading that names its criterion bare counts as th
   assert.equal(ac2.status, 'clean');
   assert.deepEqual(ac2.failedSeats, ['B']);
   assert.ok(report.caveats.some((c) => c.includes('Criterion AC-2 (seat B): the seat wrote NOT MET or reported a failing check')));
-  assert.match(renderChat(report), /^- FAILING {6}1 criterion reports a failing check with no verdict and no finding$/m);
+  assert.match(chatAll(report), /^- FAILING {6}1 criterion reports a failing check with no verdict and no finding$/m);
   assert.match(renderText(report), /AC-2 +failing check reported, no finding tagged \(B\)/, 'the row does not say "no issue found"');
   assert.deepEqual(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: SEAT_B, B: lines('# B', '', '## No findings', '', '- AC-1: does not fail, sumTo(4) is right.', '- AC-2: no failure seen.') } }).criteria.rows.map((r) => r.failedSeats), [[], []], 'negated phrases are not failures');
 });
@@ -1155,7 +1156,7 @@ test('chat: a criterion that carries a finding is never counted as met, and the 
   const report = buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'HIGH', origins: ['A1'] })] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: SEAT_B } });
   const cs = report.criteria.criteriaStats;
   assert.deepEqual([cs.met, cs.partial, cs.notMet, cs.issue], [2, 1, 0, 1]);
-  const out = renderChat(report);
+  const out = chatAll(report);
   assert.ok(out.includes('1 criterion with findings (AC-3)'));
   assert.match(out, /^- CRITERION {4}AC-3 {2}findings F1$/m);
   assert.match(out, /3 of 3 criteria checked by a seat\n {2}VERDICTS {5}2 met, 1 partial, 0 not met; 1 with findings$/m);
@@ -1165,19 +1166,19 @@ test('chat: a criterion that carries a finding is never counted as met, and the 
 test('vsi feedback: the markdown report omits an unwritten Why instead of printing "(not written)", and a grouped line names the hidden ids', () => {
   const report = buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'MEDIUM' }), finding({ id: 'F2', severity: 'MEDIUM' }), finding({ id: 'F3', severity: 'MEDIUM' })] }, manifest: MANIFEST });
   assert.doesNotMatch(renderMarkdown(report), /Why:/);
-  assert.match(renderChat(report), /FIX NEXT {5}F1 .*\(\+F2 F3\)/);
+  assert.match(chatAll(report), /FIX NEXT {5}F1 .*\(\+F2 F3\)/);
   assert.match(renderMarkdown({ ...report, why: 'One sentence.' }), /\*\*Why:\*\* One sentence\./);
 });
 
 test('chat: a confirmed hypothesis is the red line, a refuted one is good news (+ when all are refuted), the rest named by tag', () => {
   const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [H1] a', '- [H2] b', '- [H3] c', '- [H4] d');
   const seat = lines('# A', '', '## No findings', '', '- H1: REFUTED by the new test.', '- H2: CONFIRMED.', '- H3: PARTLY CONFIRMED, one path remains.', '- H4: looked at it, no outcome word.');
-  const out = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: SEAT_B } }));
+  const out = chatAll(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: SEAT_B } }));
   assert.match(out, /^- SPLIT {8}H1 \(A refuted, B confirmed\)$/m);
-  const both = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: lines('# B', '', '## No findings', '', '- H1: REFUTED too.') } }));
+  const both = chatAll(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: lines('# B', '', '## No findings', '', '- H1: REFUTED too.') } }));
   assert.match(both, /^ {2}REFUTED {6}H1$/m, 'refuted is not a red line');
   const onlyH1 = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [H1] a');
-  const allRefuted = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: onlyH1, seatTexts: { A: lines('# A', '', '## Checks performed', '- H1: REFUTED.'), B: lines('# B', '', '## Checks performed', '- H1: REFUTED too.') } }));
+  const allRefuted = chatAll(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: onlyH1, seatTexts: { A: lines('# A', '', '## Checks performed', '- H1: REFUTED.'), B: lines('# B', '', '## Checks performed', '- H1: REFUTED too.') } }));
   assert.match(allRefuted, /^\+ REFUTED {6}H1$/m, 'every hypothesis refuted: the good outcome');
   // The terminal report paints all-refuted green and a confirmed hypothesis red.
   const green = renderText(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: onlyH1, seatTexts: { A: lines('# A', '', '## Checks performed', '- H1: REFUTED.') } }), { color: true });
@@ -1195,7 +1196,7 @@ test('chat: a confirmed hypothesis is the red line, a refuted one is good news (
 
 test('chat: a severity the auditor changed is shown with the auditor reason, three at most', () => {
   const changed = (id, from, to, reason) => finding({ id, severity: from, severity_audited: to, auditor_check: { result: 'CONFIRMED', severity: to, severity_reason: reason } });
-  const out = renderChat(buildReport({
+  const out = chatAll(buildReport({
     findingsDoc: { findings: [changed('F1', 'HIGH', 'MEDIUM', 'Needs a corrupt input the collector never gets. Second sentence.'), changed('F2', 'HIGH', 'LOW', 'Cosmetic.'), changed('F3', 'HIGH', 'MEDIUM', 'x'), changed('F4', 'HIGH', 'MEDIUM', 'y')] },
     manifest: MANIFEST,
   }));
@@ -1284,7 +1285,7 @@ test('self-review fixes: failure words on a line with a verdict are not a failin
   assert.match(renderMarkdown(noVerdict), /failing check reported, no finding tagged \(A\)/);
   assert.match(renderHtml(noVerdict), /<span class="chip high">failing check reported, no finding tagged<\/span>/);
   const four = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: lines('- [AC-1] a', '- [AC-2] b', '- [AC-3] c', '- [AC-4] d'), seatTexts: { A: lines('## Checks performed', '- AC-1: the parser fails on CRLF.', '- AC-2: verified. MET', '- AC-3: could not run the suite.', '- AC-4: MET'), B: '' } });
-  assert.match(renderChat(four), /VERDICTS {5}2 met, 0 partial, 0 not met, 1 no issue found$/m, 'a failing-check row is not also counted as no issue found');
+  assert.match(chatAll(four), /VERDICTS {5}2 met, 0 partial, 0 not met, 1 no issue found$/m, 'a failing-check row is not also counted as no issue found');
 });
 
 test('self-review fixes: every format counts a NOT MET or PARTIAL criterion with no finding apart from "no issue found"; one caveat; chat lines within 100', () => {
@@ -1295,7 +1296,7 @@ test('self-review fixes: every format counts a NOT MET or PARTIAL criterion with
   assert.match(renderMarkdown(report), /- Criteria: 0 issue found, 8 not met or partial \(no finding\), 4 no issue found, 0 not verified/);
   assert.match(renderHtml(report), /aria-label="Criteria: 0 issue found, 8 not met or partial \(no finding\), 4 no issue found, 0 not verified"/);
   assert.equal(report.caveats.filter((c) => /NOT MET or reported a failing check/.test(c)).length, 1, 'one caveat names every criterion');
-  const chat = renderChat(report);
+  const chat = chatAll(report);
   assert.match(chat, /- VERDICTS {5}4 met, 4 partial, 4 not met$/m);
   assert.match(chat.split(NL)[0], /4 not met, no finding \(AC-3, AC-6, AC-9, AC-12\)/);
   let inCode = false;
@@ -1457,7 +1458,7 @@ test('live run notes: unresolved is not "disputed", seats that split on a hypoth
     findingsDoc: { findings: [finding({ id: 'F1', severity: 'MEDIUM', final_state: 'unresolved-low-stakes', recommended_fix: 'Key the dedup on node id and status. Then add a test.' })] },
     manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB },
   });
-  const chat = renderChat(report);
+  const chat = chatAll(report);
   assert.doesNotMatch(chat, /disputed/);
   assert.match(chat, /1 unresolved \(F1\)/);
   assert.match(chat, /^- SPLIT {8}H1 \(A refuted, B confirmed\)/m);
@@ -1498,7 +1499,7 @@ test('live run notes 4: the full recommended fix, a wrapped PARTIAL reason, SPLI
   assert.ok(md.includes(longFix.trim().slice(-30)), 'the recommended fix is not cut');
   assert.match(md, /H1 .*SPLIT: A refuted, B confirmed/);
   assert.match(md, /A hypothesis is a claim to test: REFUTED means the claim as written is false/);
-  const chat = renderChat(report);
+  const chat = chatAll(report);
   assert.ok(chat.includes('5 criteria with findings (AC-2, AC-3, AC-4, AC-5, AC-6)'), 'the banner names every tag up to eight');
   const block = chat.slice(chat.indexOf(String.fromCharCode(96).repeat(3) + 'diff'));
   assert.match(block, /^ {2}PARTIAL {6}AC-1 {2}no finding tagged$/m);
@@ -1524,7 +1525,7 @@ test('live run notes 5: a finding tagged only BUG-<ticket> or PROD-<ticket> show
     notesText: lines('## Finding status', '- F1: wrong: the volume is excluded on purpose'),
   });
   assert.deepEqual(wrong.criteria.tickets.find((x) => x.id === '6030').findings, []);
-  const chat = renderChat(report);
+  const chat = chatAll(report);
   assert.match(chat, /^- NO GO {8}6030 {2}findings F1/m);
   const row = report.criteria.rows.find((r) => r.tag === 'AC-30-1');
   assert.ok(row.reason.startsWith('... ') && row.reason.endsWith(tail) && row.reason.length <= 304, 'the end of a long reason is kept');
@@ -1541,7 +1542,7 @@ test('live run notes 6: a finding tagged only BUG-<ticket> in its heading reache
     manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: seatB },
   });
   assert.deepEqual(report.criteria.tickets.find((x) => x.id === '6030').findings, ['F1', 'F2']);
-  const chat = renderChat(report);
+  const chat = chatAll(report);
   assert.match(chat, /^- NO GO {8}6030 {2}findings F1 F2/m);
   assert.ok(chat.replace(/\s+/g, ' ').includes('not available, not a proven defect.'), 'the last clause of the reason is shown');
   assert.equal(chat.includes('...'), false);
@@ -1595,7 +1596,7 @@ test('commands: the cost table in every format gets a Commands column only when 
 });
 
 test('commands: the chat report names a seat only when none of its commands succeeded, in one line of at most 100 characters', () => {
-  const chat = (manifest) => renderChat(buildReport({ findingsDoc: { findings: [] }, manifest, seatTexts: { A: SEAT_A, B: SEAT_B } }));
+  const chat = (manifest) => chatAll(buildReport({ findingsDoc: { findings: [] }, manifest, seatTexts: { A: SEAT_A, B: SEAT_B } }));
   const text = chat(COMMANDS_MANIFEST);
   assert.match(text, /^- COMMANDS     seat B tried 2 commands, all failed; its result rests on reading alone$/m);
   assert.doesNotMatch(text, /COMMANDS +seat A/, 'seat A had 1 failure of 59: the --all table shows it, the short report does not');
@@ -1643,7 +1644,7 @@ test('outcome words in the notes: only the first word counts; wrong withdraws (a
   assert.deepEqual([report.counts.high, report.counts.medium, report.counts.withdrawn], [1, 2, 2], 'withdrawn findings leave the severity counts');
   assert.ok(report.caveats.some((c) => c.startsWith('F2 is marked wrong in the report notes with no reason')));
   assert.ok(report.caveats.some((c) => c.startsWith('F1, F4 are marked wrong in the report notes, so they are counted as withdrawn')));
-  const chat = renderChat(report);
+  const chat = chatAll(report);
   assert.match(chat, /^ {2}WITHDRAWN {4}2 claim\(s\) refuted or dropped, or marked wrong by the author: F1 F4$/m);
   assert.match(chat, /1 blocker \(fix F2 first\)/);
   assert.match(chat, /CHECKED +0 of 3 findings|VERIFIED/, 'the auditor line counts only findings still standing');
@@ -1788,6 +1789,9 @@ test('review round: shown in every header when the packet names it; from round 3
   assert.match(renderChat(two), /^> \*\*REVIEW \w+ · round 2 · /m);
   const three = at(3);
   assert.ok(three.caveats.some((c) => c.startsWith('Round 3: findings keep coming from fixes.')));
+  const doc = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: `# Task packet: re-review\nReview round: 3\nProfile: Document. Target: x.md\n\n${PACKET}` });
+  assert.ok(doc.caveats.includes('Round 3: findings keep coming from fixes. Before another round, consider rewriting the section they keep landing in instead of patching it again.'));
+  assert.ok(!doc.caveats.some((c) => c.includes('every combination')));
   const none = at(null);
   assert.equal(none.round, null);
   assert.doesNotMatch(renderChat(none), /round/);
@@ -1865,7 +1869,7 @@ test('field run: chat names the flagged criteria past the first eight instead of
   const ids = Array.from({ length: 10 }, (_, i) => `AC-${i + 1}`);
   const packet = lines('# P', '## Acceptance criteria', ...ids.map((id) => `- [${id}] item`));
   const seat = lines('# A', '', '## No findings', '', ...ids.map((id) => `- ${id} NOT MET: the check failed`));
-  const out = renderChat(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: seat } }));
+  const out = chatAll(buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: seat } }));
   assert.match(out, /^- MORE {9}2 more flagged: AC-9 AC-10 \(--all lists them\)$/m, out);
   assert.doesNotMatch(out, /\(\+\d+ more\)$/m);
 });
@@ -1900,7 +1904,9 @@ test('certainty R2: a NOT CHECKED line does not check its tag; verdict-less gap 
   assert.deepEqual(report.criteria.silentSeats, []);
   const caveat = 'Checks not done — seat A: AC-1 on Linux (no box); the AC-2 timing (web budget spent)';
   assert.ok(report.caveats.includes(caveat), report.caveats.join('\n'));
-  assert.ok(renderChat(report).includes(`> Caveat: ${caveat}`));
+  assert.ok(!renderChat(report).includes(`> Caveat: ${caveat}`), 'a skipped-checks caveat is a minor note in the short chat');
+  assert.ok(chatAll(report).includes(`> Caveat: ${caveat}`));
+  assert.ok(renderMarkdown(report).includes(caveat));
   assert.ok(JSON.stringify(report).includes(JSON.stringify(caveat)));
 });
 
@@ -1926,7 +1932,7 @@ test('certainty R3: pass lines that name a tag but cite no file:line, backtick, 
   assert.deepEqual(report.criteria.passes.B, { passes: 9, bare: 4 });
   const caveat = 'Seat B: 4 of 9 MET or REFUTED check lines cite no file:line, backticked command, link, claim ID or finding ID the report could find';
   assert.ok(report.caveats.includes(caveat), report.caveats.join('\n'));
-  assert.ok(renderChat(report).includes(`> Caveat: ${caveat}`));
+  assert.ok(chatAll(report).includes(`> Caveat: ${caveat}`));
   assert.equal(report.caveats.filter((c) => /^Seat A: .* the report could find$/.test(c)).length, 0, 'no pass, no caveat');
 });
 
@@ -1964,7 +1970,7 @@ test('certainty R4: an EXECUTED finding the auditor confirmed by reading gets a 
   ];
   const report = buildReport({ findingsDoc: { findings }, manifest: MANIFEST, seatTexts: {} });
   assert.deepEqual(report.caveats.filter((c) => /confirmed by reading only/.test(c)), ['F2, F7: the seat ran it; the auditor confirmed by reading only']);
-  assert.match(renderChat(report), /> Caveat: F2, F7: the seat ran it; the auditor confirmed by reading only/);
+  assert.match(chatAll(report), /> Caveat: F2, F7: the seat ran it; the auditor confirmed by reading only/);
   assert.match(JSON.stringify(report), /F2, F7: the seat ran it/);
 });
 
@@ -2062,7 +2068,7 @@ test('live run 2b: an UNMET criterion line names the worst final severity of its
     finding({ id: 'F5', origins: ['A3'], severity: 'MEDIUM' }),
     finding({ id: 'F6', origins: ['A4'], severity: 'LOW' }),
   ];
-  const out = renderChat(buildReport({ findingsDoc: { findings }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: SEAT_B } }));
+  const out = chatAll(buildReport({ findingsDoc: { findings }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: SEAT_B } }));
   assert.match(out, /^- UNMET {8}AC-4 {2}findings F3 \(LOW\)$/m, out);
   assert.match(out, /^- UNMET {8}AC-5 {2}findings F4 F5 \(MEDIUM\)$/m, out);
   assert.match(out, /^- CRITERION {4}AC-3 {2}findings F6$/m, out);
@@ -2084,7 +2090,9 @@ test('live run 2c: under the split-hypothesis caveat the full report prints each
   assert.ok(md.includes(`- ${caveat}\n  - H1, seat A: H1: disproved at x.mjs:4, the guard returns early. REFUTED\n  - H1, seat B: `), md);
   assert.match(renderChat(report, { all: true }), /\n {2}- H1, seat B: H1: confirmed by running node t\.mjs, it throws\.\n/);
   assert.doesNotMatch(renderChat(report), /H1, seat [AB]:/, 'the short chat keeps only the caveat');
-  assert.match(renderChat(report), /> Caveat: H1: the seats disagree/);
+  assert.doesNotMatch(renderChat(report), /> Caveat: H1: the seats disagree/, 'split hypotheses are a minor note');
+  assert.match(renderChat(report), /1 minor note\b/);
+  assert.match(renderChat(report, { all: true }), /> Caveat: H1: the seats disagree/);
   const cut = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: lines('## Checks performed', '- H2: disproved. REFUTED') } });
   const cutLine = renderText(cut).split('\n').find((l) => l.startsWith('      H2, seat A: '));
   assert.ok(cutLine.endsWith('...') && cutLine.length <= '      H2, seat A: '.length + 200 && cutLine.length > '      H2, seat A: '.length + 190, cutLine);
@@ -2583,4 +2591,159 @@ test('ticket prefix: a ticket verdict line is read after a plus or star bullet, 
   assert.equal(tick('| 6041 | GO |'), 'GO');
   assert.equal(tick('see that 6041: GO was said'), null);
   assert.equal(tick('We think ticket 6041 is a GO'), null);
+});
+
+test('selectOpenFindings: worst severity first, then ids in natural order, each with its action word', () => {
+  const groups = {
+    fixNow: [], decide: [{ id: 'F10', severity: 'LOW' }], fixNext: [{ id: 'F2', severity: 'MEDIUM' }, { id: 'F1', severity: 'MEDIUM' }, { id: 'F3', severity: 'ODD' }],
+    canWait: [{ id: 'F11', severity: 'CRITICAL' }, { id: 'F4', severity: 'LOW' }],
+  };
+  const { shown, hidden } = selectOpenFindings(groups);
+  assert.deepEqual(shown.map((x) => `${x.f.id} ${x.action}`), ['F11 can wait', 'F1 fix next', 'F2 fix next', 'F4 can wait', 'F10 decide', 'F3 fix next']);
+  assert.equal(hidden, 0);
+});
+
+test('selectOpenFindings: past 20 lines every CRITICAL, HIGH, fix-now and decide finding stays, the rest fill up to 20', () => {
+  const low = (n, from) => Array.from({ length: n }, (_, i) => ({ id: `F${from + i}`, severity: 'LOW' }));
+  const high = [{ id: 'F101', severity: 'HIGH' }, { id: 'F102', severity: 'HIGH' }, { id: 'F103', severity: 'HIGH' }];
+  const { shown, hidden } = selectOpenFindings({ fixNow: [], decide: [], fixNext: high, canWait: low(22, 1) });
+  assert.equal(shown.length, 20);
+  assert.equal(hidden, 5);
+  assert.deepEqual(shown.slice(0, 3).map((x) => x.f.id), ['F101', 'F102', 'F103']);
+  assert.equal(shown[19].f.id, 'F17');
+  // A fix-now or decide LOW finding is kept even when it sorts last; with more than 20 must-keep findings none is cut.
+  const lastLow = { id: 'F99', severity: 'LOW' };
+  const kept = selectOpenFindings({ fixNow: [lastLow], decide: [], fixNext: [], canWait: low(24, 1) });
+  assert.ok(kept.shown.some((x) => x.f.id === 'F99' && x.action === 'fix now'));
+  assert.equal(kept.shown.length, 20);
+  const many = selectOpenFindings({ fixNow: low(25, 1).map((f) => ({ ...f, severity: 'HIGH' })), decide: [], fixNext: low(3, 50), canWait: [] });
+  assert.equal(many.shown.length, 25);
+  assert.equal(many.hidden, 3);
+});
+
+test('minorCaveats: only the opt-in caveats are marked, with the same text as report.caveats, in the same order', () => {
+  const manifest = {
+    ...MANIFEST,
+    reviewers: [{ role: 'A', provider: 'anthropic', transport: 'cli', permission_denials: { count: 3, tools: { Bash: 3 } } }, { role: 'B', provider: 'openai', transport: 'cli' }],
+    actors: [{ role: 'auditor', permission_denials: { count: 1, tools: { Read: 1 } } }],
+    drift_accepted: [{ at: '2026-10-16T14:25:00Z', files: ['x.py'] }],
+  };
+  const findings = [finding({ id: 'F2', auditor_check: { result: 'CONFIRMED', basis: 'STATIC_TRACE' } })];
+  const report = buildReport({ findingsDoc: { findings }, manifest, seatTexts: {} });
+  const labels = report.minorCaveats.map((c) => c.label);
+  assert.deepEqual([...labels].sort(), ['1 refused tool call', '3 refused tool calls', 'CLI shell note', 'read-only confirm'].sort());
+  for (const c of report.minorCaveats) assert.ok(report.caveats.includes(c.text), c.label);
+  const order = report.minorCaveats.map((c) => report.caveats.indexOf(c.text));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  assert.deepEqual(report.minorCaveats.filter((c) => c.kind === 'refused').map((c) => c.n), [3, 1]);
+  const drift = report.caveats.find((c) => c.includes('--accept-drift'));
+  assert.ok(drift && !report.minorCaveats.some((c) => c.text === drift), 'drift stays a normal caveat');
+  // Refusals from two actors are one note: refused, CLI shell note, read-only confirm.
+  assert.match(renderChat(report), /the cost and 3 minor notes\._$/m);
+});
+
+test('short chat: a reviewer that ran only tool scripts is not called read-only; a confirmed suspected bug with no finding gets a line', () => {
+  const scripts = buildReport({ findingsDoc: { findings: [] }, seatTexts: { A: SEAT_A, B: SEAT_B },
+    manifest: { ...COMMANDS_MANIFEST, seat_usage: { ...COMMANDS_MANIFEST.seat_usage, A: { ...COMMANDS_MANIFEST.seat_usage.A, commands: { tried: 0, failed: 0, scripts: 3, scriptsFailed: 0, source: 'transcript' } } } } });
+  assert.match(renderChat(scripts), /^Reviewer A ran no commands; it ran 3 tool scripts instead\.$/m);
+  const packet = lines('# P', '## Hypotheses', '- [H1] a');
+  const seat = lines('# S', '', '## Checks performed', '- H1: confirmed by running node t.mjs, it throws.');
+  const hyp = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: seat } });
+  assert.match(renderChat(hyp), /^A suspected bug was confirmed by the reviewers but no finding covers it:\n {2}- a\n\n/m);
+});
+
+test('short chat: confirmed suspected bugs with no finding are named, first 3 only, then +N more; no H-ids', () => {
+  const packet = lines('# P', '## Hypotheses', '- [H1] First bug.', '- [H2] Second bug.', '- [H3] Third bug.', '- [H4] Fourth bug.');
+  const seat = lines('# S', '', '## Checks performed', '- H1: confirmed by running node t.mjs.', '- H2: confirmed by running node t.mjs.', '- H3: confirmed by running node t.mjs.', '- H4: confirmed by running node t.mjs.');
+  const out = renderChat(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: seat } }));
+  assert.match(out, /^4 suspected bugs were confirmed by the reviewers but no finding covers them:\n {2}- First bug\.\n {2}- Second bug\.\n {2}- Third bug\.\n {2}- and 1 more in the full report\n\n/m);
+  assert.doesNotMatch(out, /Fourth bug|H\d/);
+});
+
+test('short chat: a severity the auditor changed is labelled with the reviewers value; the line stays within 100 columns', () => {
+  const words = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
+  const report = buildReport({ findingsDoc: { findings: [
+    finding({ id: 'F1', severity: 'HIGH', severity_audited: 'MEDIUM', summary: 'Short title.' }),
+    finding({ id: 'F2', severity: 'HIGH', severity_audited: 'MEDIUM', summary: words }),
+    finding({ id: 'F3', severity: 'LOW', summary: 'Unchanged.' }),
+  ] }, manifest: MANIFEST });
+  const out = renderChat(report).split('\n');
+  assert.ok(out.some((l) => /^ {2}.. MEDIUM {2}F1 {2}Short title\. \(auditor; reviewers said HIGH\)$/.test(l)), out.join('\n'));
+  const long = out.find((l) => /^ {2}.. MEDIUM/.test(l) && l.includes('word0'));
+  assert.ok(long.endsWith('(auditor; reviewers said HIGH)') && long.length <= 100, long);
+  assert.ok(out.some((l) => /^ {2}.. LOW {5}F3 {2}Unchanged\.$/.test(l)));
+});
+
+const shortRun = () => {
+  const packet = lines('# P', '## Acceptance criteria', '- [AC-1] one', '- [AC-2] two', '- [H3] c', '- [H4] d');
+  const seatA = lines('# A', '', '## Checks performed', '- AC-1: NOT MET at x.mjs:3, see F1.', '- AC-2: PARTIAL, one path untested.', '- H3: disproved at x.mjs:4. REFUTED', '- H4: REFUTED at x.mjs:8.');
+  const seatB = lines('# B', '', '## Checks performed', '- AC-1: NOT MET.', '- AC-2: MET at x.mjs:5.', '- H3: confirmed by running node t.mjs, it throws.', '- H4: REFUTED too.');
+  const findings = [
+    finding({ id: 'F1', severity: 'MEDIUM', summary: 'The reworded container-metrics coverage message changes the text the alert parser matches on and breaks it.' }),
+    finding({ id: 'F2', severity: 'MEDIUM', summary: 'Second finding. More text.' }),
+    finding({ id: 'F3', severity: 'LOW', summary: 'The reworded coverage alert always says storage free reads empty, even when it is full.' }),
+  ];
+  const manifest = { ...MANIFEST, drift_accepted: [{ at: '2026-10-16T14:25:00Z', files: ['x.py'] }] };
+  return buildReport({ findingsDoc: { findings }, manifest, packetText: packet, seatTexts: { A: seatA, B: seatB } });
+};
+
+test('short chat: findings only, no criteria or hypothesis lines, an important caveat shown, minor ones counted in the closing line', () => {
+  const report = shortRun();
+  assert.ok(report.minorCaveats.length > 0);
+  const out = renderChat(report);
+  // Always-shown caveats keep their own wording (the untagged NOT MET one names its criterion tag); the rest of the short report has no tags.
+  const body = out.split('\n').filter((l) => !l.startsWith('> Caveat:')).join('\n');
+  for (const word of ['AC-', 'H3', 'UNMET', 'CRITERION', 'SPLIT', 'REFUTED', 'COVERED', 'VERDICTS', '█', '| Do this']) assert.ok(!body.includes(word), `${word} in short output\n${out}`);
+  assert.ok(out.includes('```diff\n'), 'finding block is a diff fence');
+  assert.match(out, /^ {2}.. MEDIUM {2}F1 {2}The reworded container-metrics/m);
+  assert.match(out, /^ {2}.. LOW {5}F3 {2}/m);
+  assert.match(out, /^> Caveat: The target changed after Phase 1/m);
+  assert.match(out, /^> Caveat: Criterion AC-1 .*no finding is tagged/m);
+  assert.doesNotMatch(out, /the seats disagree/);
+  const m = report.minorCaveats.length;
+  assert.equal(m, 2, JSON.stringify(report.minorCaveats.map((c) => c.label)));
+  assert.match(out, /Ask for the full report for each finding's evidence and fix, the requirements check, the cost and 2 minor notes\._?$/m);
+  assert.doesNotMatch(out, /Notes:/);
+  const all = renderChat(report, { all: true });
+  assert.match(all, /> Caveat: H3: the seats disagree/);
+  assert.match(all, /AC-1/);
+  assert.match(renderMarkdown(report), /H3: the seats disagree/);
+});
+
+test('short chat: a long title is cut at a word boundary by shortTitle, never mid-word', () => {
+  const words = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
+  const report = buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'MEDIUM', summary: words })] }, manifest: MANIFEST });
+  const line = renderChat(report).split('\n').find((l) => /^ {2}.. MEDIUM/.test(l));
+  assert.ok(line.length <= 100, line);
+  assert.ok(line.endsWith('...'), line);
+  const before = line.slice('  .. MEDIUM  F1  '.length, -3);
+  assert.ok(words.startsWith(before), before);
+  assert.ok(words[before.length] === ' ' || words[before.length - 1] === ' ' || before.endsWith(' '), 'cut falls on a word boundary');
+  assert.ok(!before.endsWith(' '), 'no trailing space before the dots');
+});
+
+test('short chat: BLOCKER and DECIDE prefixes, no action words for the rest, and a +N more line past 20', () => {
+  const report = buildReport({ findingsDoc: { findings: [
+    finding({ id: 'F1', severity: 'HIGH', summary: 'Blocking one.' }),
+    finding({ id: 'F2', severity: 'LOW', final_state: 'unresolved-high-stakes', summary: 'Open decision.' }),
+    finding({ id: 'F3', severity: 'MEDIUM', summary: 'Plain one.' }),
+  ] }, manifest: MANIFEST });
+  const out = renderChat(report);
+  assert.match(out, /^- .. HIGH {4}F1 {2}BLOCKER {2}Blocking one\./m);
+  assert.ok(out.includes(`- ${String.fromCodePoint(0x1F534)} HIGH`) && out.includes(`  ${String.fromCodePoint(0x1F7E0)} MEDIUM`), 'red line and dot for HIGH, plain line and orange dot for MEDIUM');
+  assert.match(out, /^ {2}.. LOW {5}F2 {2}DECIDE {3}Open decision\./m);
+  assert.match(out, /^ {2}.. MEDIUM {2}F3 {2}Plain one\./m);
+  assert.doesNotMatch(out, /fix next|can wait/);
+  const many = buildReport({ findingsDoc: { findings: Array.from({ length: 25 }, (_, i) => finding({ id: `F${i + 1}`, severity: 'MEDIUM', summary: `Item ${i + 1}.` })) }, manifest: MANIFEST });
+  const lines25 = renderChat(many).split('\n');
+  assert.equal(lines25.filter((l) => /^ {2}.. MEDIUM /.test(l)).length, 20);
+  assert.ok(lines25.includes('  +5 more findings in the full report'));
+});
+
+test('short chat: the closing line lists dropped, pre-existing and fixed counts', () => {
+  const notes = lines('## Finding status', '- F2: fixed', '- F3: wrong: not a real defect');
+  const report = buildReport({ findingsDoc: { findings: [finding({ id: 'F1', severity: 'MEDIUM' }), finding({ id: 'F2', severity: 'MEDIUM' }), finding({ id: 'F3', severity: 'MEDIUM' }), finding({ id: 'F4', severity: 'MEDIUM', final_state: 'settled-refuted' })] }, manifest: MANIFEST, notesText: notes });
+  const out = renderChat(report);
+  assert.match(out, /, the cost; it also lists 2 findings dropped as not real, 1 fixed but not re-reviewed\./);
+  assert.doesNotMatch(out, /requirements check/);
 });

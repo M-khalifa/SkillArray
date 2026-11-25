@@ -77,7 +77,7 @@ refuses it; the second is for pair-review (two models of one vendor). Run each l
 ```text
 node "<skill-dir>/scripts/review-config.mjs" show
 node "<skill-dir>/scripts/review-config.mjs" catalog
-node "<skill-dir>/scripts/review-config.mjs" setup --a-provider anthropic --a-runtime claude --a fable --b-provider openai --b-runtime codex --b gpt-5.6-sol
+node "<skill-dir>/scripts/review-config.mjs" setup --a-provider anthropic --a-runtime claude --a fable --b-provider openai --b-runtime codex --b gpt-6.2-sol
 node "<skill-dir>/scripts/review-config.mjs" setup --a fable --b sonnet
 node "<skill-dir>/scripts/review-config.mjs" resolve --a TEMPORARY_MODEL_A
 node "<skill-dir>/scripts/review-config.mjs" reset

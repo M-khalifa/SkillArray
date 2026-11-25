@@ -2756,6 +2756,31 @@ test('scanText: pair review F7 -- a target or source folder whose name holds a v
   assert.equal(self.selfIdHits.length, 2, JSON.stringify(self));
 });
 
+test('scanText: a vendor word in a folder name above the run folder is cited without a stop; the bare word and longer names still are', async (t) => {
+  const base = await tempDir(t, 'ancestor-folder-');
+  const target = path.join(base, 'claude-work', 'runs', 'target');
+  const runDir = path.join(base, 'claude-work', 'runs', 'run1');
+  await fs.mkdir(target, { recursive: true });
+  await fs.mkdir(runDir, { recursive: true });
+  const maskDirs = [runDir, path.dirname(runDir)];
+  const cited = await scanText('- Note: the search walked the whole claude-work tree.', target, [], null, maskDirs, []);
+  assert.equal(cited.identityHits.length, 0, JSON.stringify(cited));
+  const bare = await scanText('The Claude reviewer walked claude-work.', target, [], null, maskDirs, []);
+  assert.equal(bare.identityHits.length, 1, JSON.stringify(bare));
+  const longer = await scanText('See claude-work-extra/y.py here.', target, [], null, maskDirs, []);
+  assert.equal(longer.identityHits.length, 1, JSON.stringify(longer));
+  const self = await scanText('I am Claude and I found it.', target, [], null, maskDirs, []);
+  assert.equal(self.selfIdHits.length, 1, JSON.stringify(self));
+  // Only folders above a run folder are hidden: one above the target alone still counts.
+  const aboveTarget = path.join(base, 'claude-code', 'proj');
+  await fs.mkdir(aboveTarget, { recursive: true });
+  const seat = await scanText('This is the claude-code seat.', aboveTarget, [], null, [], []);
+  assert.equal(seat.identityHits.length, 1, JSON.stringify(seat));
+  // A source folder is passed in maskDirs too (collectScanHits): folders above it still count.
+  const viaSource = await scanText('This is the claude-code seat.', target, [], null, [aboveTarget, ...maskDirs], [aboveTarget]);
+  assert.equal(viaSource.identityHits.length, 1, JSON.stringify(viaSource));
+});
+
 test('scanText: F2 -- vendor tokens match on word boundaries, so "affable", "octopus", and "fables" are not identity hits, while "Codex", "Claude\'s", "codex-dispatch.mjs", and "gpt-5" mentions still are', async () => {
   const neg = await scanText('The author is affable.\nAn octopus appeared.\nOld fables apply.', undefined);
   assert.equal(neg.identityHits.length + neg.selfIdHits.length + neg.otherHits.length, 0);

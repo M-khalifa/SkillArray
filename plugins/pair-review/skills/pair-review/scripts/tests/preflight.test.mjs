@@ -10,7 +10,7 @@ import { platform as osPlatform } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
   assertNodeVersion, parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, repoFreshness, freshnessWarnings, findReviewArtifacts, summaryLine,
-  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs, claudeProjectsWritable,
+  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, codexPowerShellConstrained, POWERSHELL_CONSTRAINED_WARNING, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs, claudeProjectsWritable,
 } from '../preflight.mjs';
 import { jobSpawn, readJobReport } from '../spawn-utils.mjs';
 
@@ -1194,6 +1194,11 @@ test('field feedback S2: the Codex seat tool probe names a tool the sandbox cann
   const quoted = toolProbeWarnings({ rg: { ...linked.rg, host: path.join(home, "O'Neil", 'rg.exe') } }, { home, platform: 'win32' })[0];
   assert.ok(quoted.includes(`Copy-Item -ErrorAction Stop '${path.join(home, "O''Neil", 'rg.exe')}'`), quoted);
   assert.doesNotMatch(toolProbeWarnings(linked, { home, platform: 'linux' })[0], /Copy-Item/);
+  // Only the rg line says searching is slower without it.
+  const slower = /reading only\. Without rg the seat searches more slowly; this matters mostly on large targets\. /;
+  assert.match(rgLine, slower);
+  assert.match(toolProbeWarnings({ rg: { ok: false, why: 'x', host: null } }, { home, platform: 'win32' })[0], slower);
+  assert.doesNotMatch(toolProbeWarnings({ python: result.python }, { home, platform: 'win32' })[0], /searches more slowly/);
   const outside = ['/x/a.log', '/x/b.log', '/x/c.log'];
   assert.match(outsideReadWarning(outside, { platform: 'win32' }), /names 3 path\(s\) outside the target \(\/x\/a\.log, \/x\/b\.log, \.\.\.\)/);
   assert.ok(outsideReadWarning(outside, { platform: 'linux' }));
@@ -1210,6 +1215,23 @@ test('field feedback S2: the Codex seat tool probe names a tool the sandbox cann
   assert.match(missing.rg.why, /^rg : The term 'rg' is not recognized as the name of a cmdlet/);
   assert.equal(hostToolPath('tool', { env: { PATH: ['/a', '/b'].join(path.delimiter) }, platform: 'linux', exists: (p) => p === path.join('/b', 'tool') }), path.join('/b', 'tool'));
   assert.equal(hostToolPath('tool', { env: { PATH: '/a' }, platform: 'linux', exists: () => false }), null);
+});
+
+test('the Codex sandbox PowerShell language mode probe warns only on ConstrainedLanguage, only on Windows, and never fails on a probe error', async () => {
+  let calls = 0;
+  const reply = (r) => async () => { calls += 1; return r; };
+  const win = (run) => codexPowerShellConstrained('C:\\t', { platform: 'win32', run });
+  assert.equal(await win(reply({ code: 0, text: 'ConstrainedLanguage\r\n' })), true);
+  assert.equal(await win(reply({ code: 0, text: 'FullLanguage\r\n' })), false);
+  assert.equal(await win(reply({ code: null, text: 'did not finish within 30 s' })), false);
+  assert.equal(await win(reply({ code: 1, text: 'ConstrainedLanguage' })), false);
+  assert.equal(await win(async () => { throw new Error('spawn failed'); }), false);
+  const before = calls;
+  assert.equal(await codexPowerShellConstrained('/t', { platform: 'linux', run: reply({ code: 0, text: 'ConstrainedLanguage' }) }), false);
+  assert.equal(calls, before, 'not run off Windows');
+  assert.match(POWERSHELL_CONSTRAINED_WARNING, /Constrained Language mode.*\[Math\]::Min/);
+  const dubious = await codexToolProbe('C:\\t', { tools: ['git'], run: async () => ({ code: 128, text: 'warning: first line\nfatal: detected dubious ownership in repository at C:/t\nmore' }), where: () => null });
+  assert.match(dubious.git.why, /dubious ownership/);
 });
 
 test('field run: copyTarget keeps the reviewed files byte for byte, leaves out ignored files, caches and links, and refuses over its limits', async (t) => {
@@ -1277,4 +1299,35 @@ test('claudeProjectsWritable: a writable projects folder passes and keeps no pro
   assert.deepEqual(refused, { ok: false, dir: path.join(config, 'projects'), error: 'EPERM', refused: true });
   const other = await claudeProjectsWritable(env, { writeFileFn: async () => { throw Object.assign(new Error('disk'), { code: 'ENOSPC' }); } });
   assert.deepEqual(other, { ok: false, dir: path.join(config, 'projects'), error: 'ENOSPC', refused: false }, 'another error also stops before the paid probe, but is not read as a sandbox refusal');
+});
+
+test('computeSnapshotHash: a plain folder leaves Python caches out, and a tree with none hashes as before', async (t) => {
+  const { hashInventory } = await import('../snapshot-utils.mjs');
+  const { fingerprintFiles } = await import('../preflight.mjs');
+  const dir = await mkdtemp(path.join(tmpdir(), 'preflight-plain-cache-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'main.py'), 'x = 1\n', 'utf8');
+  const clean = await computeSnapshotHash(dir);
+  assert.equal(clean, (await hashInventory(dir)).snapshotHash, 'no cache item: the same hash as an inventory without skipCaches');
+  await mkdir(path.join(dir, 'pkg', '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, 'pkg', '__pycache__', 'm.cpython-311.pyc'), 'zz');
+  await writeFile(path.join(dir, 'stray.pyc'), 'zz');
+  assert.equal(await computeSnapshotHash(dir), clean, 'cache items do not change the hash');
+  assert.deepEqual(Object.keys((await fingerprintFiles(dir)).files), ['main.py']);
+  await writeFile(path.join(dir, 'main.py'), 'x = 2\n', 'utf8');
+  assert.notEqual(await computeSnapshotHash(dir), clean, 'a source change still does');
+});
+
+test('computeSnapshotHash and fingerprintFiles: an untracked, not ignored cache file in a git repo does not change the hash or the listed files [slow]', async (t) => {
+  const { fingerprintFiles, computeFingerprint } = await import('../preflight.mjs');
+  const dir = await makeGitRepo(t);
+  const before = [await computeSnapshotHash(dir), await fingerprintFiles(dir), await computeFingerprint(dir)];
+  await mkdir(path.join(dir, 'pkg', '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, 'pkg', '__pycache__', 'm.cpython-311.pyc'), 'zz');
+  assert.equal(await computeSnapshotHash(dir), before[0]);
+  assert.deepEqual(await fingerprintFiles(dir), before[1]);
+  assert.deepEqual(await computeFingerprint(dir), before[2]);
+  await writeFile(path.join(dir, 'new.py'), 'y = 1\n', 'utf8');
+  assert.notEqual(await computeSnapshotHash(dir), before[0], 'an untracked source file still counts');
+  assert.deepEqual(Object.keys((await fingerprintFiles(dir)).files), ['new.py']);
 });

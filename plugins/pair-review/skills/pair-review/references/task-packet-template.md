@@ -26,6 +26,7 @@ Read-only review: do not edit, create or delete any file in the target; do not c
 - In scope: <files, folders, tickets, the diff against <base>>
 - Callers of each changed function: <list from `git grep -n <name>`, including registries, route tables and configs that name it as a string; or "none outside the diff">
 - Out of scope: <what the seats must not spend claims on>
+- Open pull requests touching the same files (`gh pr list --search <path>`): <list, so seats do not report what an open PR already changes>
 Keep one run to about three components (or a few thousand changed lines): in a field run one review of 14 apps got 8 claims and the same apps split into 4 runs got 72. Split a larger scope into runs (review-run status follows several).
 
 ## Acceptance criteria (tag each one so claims can cite it)
@@ -44,8 +45,9 @@ with "do not spend a claim on these unless the fix is wrong or incomplete". Leav
 <the files and functions that matter most, in order, with line ranges when known; a start, not a limit>
 
 ## Evidence both seats may cite
-<pre-flight summary: HEAD, branch, snapshotHash, commits behind upstream, changed-file count, and the path of the compact
-pre-flight JSON and test logs. Run each expensive command once as pre-flight Tier 2 and say so here.
+<pre-flight summary: HEAD, branch, snapshotHash, commits behind upstream, changed-file count, and the result lines of the
+pre-flight and test runs (counts, failing test names), pasted into the packet. Run each expensive command once as pre-flight Tier 2 and say so here.
+A log path outside the target (usually the evidence folder next to the run folder) may be added for Claude seats, but a Codex seat may not be able to read it: that is what the "outside the target" warning means.
 With `--exec-in`, add one line per repository: Evidence per repo: <path> <snapshotHash from tier2Repos> <stale? from --check-stale>.>
 Write each evidence path in backticks: preflight and review-run check the paths a packet names, and a quoted path is read whole.
 A path with spaces must be in backticks, because a bare path ends at the first space. Write a live endpoint as a URL with its
@@ -59,6 +61,7 @@ author-reported, not verified.>
 ## Hypotheses to test (optional)
 Items of your own bug checklist (`review-config.mjs checklists --name NAME`) go here, one hypothesis each.
 - [H1] <...>
+- Failing tests listed as evidence: give each failing test (or group of them) its own hypothesis, so the seats check whether the test or the code is wrong.
 - Optional, for a round that reviews fixes: `[Hn] At least one guard this change added is untested: name up to 5 guards;
   for each, revert it in a disposable copy (only a seat with a scratch folder; a Codex seat has none: give it the pre-flight
   result lines instead), run the tests that should cover it, and report red or green. CONFIRMED when a
@@ -69,7 +72,8 @@ Items of your own bug checklist (`review-config.mjs checklists --name NAME`) go 
 <the target's own test, lint and build commands, and which of them a seat may run. A write-heavy suite runs in a disposable folder,
 which only a seat with a scratch folder can make: a Codex seat has none and writes no file, and its sandbox may lack the
 target's packages. When the pre-flight result lines under "Evidence both seats may cite" already cover a command,
-write "running it is not needed: see Evidence", so a seat cites those lines instead of reporting a block.>
+write "running it is not needed: see Evidence", so a seat cites those lines instead of reporting a block.
+A Codex seat whose sandbox lacks the test tool must not run test commands; it cites the result lines in the packet's Evidence instead.>
 
 ## Severity note
 <the default rubric, or what is worse than usual here, and who or what reads a wrong result>
