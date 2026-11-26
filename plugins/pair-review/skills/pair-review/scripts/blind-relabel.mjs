@@ -924,11 +924,13 @@ function runPathMasker(dirs) {
   return (line) => line.replace(re, '<path>');
 }
 
-// A target or source folder whose name holds a vendor word ("claude-code-plugins") is cited by that name in prose and
-// in relative paths: the whole name is hidden like its absolute path (in another case only where the OS folds case). A
-// name that is only the vendor word is not.
-function folderNameMasker(dirs, matchers) {
-  const names = [...new Set(dirs.map((d) => path.basename(path.resolve(d))))]
+// A target or source folder, or a run folder or any folder above it, whose name holds a vendor word ("claude-code-plugins",
+// "claude-work") is cited by that name in prose and in relative paths: the whole name is hidden like its absolute path (in
+// another case only where the OS folds case). A name that is only the vendor word is not.
+function folderNameMasker(dirs, matchers, ancestorDirs = []) {
+  const above = ancestorDirs.filter((d) => path.isAbsolute(d)).flatMap((d) => d.split(/[\\/]+/));
+  const segments = [...dirs.map((d) => path.basename(path.resolve(d))), ...above].filter((seg) => seg !== '' && !/^[A-Za-z]:$/.test(seg));
+  const names = [...new Set(segments)]
     .filter((name) => matchedTokens(name, matchers).length > 0 && !matchers.some((m) => m.token.toLowerCase() === name.toLowerCase()));
   if (names.length === 0) return (line) => line;
   const escaped = names.sort((a, b) => b.length - a.length).map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
@@ -949,7 +951,8 @@ async function scanText(text, targetDir, extraTokens = [], targetText = null, ma
   // target stays exempt through the same target-derived checks as a prose quote.
   const mask = runPathMasker([targetDir, ...maskDirs, os.tmpdir()].filter(Boolean));
   const matchers = buildTokenMatchers(extraTokens);
-  const maskNames = folderNameMasker([targetDir, ...sourceDirs].filter(Boolean), matchers);
+  const maskNames = folderNameMasker([targetDir, ...sourceDirs].filter(Boolean), matchers,
+    maskDirs.filter((d) => d && !sourceDirs.some((s) => s && path.resolve(s) === path.resolve(d))));
   const lines = fenceLines.map(({ text: line, inFence }) => (inFence ? '' : maskNames(mask(line))));
   const selfIdRe = buildSelfIdRe(extraTokens);
   const selfIdHits = [];

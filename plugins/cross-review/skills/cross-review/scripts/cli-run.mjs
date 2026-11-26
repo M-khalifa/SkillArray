@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import readline from 'node:readline';
 import process from 'node:process';
-import { answerGraceMs, hasExited, killGroupOnExit, killTree, readJobReport, spawnCli, stopMarkedProcesses, watchTreeGroups } from './spawn-utils.mjs';
+import { afterJobSettles, answerGraceMs, hasExited, killGroupOnExit, killTree, readJobReport, spawnCli, stopMarkedProcesses, watchTreeGroups } from './spawn-utils.mjs';
 
 const SIGNAL_EXIT_CODE = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
 
@@ -128,7 +128,7 @@ export function runCli({ command, args, cwd, env, input, timeoutS = 0, onLine, o
       reject(new Error(`failed to spawn "${command}": ${error.message}`));
     });
     if (timeoutS) {
-      timer = setTimeout(() => {
+      const onTimeout = () => {
         // It already exited and only its output is open: no kill; after an answer the run ends as answered, else as the
         // exit wait ends it (its exit code, output still open), not as a kill.
         if (hasExited(child)) {
@@ -151,15 +151,19 @@ export function runCli({ command, args, cwd, env, input, timeoutS = 0, onLine, o
             finish();
           });
         }, 5000);
-      }, timeoutS * 1000);
+      };
+      // A CLI that ended just before the timeout is not stopped: its job wrapper is only checking for leftovers.
+      timer = setTimeout(() => { timer = afterJobSettles(child.jobReport, onTimeout) ?? timer; }, timeoutS * 1000);
     }
     rl.on('line', (line) => {
       if (!onLine(line) || answered) return;
-      // A CLI that keeps running after a successful answer is stopped, and the answer kept.
-      answered = setTimeout(() => {
+      // A CLI that keeps running after a successful answer is stopped, and the answer kept (after its job wrapper's
+      // leftover check, when the CLI itself has already ended).
+      const afterGrace = () => {
         if (settled || stopping || killing) return;
         stopAfterAnswer();
-      }, answerGraceMs());
+      };
+      answered = setTimeout(() => { answered = afterJobSettles(child.jobReport, afterGrace) ?? answered; }, answerGraceMs());
     });
     child.stderr.on('data', (chunk) => {
       out.stderr += chunk.toString('utf8');

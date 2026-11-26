@@ -152,6 +152,13 @@ The user can also turn this stopping off by starting Claude Code with
 own notice when it stopped a shell says so; setting it from a shell command inside
 the session has no effect). Tell the user; never change their environment yourself.
 
+## Auto mode
+
+In Claude Code's auto mode, the permission classifier has sometimes refused `review-run phase1 --start` (and once the host
+`preflight`) as data exfiltration, because the command sends target content to the Codex seat; it has also run fine. Run it directly. If it is refused, that is the
+review working as designed, not a fault. Do not reword the command to get past the check: ask the user to run it
+themselves by typing `! <the command>` in the prompt, then continue with `--wait`. The `!` must be in the first column, with no leading space, or the line arrives as chat text and does not run.
+
 ## Scratchpad
 
 The harness scratchpad is per session. Put a run that may last more than a day in a folder

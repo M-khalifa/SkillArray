@@ -83,7 +83,7 @@ preflight with `--compact --out <evidence-dir>/preflight.json`, where
 `<evidence-dir>` is a folder NEXT TO the run directory (for example
 `<run-dir>-evidence`; never `<run-dir> 2`, which the auditor guard refuses
 because a name continued by a space cannot be told apart from a path back into
-the run directory), never inside it: the task packet cites these log paths and the auditor receives the packet, so a
+the run directory), never inside it: the task packet may cite these log paths (a Codex seat may not be able to read them, so paste the result lines too) and the auditor receives the packet, so a
 path inside the run directory would point the auditor at real-ID files
 (the auditor brief step of `review-run audit --finish` refuses such a packet). The full
 stdout and stderr of each command and the Tier 1 diff go to log files, and the

@@ -323,7 +323,7 @@ the Phase 1 files: status, blockers, findings by severity,
 every packet criterion as issue found, not met or partial (no finding), no issue found or NOT VERIFIED, coverage, caveats and cost. IDs, counts and
 states are never retyped. Status is COMPLETE only when the manifest's status is `completed`; no merge or ship verdict is printed.
 A missing cost figure prints as unknown, never an estimate. `--format chat` prints plain markdown for a chat window (paste it
-verbatim as your reply); `--all` adds every finding, criterion and the cost to it. `--notes <file>` names the notes file when it
+verbatim as your reply); `--all`, only when the user asks for the full report, adds every finding, criterion and the cost to it. `--notes <file>` names the notes file when it
 is not `<run-dir>/phase3/report-notes.md`. `--change-diff <diff>` (repeat it for a second repository; default `<run-dir>/since.diff`,
 which `review-run recheck` writes; for a first round the preflight's `tier1.diff` log) adds a Where hint per finding (added lines, near the
 change (within 20 lines of a hunk), changed file, outside the change, unknown); it never moves a finding. `--out report.md` adds a plain
@@ -382,7 +382,7 @@ is the check. `review-run audit --finish` reads every verifier's `result.json` a
 ## Re-review
 
 `review-run recheck` writes a draft task packet for a new review of an earlier run's target after
-fixes. Write it into the new run folder:
+fixes. On a dense document or a long change one run rarely finds everything: a second run (or recheck round) on the same section is expected to find more. Write it into the new run folder:
 
 ```text
 node "<skill-dir>/scripts/review-run.mjs" recheck --from-run "<old-run-dir>" --out "<new-run-dir>/task-packet.md" --since-diff "<diff file>"
@@ -396,7 +396,8 @@ It reads `<old-run-dir>/task-packet.md` and `<old-run-dir>/phase3/findings.json`
   new one;
 - "Hypotheses to test": every previous finding as `[H1]`, `[H2]`, ..., worded as a suspected defect,
   CONFIRMED if it is still present, REFUTED if the change removed it. Hypotheses of the old packet are
-  dropped, because their numbers would clash. After them one more hypothesis, not a previous finding: a
+  dropped, because their numbers would clash. After them one more hypothesis, not a previous finding
+  (for a packet whose Profile includes Code, or has no Profile line): a
   field the changed code reads is handled wrongly when null, missing, empty, zero or negative;
 - "Known deviations" gets a FILL line;
 - "Evidence both seats may cite" is reset to FILL, because the old snapshot hash and test counts

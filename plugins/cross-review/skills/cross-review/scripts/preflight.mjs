@@ -32,14 +32,15 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { buildChildEnv, NETWORK_ENV_ALLOWLIST } from './env-filter.mjs';
-import { DEFAULT_MAX_FILES, diffInventories, hashInventory } from './snapshot-utils.mjs';
-import { hasExited, jobSpawn, killGroupOnExit, killTree as killTreeShared, readJobReport, spawnCli, stopMarkedProcesses } from './spawn-utils.mjs';
+import { DEFAULT_MAX_FILES, diffInventories, hashInventory, isCachePath } from './snapshot-utils.mjs';
+import { afterJobSettles, hasExited, jobSpawn, killGroupOnExit, killTree as killTreeShared, readJobReport, spawnCli, stopMarkedProcesses } from './spawn-utils.mjs';
 
 // An exited child is not signalled again: its pid may belong to another process by now.
 const killTree = (child, options) => (hasExited(child) ? Promise.resolve() : killTreeShared(child, options));
 import { readRunDescriptor, RunDescriptorError, writeRunDescriptor, seatOutputDir } from './run-descriptor.mjs';
 import { evaluateSupport, hostStatusOf } from './host-support.mjs';
 import { projectsDir } from './native-agent.mjs';
+import { approvedRulesFile, readApprovedRules } from './review-config.mjs';
 import { compareVersions, comparablePath, realPath, expandPathVars, expandWorkingFolderForms, probeFoldsCase, setFoldsCase, decodeFileUrls, DIFF_PLAIN, entryKey, entryPath, entrySha256, GIT_C_LOCALE, gitNames, GIT_PLAIN, gitRepoFromProbe, isInsidePath, isMainModule, nameBytes } from './path-utils.mjs';
 
 class RelayError extends Error {}
@@ -238,7 +239,7 @@ ${SAMPLE_SEATS}
 --review-rules head|worktree  Where to read each repository's REVIEW.md (--cd, each folder above it up to its
                      repository root when --cd is a subfolder, and each --repo). head (default): the copy at the merge-base with the default branch
                      (origin/HEAD), so a branch cannot rewrite its own rules; HEAD, with a WARNING, when no default
-                     branch resolves; worktree: the file on disk. A plain folder is read from disk. The text goes to <run-dir>/review-rules.md and into the seat and auditor briefs;
+                     branch resolves; worktree: the file on disk. A plain folder is read from disk; a working-tree REVIEW.md (untracked or edited) is used in head mode only when approved with review-run rules-write (commit it on the default branch, the base the review compares with, or use worktree). The text goes to <run-dir>/review-rules.md and into the seat and auditor briefs;
                      run.json records reviewRules. Above 8 KB in total it is refused. A WARNING names a REVIEW.md that
                      the working tree or the branch changed (reviewRules.changedByTarget).
 --review-rules-only <dir>  Read REVIEW.md only from these of --cd and --repo (repeat it), for example when a --repo is
@@ -446,12 +447,12 @@ async function isGitRepo(cwd) {
 
 // Tier 1: pure repository-state inspection, no execution of anything the
 // target repo defines. Runs unconditionally, no opt-in required.
-// inventory: an already computed hashInventory(cd) for a plain folder, so run() hashes it once.
+// inventory: an already computed sourceInventory(cd) for a plain folder, so run() hashes it once.
 async function runTier1(cd, inventory = null, base = null) {
   const gitTracked = await isGitRepo(cd);
   if (!gitTracked) {
     if (base) throw new RelayError(`--base ${base} needs a git repository; "${cd}" is not one`);
-    inventory ??= await hashInventory(cd);
+    inventory ??= await sourceInventory(cd);
     return {
       gitRepo: false,
       fileCount: Object.keys(inventory.files).length,
@@ -536,11 +537,17 @@ async function gitOutAll(argsList, cd) {
   return results.map((res, i) => gitChecked(res, argsList[i], cd));
 }
 
+// A plain folder's source inventory leaves Python and Gradle caches out, so a seat's test run does not read as drift.
+function sourceInventory(cd) {
+  return hashInventory(cd, { skipCaches: true });
+}
+
 // Scoped to --cd: the committed tree of that folder, its binary diff against HEAD (so a binary
 // change is distinguishable), and a content hash per untracked file (so a created file counts).
 // A commit or edit elsewhere in a monorepo does not make this target's evidence stale.
-async function computeSnapshotHash(cd, inventory = null) {
-  if (!(await isGitRepo(cd))) return (inventory ?? (await hashInventory(cd))).snapshotHash;
+// legacy: hash without cache filtering, to match a hash recorded that way.
+async function computeSnapshotHash(cd, inventory = null, { legacy = false } = {}) {
+  if (!(await isGitRepo(cd))) return (legacy ? await hashInventory(cd) : (inventory ?? (await sourceInventory(cd)))).snapshotHash;
   const headRes = await runCapture('git', ['rev-parse', 'HEAD'], cd);
   if (headRes.code !== 0) {
     throw new RelayError(`could not resolve HEAD in "${cd}" (not a git repo, or no commits yet)`);
@@ -551,7 +558,7 @@ async function computeSnapshotHash(cd, inventory = null) {
   const treeId = treeRes.code === 0 ? treeRes.stdout.toString('utf8').trim() : 'no-committed-tree';
   const diffRes = await gitOut([...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
   const untrackedRes = await gitOut(['ls-files', '--others', '--exclude-standard', '-z'], cd);
-  const untrackedEntries = gitNames(untrackedRes.stdout).filter((e) => !e.text.endsWith('/')).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+  const untrackedEntries = gitNames(untrackedRes.stdout).filter((e) => !e.text.endsWith('/') && (legacy || !isCachePath(e.text))).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
 
   const hash = createHash('sha256');
   hash.update(treeId);
@@ -564,6 +571,11 @@ async function computeSnapshotHash(cd, inventory = null) {
     hash.update(await entrySha256(entryPath(cd, entry)));
   }
   return hash.digest('hex');
+}
+
+// True when the target's current hash equals one recorded earlier, by this release or one that did not filter caches.
+async function snapshotMatches(cd, recorded) {
+  return (await computeSnapshotHash(cd)) === recorded || (await computeSnapshotHash(cd, null, { legacy: true })) === recorded;
 }
 
 // Tier 2's --exec command is an arbitrary caller-supplied shell command
@@ -651,6 +663,10 @@ export function jobLeftovers(report, { log = (m) => process.stderr.write(m) } = 
     log(`preflight: WARNING: the command could not run in a job object (${read.refused}); scanning for leftover processes instead\n`);
     return null;
   }
+  if (read.exited !== undefined) {
+    log('preflight: WARNING: the job wrapper ended before it checked for leftover processes; scanning for them instead\n');
+    return null;
+  }
   return read.left;
 }
 
@@ -699,7 +715,7 @@ function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platfo
     // callback's resolve() actually wins that race.
     let timedOut = false;
     if (timeout) {
-      timer = setTimeout(() => {
+      const onTimeout = () => {
         timedOut = true;
         killTree(child, { waitForGroup: true }).finally(() => {
           const marked = sweepMarked();
@@ -708,7 +724,9 @@ function runWithTimeout(command, { cd, env, timeout }, { spawnFn = spawn, platfo
           settled = true;
           resolve({ code: null, stdout, stderr, timedOut: true, ...(marked.length > 0 ? { leftoversStopped: marked } : {}) });
         });
-      }, timeout * 1000);
+      };
+      // A command that ended just before the timeout is not timed out: the wrapper is only checking for leftovers.
+      timer = setTimeout(() => { timer = afterJobSettles(report, onTimeout) ?? timer; }, timeout * 1000);
     }
     // On the shell's exit, not on close: a leftover process holds the output pipes open, so close waits until it ends.
     let leftovers = [];
@@ -1028,7 +1046,7 @@ function freshnessWarnings(records) {
 // the evidence; only reports match/mismatch as a fact.
 async function checkStale(cd, snapshotHash) {
   const current = await computeSnapshotHash(cd);
-  return { stale: current !== snapshotHash, currentSnapshotHash: current };
+  return { stale: current !== snapshotHash && (await computeSnapshotHash(cd, null, { legacy: true })) !== snapshotHash, currentSnapshotHash: current };
 }
 
 // One stdout line for a run written to --out, so the hash and exit codes can be read without opening the JSON.
@@ -1081,7 +1099,7 @@ async function run(args) {
   // The earlier --out file cites the logs just deleted; a rerun that is stopped before it writes must not leave it behind.
   if (clearedLogs.length > 0 && args.out) await rm(path.resolve(args.out), { force: true });
   // A plain folder is hashed file by file; do it once for Tier 1 and the snapshot hash.
-  const inventory = (await isGitRepo(cdAbs)) ? null : await hashInventory(cdAbs);
+  const inventory = (await isGitRepo(cdAbs)) ? null : await sourceInventory(cdAbs);
   const tier1 = await runTier1(cdAbs, inventory, args.base ?? null);
 
   let snapshotHash = await computeSnapshotHash(cdAbs, inventory);
@@ -1336,13 +1354,13 @@ export function sandboxArgs(tool, platform = process.platform) {
   return platform === 'win32' ? ['sandbox', '--', 'powershell', '-NoProfile', '-Command', `${tool} --version`] : ['sandbox', '--', tool, '--version'];
 }
 
-function sandboxRun(tool, cwd) {
+function sandboxRun(tool, cwd, args = sandboxArgs(tool)) {
   return new Promise((resolve) => {
     let text = '';
     let child;
     try {
       // No -C: "codex sandbox -C" requires --permission-profile; the working folder is set on the process instead.
-      child = spawnCli('codex', sandboxArgs(tool), { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawnCli('codex', args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) {
       resolve({ code: null, text: err.message });
       return;
@@ -1374,20 +1392,41 @@ export async function codexToolProbe(cwd, { tools = SEAT_TOOLS, run = sandboxRun
       continue;
     }
     const lines = String(r.text ?? '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const why = (lines.find((l) => /sandbox failed|panicked|not found|not recognized|denied|No such file/i.test(l)) ?? lines[0] ?? `exit ${r.code}`).split(' | ')[0].slice(0, 160);
+    const why = (lines.find((l) => /sandbox failed|panicked|not found|not recognized|denied|dubious ownership|No such file/i.test(l)) ?? lines[0] ?? `exit ${r.code}`).split(' | ')[0].slice(0, 160);
     out[tool] = { ok: false, why, host: where(tool) };
   }
   return out;
 }
 
+const POWERSHELL_MODE_ARGS = ['sandbox', '--', 'powershell', '-NoProfile', '-Command', '$ExecutionContext.SessionState.LanguageMode'];
+
+// Windows only: whether the sandbox's PowerShell runs in Constrained Language mode (a seat's .NET calls fail there). A probe
+// that fails or times out reports false.
+export async function codexPowerShellConstrained(cwd, { run = (dir) => sandboxRun(null, dir, POWERSHELL_MODE_ARGS), platform = process.platform } = {}) {
+  if (platform !== 'win32') return false;
+  try {
+    const r = await run(cwd);
+    return r?.code === 0 && /ConstrainedLanguage/.test(String(r.text ?? ''));
+  } catch (err) {
+    process.stderr.write(`preflight: PowerShell language-mode probe failed: ${err.message}${String.fromCharCode(10)}`);
+    return false;
+  }
+}
+
+export const POWERSHELL_CONSTRAINED_WARNING = "the Codex seat's sandbox runs PowerShell in Constrained Language mode: .NET method calls such as [Math]::Min fail there; a seat should use plain cmdlets or python for arithmetic and text work";
+
 export function toolProbeWarnings(results, { home = homedir(), platform = process.platform } = {}) {
   const failed = Object.entries(results).filter(([, v]) => v?.ok === false);
   const lines = failed.map(([tool, { why, host }]) => {
     const inProfile = platform === 'win32' && host !== null && isInsidePath(host, home);
+    const needsCopy = platform === 'win32' && host !== null && (inProfile || /[\\/]winget[\\/]links[\\/]/i.test(String(host))) && !isInsidePath(host, 'C:\\Program Files\\ripgrep');
+    // A WinGet rg is a link into a Packages folder the sandbox account cannot read; a plain copy of the program runs.
+    const rgCopy = `New-Item -ItemType Directory -Force 'C:\\Program Files\\ripgrep' | Out-Null; Copy-Item -ErrorAction Stop '${String(host).replaceAll("'", "''")}' 'C:\\Program Files\\ripgrep\\rg.exe'`;
     const fix = host === null ? `${tool} is not on this host's PATH either: install it, or run the tests`
+      : tool === 'rg' && needsCopy ? `This host has it at ${host}; give the sandbox a plain copy: run once in an admin PowerShell ${rgCopy}, put C:\\Program Files\\ripgrep first in the system Path (System Properties, Environment Variables) and open a new terminal; or run the tests`
       : inProfile ? `This host has it under the user profile (${host}), which the Windows sandbox account cannot start: install it for all users, or put a copy under Program Files on PATH (the per-user one can stay first), or run the tests`
         : 'Run the tests';
-    return `the Codex seat's sandbox cannot run ${tool} (${why}); a seat that needs it reviews by reading only. ${fix} in preflight --exec and paste the result lines into the packet (every seat's brief holds the packet; a log outside the target may not be readable).`;
+    return `the Codex seat's sandbox cannot run ${tool} (${why}); a seat that needs it reviews by reading only.${tool === 'rg' ? ' Without rg the seat searches more slowly; this matters mostly on large targets.' : ''} ${fix} in preflight --exec and paste the result lines into the packet (every seat's brief holds the packet; a log outside the target may not be readable).`;
   });
   // Field runs: a seat with neither python nor rg made fewer claims; say so once, before Phase 1 is paid for.
   if (failed.length >= 2) lines.push(`the Codex seat can run none of ${failed.map(([t]) => t).join(', ')}: it will review by reading files only, so expect fewer claims from it. Give it executed evidence (preflight --exec result lines pasted into the packet), or move the seat to a host where these run, before phase1 --start.`);
@@ -1552,7 +1591,10 @@ async function packetPaths(text, baseDir) {
     const m = !t.includes('](') && /^(_{1,2})(.+)\1$/.exec(t);
     return m ? trimEnd(m[2]) : t;
   };
-  const wordsOf = (s) => s.split(/\s+/).map(trimWord);
+  // A "<name>" segment inside a path ("out/<cluster>/tables.json") is a placeholder: the word is neither found nor missing.
+  // An HTML tag after a file name ("a.md</td>", "a.md<sup>1</sup>", "a.md<br>") is not one.
+  const hasPlaceholder = (w) => /[\\/][^\\/\s<>]*(?<!\.[A-Za-z0-9]+)<(?!br\b)[^<>\s\\/]+>[^\\/\s<>]*(?=[\\/]|$)/i.test(w);
+  const wordsOf = (s) => s.split(/\s+/).filter((w) => !hasPlaceholder(w)).map(trimWord);
   const words = wordsOf(raw.replace(/`[^`\r\n]+`/g, ' ').replace(/<br\s*\/?>/gi, ' '));
   // True when the word named a path that exists or (with missingToo) a missing file.
   const look = async (word, quoted, missingToo = true) => {
@@ -1566,7 +1608,8 @@ async function packetPaths(text, baseDir) {
     return false;
   };
   // A backticked item that is neither (a command, "`<file> --all`") is read word by word like the rest.
-  for (const m of raw.matchAll(/`([^`\r\n]+)`/g)) if (!(await look(m[1].trim(), true))) words.push(...wordsOf(m[1]));
+  // One with a placeholder is read word by word too, so a real path beside it is still checked.
+  for (const m of raw.matchAll(/`([^`\r\n]+)`/g)) if (hasPlaceholder(m[1]) || !(await look(m[1].trim(), true))) words.push(...wordsOf(m[1]));
   // A bare word that is no existing path may hold one or more: "[a.log](C:\x\a.log)", "--log=C:\x\a.log",
   // "a.log,C:\x\b.log", "C:\x\a.md|C:\x\b.md"; it is a missing file only when none of its parts is a path.
   for (const word of words) {
@@ -1800,11 +1843,12 @@ function readCommandFile(file, flag) {
 // mismatch can name what changed (diffInventories of two of these); a changed file that is gone is "deleted".
 async function fingerprintFiles(cd) {
   // A build or test run in a plain folder writes caches; they are not a change to the code under review.
-  if (!(await isGitRepo(cd))) return { head: null, files: (await hashInventory(cd, { skipCaches: true })).files };
+  if (!(await isGitRepo(cd))) return { head: null, files: (await sourceInventory(cd)).files };
   const head = (await gitOut(['rev-parse', 'HEAD'], cd)).stdout.toString('utf8').trim();
   const [changed, untracked] = await gitOutAll([['diff', '--no-ext-diff', '--no-renames', '--name-only', '-z', '--relative', 'HEAD', '--', '.'], ['ls-files', '--others', '--exclude-standard', '-z']], cd);
   const files = {};
-  for (const entry of [...gitNames(changed.stdout), ...gitNames(untracked.stdout)]) {
+  const untrackedSource = gitNames(untracked.stdout).filter((e) => !isCachePath(e.text));
+  for (const entry of [...gitNames(changed.stdout), ...untrackedSource]) {
     if (entry.text.endsWith('/')) continue;
     files[entryKey(entry)] = await entrySha256(entryPath(cd, entry)).catch((err) => { if (err.code === 'ENOENT') return 'deleted'; throw err; });
   }
@@ -1813,7 +1857,9 @@ async function fingerprintFiles(cd) {
 
 // The files that differ between two fingerprintFiles records; a moved HEAD is named first.
 function driftedFiles(before, after) {
-  const files = diffInventories(before?.files ?? {}, after.files);
+  // The older record may hold untracked cache files the newer one leaves out; one of its cache keys counts only while the newer record still lists it (a tracked file).
+  const older = Object.fromEntries(Object.entries(before?.files ?? {}).filter(([key]) => !isCachePath(key) || Object.hasOwn(after.files ?? {}, key)));
+  const files = diffInventories(older, after.files ?? {});
   return before?.head && after.head && before.head !== after.head ? [`HEAD (${before.head.slice(0, 7)} -> ${after.head.slice(0, 7)})`, ...files] : files;
 }
 
@@ -1823,7 +1869,7 @@ async function computeFingerprint(cd) {
   const head = (await gitOut(['rev-parse', 'HEAD'], cd)).stdout.toString('utf8').trim();
   const diff = await gitOut([...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
   const untracked = await gitOut(['ls-files', '--others', '--exclude-standard', '-z'], cd);
-  const entries = gitNames(untracked.stdout).filter((e) => !e.text.endsWith('/')).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+  const entries = gitNames(untracked.stdout).filter((e) => !e.text.endsWith('/') && !isCachePath(e.text)).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
   const lines = [];
   for (const entry of entries) lines.push(`${entry.text}:${await entrySha256(entryPath(cd, entry))}`);
   return { head, diffSha256: sha256(diff.stdout), untrackedSha256: sha256(Buffer.from(lines.join('\n'))), snapshotHash };
@@ -1955,6 +2001,35 @@ async function runClaudeSessionProbe({ cdAbs, runDir }) {
 }
 
 const REVIEW_RULES_CAP = 8192;
+const NOT_IN_GIT_WARNING = 'is not in git (untracked), so it is not used: a change under review could have written it.';
+
+// WARNING lines for the evidence preflight: a REVIEW.md the second (--host) preflight would not use, or would refuse. Never throws.
+export async function reviewRulesEarlyWarnings(dirs) {
+  const lines = [];
+  try {
+    const warnings = [];
+    const head = await readReviewRules(dirs, 'head', warnings);
+    lines.push(...warnings.map((w) => `preflight: WARNING: ${w}`));
+    for (const f of head?.record.files.filter((x) => !x.used) ?? []) {
+      const file = path.join(f.dir, f.path);
+      lines.push(f.ref === 'not in git'
+        ? `preflight: WARNING: ${file} ${NOT_IN_GIT_WARNING} If it is your own rules file, commit it on the default branch (the base the review compares with), or pass --review-rules worktree to the second preflight (--host)${f.path === 'REVIEW.md' ? `, or approve this copy with review-run rules-write --repo ${f.dir} --approve-existing.` : '. review-run rules-write approves only the top-level REVIEW.md.'}`
+        : f.ref === 'not committed yet'
+          ? `preflight: WARNING: ${file} is not used by the second preflight (--host) in head mode (${f.ref}); --review-rules worktree reads the file on disk.`
+          : `preflight: WARNING: ${file} is not used by the second preflight (--host) in head mode (${f.ref}: ${f.ref === 'deleted in the working tree' ? 'the working tree deleted it' : 'the base of the branch has no REVIEW.md there'}).`);
+    }
+  } catch (err) {
+    lines.push(`preflight: WARNING: REVIEW.md could not be checked for the second preflight (--host): ${err.message}`);
+  }
+  try {
+    await readReviewRules(dirs, 'worktree');
+  } catch (err) {
+    lines.push(err instanceof RelayError && /the limit is/.test(err.message)
+      ? `preflight: WARNING: with --review-rules worktree the second preflight (--host) would refuse REVIEW.md: ${err.message}`
+      : `preflight: WARNING: REVIEW.md could not be read from the working tree: ${err.message}`);
+  }
+  return lines;
+}
 
 // Lines with a claim-shaped label (P, A, B, X or Y plus digits) the review would rewrite or refuse: only "<declared
 // checklist>-P1" is exempt, as in blind-relabel.
@@ -1965,12 +2040,35 @@ export function peerLabelLines(text, checklists = []) {
   return text.split('\n').filter((l) => /\b[ABPXY]\d+\b/.test(masked ? l.replace(masked, '') : l));
 }
 
+// The packet header's Profile line (before the first "## " heading) ("Profile: Code", "**Profile:** Document. Target: ..."): its text before "Target:", or null when there is none or it is empty.
+export function packetProfile(text) {
+  const all = String(text ?? '');
+  const body = /^## /m.exec(all);
+  const m = /^\W*Profile\W*:[ \t*_]*(.*)$/im.exec(body === null ? all : all.slice(0, body.index));
+  if (m === null) return null;
+  return m[1].split(/target:/i)[0].trim().replace(/[.\s]+$/, '') || null;
+}
+
+// null (no Profile line) reads as a code review.
+export function isCodeProfile(profile) {
+  return profile === null || /\bcode\b/i.test(profile);
+}
+
 // Each repository's REVIEW.md. head: the copy at the merge-base with origin/HEAD (so a branch cannot rewrite its own rules), or
 // HEAD when no default branch resolves (baseUnknown); worktree: the file on disk; plain folders from disk. A file is "changed"
 // when the branch (since the merge-base) or the working tree changed it; a file only the change added is not used in head mode.
-export async function readReviewRules(dirs, mode = 'head') {
+// A disk copy whose bytes hash to an entry approved for its path (review-run rules-write) is used in head mode; `warnings` collects a bad approvals file.
+export async function readReviewRules(dirs, mode = 'head', warnings = []) {
   const files = [];
   let baseUnknown = false;
+  let approvals = [];
+  if (mode === 'head') {
+    try {
+      approvals = await readApprovedRules(approvedRulesFile(process.env));
+    } catch (err) {
+      warnings.push(`the approved REVIEW.md copies file could not be read, so no copy is approved: ${err.message}`);
+    }
+  }
   const decode = (buf) => buf.toString('utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
   const line = async (args, dir) => {
     const r = await runCapture('git', args, dir);
@@ -1998,15 +2096,24 @@ export async function readReviewRules(dirs, mode = 'head') {
       const atRef = await runCapture('git', ['show', `${ref}:${rel}`], dir);
       const disk = await readFile(path.join(top, rel)).catch(() => null);
       const bytes = mode === 'worktree' ? disk : atRef.code === 0 ? atRef.stdout : null;
-      const changed = (await runCapture('git', ['diff', '--quiet', ref, '--', spec], dir)).code !== 0 || (atRef.code !== 0 && disk !== null);
+      const gitDiffers = (await runCapture('git', ['diff', '--quiet', ref, '--', spec], dir)).code !== 0;
+      const changed = gitDiffers || (atRef.code !== 0 && disk !== null);
+      const approved = mode === 'head' && disk !== null && (atRef.code !== 0 || gitDiffers)
+        ? approvals.find((e) => comparablePath(e.path) === comparablePath(path.join(top, rel)) && e.sha256 === sha256(disk))
+        : undefined;
+      if (approved) {
+        files.push({ dir: top, path: rel, ref: 'approved copy', text: decode(disk), changed: true, used: true, ...(approved.at ? { at: approved.at } : {}) });
+        continue;
+      }
       if (bytes === null) {
         // A REVIEW.md that cannot be used is named in the warning with why: the change added it, the working tree deleted
-        // it, or the repository has no commit yet. It never becomes rules.
-        const why = disk === null && atRef.code === 0 ? 'deleted in the working tree' : short === null ? 'not committed yet' : 'added by the change';
+        // it, the repository has no commit yet, or git does not track it. It never becomes rules.
+        const untracked = disk !== null && short !== null && (await runCapture('git', ['ls-files', '--error-unmatch', '--', spec], dir)).code !== 0;
+        const why = disk === null && atRef.code === 0 ? 'deleted in the working tree' : short === null ? 'not committed yet' : untracked ? 'not in git' : 'added by the change';
         if (changed && (disk !== null || (await runCapture('git', ['cat-file', '-e', `HEAD:${rel}`], dir)).code === 0)) files.push({ dir: top, path: rel, ref: why, text: '', changed: true, used: false });
         continue;
       }
-      files.push({ dir: top, path: rel, ref: mode === 'worktree' ? 'working tree' : `${base ? 'merge-base' : 'HEAD'} ${short}`, text: decode(bytes), changed, used: true });
+      files.push({ dir: top, path: rel, ref: mode === 'worktree' ? 'working tree' : `${base ? 'merge-base' : 'HEAD'} ${short}`, text: decode(bytes), changed, used: true, edited: mode === 'head' && atRef.code === 0 && disk !== null && gitDiffers });
     }
   }
   if (files.length === 0) return null;
@@ -2022,7 +2129,7 @@ export async function readReviewRules(dirs, mode = 'head') {
     record: {
       mode, sha256: text === null ? null : sha256(Buffer.from(text, 'utf8')), changedByTarget: files.some((f) => f.changed),
       ...(mode === 'head' && baseUnknown ? { baseUnknown: true } : {}),
-      files: files.map((f) => ({ dir: f.dir, path: f.path, ref: f.ref, changed: f.changed, used: f.used })),
+      files: files.map((f) => ({ dir: f.dir, path: f.path, ref: f.ref, changed: f.changed, used: f.used, ...(f.at ? { at: f.at } : {}), ...(f.edited ? { edited: true } : {}) })),
     },
   };
 }
@@ -2091,6 +2198,7 @@ async function hostPreflight(args) {
   // Skipped with --skip-codex-doctor: on a Codex host a nested codex command is blocked, as for doctor.
   const seatTools = codexCli && !args.skipCodexDoctor ? await codexToolProbe(cdAbs) : null;
   for (const w of toolProbeWarnings(seatTools ?? {})) process.stderr.write(`preflight: WARNING: ${w}${String.fromCharCode(10)}`);
+  if (seatTools && Object.values(seatTools).some((v) => v?.ok) && await codexPowerShellConstrained(cdAbs))process.stderr.write(`preflight: WARNING: ${POWERSHELL_CONSTRAINED_WARNING}${String.fromCharCode(10)}`);
   const actorsAll = [seats.seatA, seats.seatB, seats.auditor, ...(Array.isArray(seats.verifiers) ? seats.verifiers : [])];
   if (args.probeReach) {
     if (!actorsAll.some((a) => a?.runtime === 'codex' && a?.transport !== 'native')) throw new RelayError('--probe-reach checks what a Codex CLI seat can reach, and no actor runs on the Codex CLI; nothing was run');
@@ -2119,7 +2227,15 @@ async function hostPreflight(args) {
   const onlyDirs = args.reviewRulesOnly.map((d) => comparablePath(path.resolve(d)));
   const unknownOnly = args.reviewRulesOnly.filter((d, i) => !ruleDirs.some((dir) => comparablePath(dir) === onlyDirs[i]));
   if (unknownOnly.length > 0) throw new RelayError(`--review-rules-only ${unknownOnly.join(', ')} is not --cd or a --repo of this run; nothing was written`);
-  const rules = await readReviewRules(onlyDirs.length === 0 ? ruleDirs : ruleDirs.filter((dir) => onlyDirs.includes(comparablePath(dir))), args.reviewRules ?? 'head');
+  const packetText = await readFile(path.join(runDir, 'task-packet.md'), 'utf8').catch(() => '');
+  const nl = String.fromCharCode(10);
+  const profile = packetProfile(packetText);
+  const skipRules = !isCodeProfile(profile);
+  if (skipRules) process.stderr.write(`preflight: REVIEW.md not read: the packet's profile is ${profile}; REVIEW.md rules are for code reviews${nl}`);
+  else if (packetText && profile === null) process.stderr.write(`preflight: WARNING: the task packet has no Profile line, so REVIEW.md was read as for a code review${nl}`);
+  const rulesWarnings = [];
+  const rules = skipRules ? null : await readReviewRules(onlyDirs.length === 0 ? ruleDirs : ruleDirs.filter((dir) => onlyDirs.includes(comparablePath(dir))), args.reviewRules ?? 'head', rulesWarnings);
+  for (const w of rulesWarnings) process.stderr.write(`preflight: WARNING: ${w}${nl}`);
   // Every audit re-checks every claim: a seats file from an older review-config may still name a depth.
   if (seats.flags && Object.hasOwn(seats.flags, 'auditDepth')) throw new RelayError(`${args.seats}: flags.auditDepth is not a setting; every audit re-checks every claim. Write the seats file again with review-config seats, or delete the key; nothing was written`);
   const descriptor = {
@@ -2197,16 +2313,23 @@ async function hostPreflight(args) {
   if (seatTools) await writeFile(path.join(runDir, 'seat-tools.json'), `${JSON.stringify(seatTools, null, 2)}\n`, 'utf8');
   if (rules) {
     if (rules.text) await writeFile(path.join(runDir, 'review-rules.md'), rules.text, 'utf8');
-    const nl = String.fromCharCode(10);
     for (const f of rules.record.files.filter((x) => x.changed)) {
+      const approve = f.path === 'REVIEW.md' ? `or approve this copy with review-run rules-write --repo ${f.dir} --approve-existing` : 'review-run rules-write approves only the top-level REVIEW.md';
+      if (f.ref === 'not in git') {
+        process.stderr.write(`preflight: WARNING: ${path.join(f.dir, f.path)} ${NOT_IN_GIT_WARNING} If it is your own rules file, commit it on the default branch (the base the review compares with), or start a new run folder and pass --review-rules worktree (this run.json is already written), ${approve}.${nl}`);
+        continue;
+      }
+      if (f.ref === 'approved copy') {
+        process.stderr.write(`preflight: ${path.join(f.dir, f.path)}: the seats get the working-tree copy approved with review-run rules-write (${f.at ?? 'no time recorded'})${nl}`);
+        continue;
+      }
       const used = !f.used ? `it is not used (${f.ref}: ${{ 'deleted in the working tree': 'the working tree deleted it', 'not committed yet': 'the repository has no commit yet; --review-rules worktree reads the file on disk' }[f.ref] ?? 'the base of the branch has no REVIEW.md there'})` : rules.record.mode === 'head' ? `the seats get the copy at the ${rules.record.baseUnknown ? 'branch tip (HEAD)' : 'merge-base with the default branch'}` : 'the seats get the working-tree copy';
-      process.stderr.write(`preflight: WARNING: ${path.join(f.dir, f.path)} was changed by the working tree or the branch under review; ${used}${nl}`);
+      process.stderr.write(`preflight: WARNING: ${path.join(f.dir, f.path)} was changed by the working tree or the branch under review; ${used}${f.edited ? `, ${approve}` : ''}${nl}`);
     }
     for (const l of peerLabelLines(rules.text ?? '', descriptor.flags.checklists ?? [])) process.stderr.write(`preflight: WARNING: REVIEW.md line "${l.slice(0, 120)}" holds a label like P1 or A2 (one of the letters P, A, B, X or Y followed by digits), which the review reads as a claim label and refuses when a seat or the auditor repeats it; write it as <name>-P1 and list <name> in the seats file's flags.checklists${nl}`);
     if (rules.record.baseUnknown && rules.text) process.stderr.write(`preflight: WARNING: no default branch (origin/HEAD) to compare with, so REVIEW.md was read at HEAD and a branch commit that changed it cannot be detected; run "git remote set-head origin --auto" if the repository has a remote${nl}`);
   }
   // The seats copy the packet's own tags and names into their files; a P<n> among them stops the audit as a peer label.
-  const packetText = await readFile(path.join(runDir, 'task-packet.md'), 'utf8').catch(() => '');
   // build-brief refuses such a packet at phase1 --start; imported here so a skill folder missing it reaches the refusal above.
   const namesRun = packetText ? (await import('./build-brief.mjs')).runDirNamedIn(packetText, runDir, cdAbs) : null;
   if (namesRun) process.stderr.write(`preflight: WARNING: the task packet names this run folder (${namesRun}); "review-run phase1 --start" will refuse it. Keep the evidence folder (preflight --out logs) outside the run folder and cite it from there${String.fromCharCode(10)}`);
@@ -2304,8 +2427,12 @@ async function main() {
         );
       }
     }
+    const ruleNotes = await reviewRulesEarlyWarnings([path.resolve(args.cd), ...(args.repos ?? []).map((r) => path.resolve(r))]);
+    if (ruleNotes.length > 0) ruleNotes.push('preflight: note: REVIEW.md is read for code reviews only; ignore the REVIEW.md warnings above for a document or design review.');
+    notes.push(...ruleNotes);
     const text = JSON.stringify(result, null, 2) + '\n';
     if (args.out) {
+      await mkdir(path.dirname(path.resolve(args.out)), { recursive: true });
       await writeFile(args.out, text, 'utf8');
       // With --out stdout is plain lines, so the notes go there: on stderr PowerShell 5.1 shows them as an error at exit 0.
       process.stdout.write([summaryLine(result, args.out), ...notes].map((l) => `${l}\n`).join(''));
@@ -2343,4 +2470,4 @@ if (isDirectRun) {
   });
 }
 
-export { stopOnSignal, assertNodeVersion, resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, fingerprintFiles, driftedFiles, pluginCopyDrift, copyDriftWarning, packetReach, hostPreflight, parseArgs, runTier1, runTier2, runWithTimeout, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };
+export { stopOnSignal, assertNodeVersion, resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, fingerprintFiles, driftedFiles, pluginCopyDrift, copyDriftWarning, packetReach, hostPreflight, parseArgs, runTier1, runTier2, runWithTimeout, computeSnapshotHash, snapshotMatches, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };

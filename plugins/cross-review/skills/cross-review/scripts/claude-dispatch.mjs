@@ -11,7 +11,7 @@ import { hashWriteInventory, diffInventories, DEPENDENCIES_NOTE } from './snapsh
 import { setupIsolatedWorktree } from './worktree-utils.mjs';
 import { createDetachHandlers, retryDeadline, processStartToken } from './detach-utils.mjs';
 import { RunDescriptorError, readRunDescriptor } from './run-descriptor.mjs';
-import { computeSnapshotHash } from './preflight.mjs';
+import { snapshotMatches } from './preflight.mjs';
 import { spawnCli, killTree as killTreeShared, completedRunRefusal, preserveEarlierResult, writeFinalMessage, answerGraceMs, atomicWriteJson } from './spawn-utils.mjs';
 import { runCli, installSignalForwarding as installSignalForwardingShared } from './cli-run.mjs';
 import { GIT_C_LOCALE, gitRepoFromProbe, isMainModule, pathSpellingsOf } from './path-utils.mjs';
@@ -339,7 +339,7 @@ async function dispatch(argv, { worker = null } = {}) {
         throw error;
       }
       const recorded = desc.fingerprint?.snapshotHash;
-      if (recorded && (await computeSnapshotHash(target)) !== recorded) {
+      if (recorded && !(await snapshotMatches(target, recorded))) {
         throw new RelayError('the target no longer matches the fingerprint recorded for Phase 1 (HEAD, diff or untracked files changed); refusing to build a worktree for a changed target');
       }
       // A verifier started by hand with --run-dir and no environment option gets the auditor's run.json settings.

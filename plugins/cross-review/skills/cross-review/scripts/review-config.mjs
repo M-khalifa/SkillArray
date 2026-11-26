@@ -26,6 +26,24 @@ export function checklistDir(env = process.env, home = os.homedir()) {
   return path.join(path.dirname(configPath(SKILLS[0], env, home)), 'checklists');
 }
 
+// REVIEW.md copies the user approved with `review-run rules-write`: {"version":1,"approved":[{"path","sha256","at"}]}, outside every repository.
+export function approvedRulesFile(env = process.env, home = os.homedir()) {
+  return path.join(path.dirname(configPath(SKILLS[0], env, home)), 'review-rules-approved.json');
+}
+
+// The approved entries; none when the file is missing. A file that does not parse throws, so the caller can warn.
+export async function readApprovedRules(file = approvedRulesFile()) {
+  let text;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const doc = JSON.parse(text.replace(/^\uFEFF/, ''));
+  return Array.isArray(doc?.approved) ? doc.approved.filter((e) => typeof e?.path === 'string' && typeof e?.sha256 === 'string') : [];
+}
+
 const CHECKLIST_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
 
 export async function listChecklists(dir) {
@@ -276,7 +294,7 @@ async function main() {
   if (command === '--help') {
     process.stdout.write('review-config.mjs show|catalog|setup|resolve|seats|checklists|reset\n' +
       'checklists [--name NAME]: lists your own bug checklists (<config dir>/checklists/NAME.md, one "- item" per line, never in the repository), or prints one so its items can go into the task packet as hypotheses.\n' +
-      'seats: --host claude-code|codex [--transport native|cli] [--repo-only] [--falsification] [--auditor MODEL [--auditor-effort LEVEL]] [--env ROLE=NAME,NAME] [--env-mode ROLE=filtered|inherit] [--use-api-key ROLE] [--out FILE [--replace]] [--a MODEL --b MODEL --mode MODE, and the other resolve overrides, for this run only]: prints (or writes) the seats file preflight --host reads, built from the saved choices.\n' +
+      'seats: --host claude-code|codex [--transport native|cli] [--repo-only] [--falsification] [--auditor MODEL [--auditor-effort LEVEL]] [--env ROLE=NAME,NAME] [--env-mode ROLE=filtered|inherit] [--use-api-key ROLE] [--out FILE [--replace]] [--a MODEL --b MODEL --a-effort LEVEL --b-effort LEVEL --mode MODE, and the other resolve overrides, for this run only]: prints (or writes) the seats file preflight --host reads, built from the saved choices.\n' +
       'setup/resolve: --a-provider PROVIDER --a-runtime RUNTIME --a MODEL [--a-effort LEVEL] (same for B) [--mode MODE]\n' +
       'setup saves; resolve overrides for one run without saving; reset removes only this skill config.\n');
     return;
@@ -327,6 +345,7 @@ async function main() {
     if (options.out) {
       try {
         // --replace: switching a seat's transport before preflight; run.json keeps its own copy, so a run already started is unchanged.
+        await fs.mkdir(path.dirname(path.resolve(options.out)), { recursive: true });
         await fs.writeFile(path.resolve(options.out), text, { flag: options.replace === true ? 'w' : 'wx' });
       } catch (err) {
         if (err.code === 'EEXIST') throw new Error(`${path.resolve(options.out)} already exists: choose a new --out path, or add --replace to overwrite it`);

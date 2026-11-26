@@ -207,8 +207,8 @@ test('catalog command exposes current OpenAI tiers and Fable', () => {
   assert.equal(result.status, 0, result.stderr);
   const value = JSON.parse(result.stdout);
   assert.deepEqual(value.providers.openai.models.map((model) => model.id), [
-    'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
-    'gpt-5.5',
+    'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna',
+    'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
   ]);
   assert.ok(value.providers.anthropic.models.some((model) => model.id === 'fable'));
 });
@@ -270,7 +270,8 @@ test('seats CLI: --host is required, an output file is never overwritten, and th
   const noHost = run('seats');
   assert.notEqual(noHost.status, 0);
   assert.match(noHost.stderr, /seats needs --host/);
-  const out = path.join(dir, 'seats.json');
+  // Field feedback: --out into a folder that does not exist yet creates it.
+  const out = path.join(dir, 'work-missing', 'seats.json');
   const written = run('seats', '--host', 'claude-code', '--out', out);
   assert.equal(written.status, 0, written.stderr);
   const seats = JSON.parse(await fs.readFile(out, 'utf8'));

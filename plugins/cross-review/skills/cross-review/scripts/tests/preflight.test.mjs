@@ -10,8 +10,9 @@ import { platform as osPlatform } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import {
   assertNodeVersion, parseArgs, runTier1, runTier2, computeSnapshotHash, checkStale, run, RelayError, repoFreshness, freshnessWarnings, findReviewArtifacts, summaryLine,
-  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs, claudeProjectsWritable,
+  jobLeftovers, stopLeftovers, runWithTimeout, codexToolProbe, codexPowerShellConstrained, POWERSHELL_CONSTRAINED_WARNING, toolProbeWarnings, outsideReadWarning, changeSizeWarning, copyTarget, hostToolPath, sandboxArgs, claudeProjectsWritable,
 } from '../preflight.mjs';
+import { jobSpawn, readJobReport } from '../spawn-utils.mjs';
 
 function git(args, cwd) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -190,8 +191,11 @@ test('run(): --source-snapshot records a plain export\'s stated repo and ref wit
   assert.equal(cli.status, 0, cli.stderr);
   assert.match(cli.stderr, /WARNING: .* holds 3 Python or Gradle cache item\(s\) \(\.pytest_cache\/, pkg\/__pycache__\/, stray\.pyc\); left out of its snapshotHash/);
   // With --out stdout is plain lines, so the note goes there (PowerShell 5.1 shows any stderr line as an error).
-  const withOut = spawnSync(process.execPath, [fileURLToPath(new URL('../preflight.mjs', import.meta.url)), '--cd', target, '--source-snapshot', `${snap}=org/svc@1a2b3c4`, '--out', path.join(target, '..', 'pf-out.json')], { encoding: 'utf8' });
+  // Field feedback: --out into a folder that does not exist yet creates it.
+  const outFile = path.join(target, '..', 'evidence-missing', 'pf-out.json');
+  const withOut = spawnSync(process.execPath, [fileURLToPath(new URL('../preflight.mjs', import.meta.url)), '--cd', target, '--source-snapshot', `${snap}=org/svc@1a2b3c4`, '--out', outFile], { encoding: 'utf8' });
   assert.equal(withOut.status, 0, withOut.stderr);
+  assert.equal(JSON.parse(await readFile(outFile, 'utf8')).sourceSnapshots.length, 1);
   assert.match(withOut.stdout, /^preflight: wrote .*\npreflight: WARNING: .* holds 3 Python or Gradle cache item\(s\)/);
   assert.equal(withOut.stderr, '');
   assert.throws(() => parseArgs(['--cd', target, '--source-snapshot', `${snap}=org/svc`]), /must look like <folder>=<repo>@<commit or tag>/);
@@ -970,6 +974,74 @@ test('Mac round 4 F5: for a subfolder target, status and the summary line count 
   assert.match(summaryLine({ snapshotHash: 'h', tier1 }, 'out.json'), /; 1 changed file\(s\) \(1 untracked: new\.txt\); no Tier 2 command$/);
 });
 
+test('job wrapper: a process that exits by itself shortly after the command is not reported as left running [slow]', { skip: process.platform !== 'win32' && 'Windows job wrapper' }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'job-settle-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'start-short-lived.mjs');
+  await writeFile(script, `import { spawn } from 'node:child_process';
+spawn(process.execPath, ['-e', 'setTimeout(() => {}, 400)'], { detached: true, stdio: 'ignore' }).unref();
+`);
+  const { child, dir: jobDir } = jobSpawn(`"${process.execPath}" "${script}"`, { cwd: dir });
+  t.after(() => rm(jobDir, { recursive: true, force: true }));
+  const code = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(code, 0);
+  assert.deepEqual(readJobReport(path.join(jobDir, 'job.txt')), { left: [] });
+});
+
+test('job wrapper: the report says the command ended before the leftover check finishes, then names the leftover [slow]', { skip: process.platform !== 'win32' && 'Windows job wrapper' }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'job-exit-first-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'start-leftover.mjs');
+  await writeFile(script, `import { spawn } from 'node:child_process';
+spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'ignore' }).unref();
+process.exitCode = 3;
+`);
+  const { child, dir: jobDir } = jobSpawn(`"${process.execPath}" "${script}"`, { cwd: dir });
+  t.after(() => rm(jobDir, { recursive: true, force: true }));
+  const report = path.join(jobDir, 'job.txt');
+  const seen = [];
+  const poll = setInterval(() => { const r = readJobReport(report); if (!r.unreadable && JSON.stringify(seen.at(-1)) !== JSON.stringify(r)) seen.push(r); }, 10);
+  const code = await new Promise((resolve) => child.on('close', resolve));
+  clearInterval(poll);
+  assert.equal(code, 3);
+  const final = readJobReport(report);
+  assert.equal(final.left?.length, 1, 'the 30 s child is a real leftover');
+  assert.deepEqual(seen[0], { exited: 3 }, 'the command\'s exit code is in the report while the wrapper still checks for leftovers');
+});
+
+test('job report: "exit <code>" means the leftover check is not done; afterJobSettles waits once for it, else runs now', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'job-settle-unit-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const report = path.join(dir, 'job.txt');
+  const { afterJobSettles } = await import('../spawn-utils.mjs');
+  const logged = [];
+  await writeFile(report, 'exit 0');
+  assert.deepEqual(readJobReport(report), { exited: 0 });
+  assert.equal(jobLeftovers(report, { log: (m) => logged.push(m) }), null, 'a wrapper killed between its two writes: the scan runs');
+  assert.match(logged.at(-1), /ended before it checked for leftover processes/);
+  const ran = [];
+  const set = (fn, ms) => { ran.push(`deferred ${ms}`); return 'timer'; };
+  assert.equal(afterJobSettles(report, () => ran.push('now'), { set, ms: 3000 }), 'timer');
+  assert.deepEqual(ran, ['deferred 3000'], 'the command ended: the kill waits for the wrapper');
+  await writeFile(report, '');
+  ran.length = 0;
+  assert.equal(afterJobSettles(report, () => ran.push('now'), { set, ms: 3000 }), 'timer');
+  assert.deepEqual(ran, ['deferred 3000'], 'an empty report is the rewrite after "exit": wait');
+  for (const text of ['left 7', 'nojob CreateJobObject failed: 5']) {
+    await writeFile(report, text);
+    ran.length = 0;
+    assert.equal(afterJobSettles(report, () => ran.push('now'), { set }), null);
+    assert.deepEqual(ran, ['now'], `report "${text}": no wait`);
+  }
+  ran.length = 0;
+  assert.equal(afterJobSettles(null, () => ran.push('now'), { set }), null, 'no job (POSIX): no wait');
+  assert.deepEqual(ran, ['now']);
+  await writeFile(report, 'exi');
+  assert.match(readJobReport(report).unreadable, /unexpected report text/, 'a partly written report is unreadable, not a refused job');
+  await writeFile(report, '');
+  assert.ok(readJobReport(report).unreadable);
+});
+
 test('round 5: the job report gives the leftover pids; without a usable job the parent-chain scan runs and stops only the command\'s tree', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'job-report-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -1034,6 +1106,76 @@ test('field run: on a plain folder the drift check ignores Python and Gradle cac
   assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), []);
   await writeFile(path.join(dir, 'new.py'), 'x');
   assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), ['new.py']);
+});
+
+test('driftedFiles: cache files in an older fingerprint record are not drift, a source change still is', async () => {
+  const { driftedFiles } = await import('../preflight.mjs');
+  const before = { head: null, files: { 'a.py': 'h1', '__pycache__/a.pyc': 'h2', 'm.pyc': 'h3' } };
+  assert.deepEqual(driftedFiles(before, { head: null, files: { 'a.py': 'h1' } }), []);
+  assert.deepEqual(driftedFiles(before, { head: null, files: { 'a.py': 'h9' } }), ['a.py']);
+});
+
+test('driftedFiles: a tracked cache file that changed is named, an untracked new cache file is not [slow]', async (t) => {
+  const { fingerprintFiles, driftedFiles } = await import('../preflight.mjs');
+  const dir = await makeGitRepo(t);
+  await writeFile(path.join(dir, 'a.pyc'), 'v1', 'utf8');
+  git(['add', 'a.pyc'], dir);
+  git(['commit', '-q', '-m', 'pyc'], dir);
+  const before = await fingerprintFiles(dir);
+  await mkdir(path.join(dir, '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, '__pycache__', 'new.cpython-311.pyc'), 'x', 'utf8');
+  assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), []);
+  await writeFile(path.join(dir, 'a.pyc'), 'v2', 'utf8');
+  assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), ['a.pyc']);
+});
+
+test('driftedFiles table: tracked and untracked cache files across record time and change [slow]', async (t) => {
+  const { fingerprintFiles, driftedFiles } = await import('../preflight.mjs');
+  const w = (dir, rel, text) => mkdir(path.dirname(path.join(dir, rel)), { recursive: true }).then(() => writeFile(path.join(dir, rel), text, 'utf8'));
+  const oldStyle = (rec, extra = {}) => ({ ...rec, files: { ...rec.files, ...extra } });
+  const rows = [
+    ['tracked dirty at record, unchanged', async (d) => w(d, 'a.pyc', 'v2'), async () => {}, null, []],
+    ['tracked dirty at record, changed again', async (d) => w(d, 'a.pyc', 'v2'), async (d) => w(d, 'a.pyc', 'v3'), null, ['a.pyc']],
+    ['tracked clean at record, changed', async () => {}, async (d) => w(d, 'a.pyc', 'v2'), null, ['a.pyc']],
+    ['tracked dirty at record, restored (known residual: not named; the snapshot hash still differs)', async (d) => w(d, 'a.pyc', 'v2'), async (d) => git(['checkout', '--', 'a.pyc'], d), null, []],
+    ['untracked new cache after record', async () => {}, async (d) => w(d, '__pycache__/n.cpython-311.pyc', 'x'), null, []],
+    ['untracked cache at record, changed after', async (d) => w(d, '__pycache__/n.cpython-311.pyc', 'x'), async (d) => w(d, '__pycache__/n.cpython-311.pyc', 'y'), null, []],
+    ['old record holding an untracked cache key', async () => {}, async () => {}, (rec) => oldStyle(rec, { 'pkg/__pycache__/m.pyc': 'h' }), []],
+    ['source file changed next to an untracked cache key in an old record',async () => {}, async (d) => w(d, 'src.py', 'x'), (rec) => oldStyle(rec, { 'pkg/__pycache__/m.pyc': 'h' }), ['src.py']],
+  ];
+  for (const [name, atRecord, after, transform, want] of rows) {
+    const dir = await makeGitRepo(t);
+    await w(dir, 'a.pyc', 'v1');
+    git(['add', 'a.pyc'], dir);
+    git(['commit', '-q', '-m', 'pyc'], dir);
+    await atRecord(dir);
+    const rec = await fingerprintFiles(dir);
+    await after(dir);
+    assert.deepEqual(driftedFiles(transform ? transform(rec) : rec, await fingerprintFiles(dir)), want, name);
+  }
+});
+
+test('snapshotMatches: a hash recorded without the cache filter still matches a git target and a plain folder, and a real change does not', async (t) => {
+  const { snapshotMatches } = await import('../preflight.mjs');
+  const dir = await makeGitRepo(t);
+  await mkdir(path.join(dir, '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, '__pycache__', 'm.cpython-311.pyc'), 'x');
+  const legacy = await computeSnapshotHash(dir, null, { legacy: true });
+  assert.notEqual(legacy, await computeSnapshotHash(dir), 'the filter changes the hash');
+  assert.equal(await snapshotMatches(dir, legacy), true);
+  assert.equal(await snapshotMatches(dir, await computeSnapshotHash(dir)), true);
+  await writeFile(path.join(dir, 'a.txt'), 'edited\n');
+  assert.equal(await snapshotMatches(dir, legacy), false);
+  const plain = await mkdtemp(path.join(tmpdir(), 'snapshot-plain-'));
+  t.after(() => rm(plain, { recursive: true, force: true }));
+  await writeFile(path.join(plain, 'main.py'), 'print(1)');
+  await mkdir(path.join(plain, '__pycache__'), { recursive: true });
+  await writeFile(path.join(plain, '__pycache__', 'main.cpython-311.pyc'), 'x');
+  const plainLegacy = await computeSnapshotHash(plain, null, { legacy: true });
+  assert.notEqual(plainLegacy, await computeSnapshotHash(plain));
+  assert.equal(await snapshotMatches(plain, plainLegacy), true);
+  await writeFile(path.join(plain, 'main.py'), 'print(2)');
+  assert.equal(await snapshotMatches(plain, plainLegacy), false);
 });
 
 test('changeSizeWarning: a change over 500 files or 8,000 lines suggests scoped runs; at or under both, nothing', () => {
@@ -1112,6 +1254,25 @@ test('field feedback S2: the Codex seat tool probe names a tool the sandbox cann
   assert.equal(warnings.length, 3);
   assert.match(warnings[2], /can run none of python, rg: it will review by reading files only, so expect fewer claims/);
   assert.equal(toolProbeWarnings({ python: result.python, git: result.git }, { home, platform: 'win32' }).length, 1, 'one missing tool gets no summary line');
+  // Field runs: a WinGet rg (a link into a folder the sandbox cannot read) gets a ready copy command, on Windows only.
+  const wingetRg = path.join(home, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links', 'rg.exe');
+  const linked = { rg: { ok: false, why: "Program 'rg.exe' failed to run: No application is associated with the specified file for this operation", host: wingetRg } };
+  const [rgLine] = toolProbeWarnings(linked, { home, platform: 'win32' });
+  assert.ok(rgLine.includes(`Copy-Item -ErrorAction Stop '${wingetRg}' 'C:\\Program Files\\ripgrep\\rg.exe'`), rgLine);
+  // An rg already in the copy target (or outside the profile, like a Chocolatey shim) gets no copy command.
+  for (const host of ['C:\\Program Files\\ripgrep\\rg.exe', 'C:\\ProgramData\\chocolatey\\bin\\rg.exe']) {
+    assert.doesNotMatch(toolProbeWarnings({ rg: { ...linked.rg, host } }, { home, platform: 'win32' })[0], /Copy-Item/, host);
+  }
+  assert.match(rgLine, /put C:\\Program Files\\ripgrep first in the system Path .* open a new terminal; or run the tests in preflight --exec/);
+  assert.doesNotMatch(rgLine, /SetEnvironmentVariable|setx/, 'the command never rewrites PATH');
+  const quoted = toolProbeWarnings({ rg: { ...linked.rg, host: path.join(home, "O'Neil", 'rg.exe') } }, { home, platform: 'win32' })[0];
+  assert.ok(quoted.includes(`Copy-Item -ErrorAction Stop '${path.join(home, "O''Neil", 'rg.exe')}'`), quoted);
+  assert.doesNotMatch(toolProbeWarnings(linked, { home, platform: 'linux' })[0], /Copy-Item/);
+  // Only the rg line says searching is slower without it.
+  const slower = /reading only\. Without rg the seat searches more slowly; this matters mostly on large targets\. /;
+  assert.match(rgLine, slower);
+  assert.match(toolProbeWarnings({ rg: { ok: false, why: 'x', host: null } }, { home, platform: 'win32' })[0], slower);
+  assert.doesNotMatch(toolProbeWarnings({ python: result.python }, { home, platform: 'win32' })[0], /searches more slowly/);
   const outside = ['/x/a.log', '/x/b.log', '/x/c.log'];
   assert.match(outsideReadWarning(outside, { platform: 'win32' }), /names 3 path\(s\) outside the target \(\/x\/a\.log, \/x\/b\.log, \.\.\.\)/);
   assert.ok(outsideReadWarning(outside, { platform: 'linux' }));
@@ -1128,6 +1289,23 @@ test('field feedback S2: the Codex seat tool probe names a tool the sandbox cann
   assert.match(missing.rg.why, /^rg : The term 'rg' is not recognized as the name of a cmdlet/);
   assert.equal(hostToolPath('tool', { env: { PATH: ['/a', '/b'].join(path.delimiter) }, platform: 'linux', exists: (p) => p === path.join('/b', 'tool') }), path.join('/b', 'tool'));
   assert.equal(hostToolPath('tool', { env: { PATH: '/a' }, platform: 'linux', exists: () => false }), null);
+});
+
+test('the Codex sandbox PowerShell language mode probe warns only on ConstrainedLanguage, only on Windows, and never fails on a probe error', async () => {
+  let calls = 0;
+  const reply = (r) => async () => { calls += 1; return r; };
+  const win = (run) => codexPowerShellConstrained('C:\\t', { platform: 'win32', run });
+  assert.equal(await win(reply({ code: 0, text: 'ConstrainedLanguage\r\n' })), true);
+  assert.equal(await win(reply({ code: 0, text: 'FullLanguage\r\n' })), false);
+  assert.equal(await win(reply({ code: null, text: 'did not finish within 30 s' })), false);
+  assert.equal(await win(reply({ code: 1, text: 'ConstrainedLanguage' })), false);
+  assert.equal(await win(async () => { throw new Error('spawn failed'); }), false);
+  const before = calls;
+  assert.equal(await codexPowerShellConstrained('/t', { platform: 'linux', run: reply({ code: 0, text: 'ConstrainedLanguage' }) }), false);
+  assert.equal(calls, before, 'not run off Windows');
+  assert.match(POWERSHELL_CONSTRAINED_WARNING, /Constrained Language mode.*\[Math\]::Min/);
+  const dubious = await codexToolProbe('C:\\t', { tools: ['git'], run: async () => ({ code: 128, text: 'warning: first line\nfatal: detected dubious ownership in repository at C:/t\nmore' }), where: () => null });
+  assert.match(dubious.git.why, /dubious ownership/);
 });
 
 test('field run: copyTarget keeps the reviewed files byte for byte, leaves out ignored files, caches and links, and refuses over its limits', async (t) => {
@@ -1195,4 +1373,35 @@ test('claudeProjectsWritable: a writable projects folder passes and keeps no pro
   assert.deepEqual(refused, { ok: false, dir: path.join(config, 'projects'), error: 'EPERM', refused: true });
   const other = await claudeProjectsWritable(env, { writeFileFn: async () => { throw Object.assign(new Error('disk'), { code: 'ENOSPC' }); } });
   assert.deepEqual(other, { ok: false, dir: path.join(config, 'projects'), error: 'ENOSPC', refused: false }, 'another error also stops before the paid probe, but is not read as a sandbox refusal');
+});
+
+test('computeSnapshotHash: a plain folder leaves Python caches out, and a tree with none hashes as before', async (t) => {
+  const { hashInventory } = await import('../snapshot-utils.mjs');
+  const { fingerprintFiles } = await import('../preflight.mjs');
+  const dir = await mkdtemp(path.join(tmpdir(), 'preflight-plain-cache-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'main.py'), 'x = 1\n', 'utf8');
+  const clean = await computeSnapshotHash(dir);
+  assert.equal(clean, (await hashInventory(dir)).snapshotHash, 'no cache item: the same hash as an inventory without skipCaches');
+  await mkdir(path.join(dir, 'pkg', '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, 'pkg', '__pycache__', 'm.cpython-311.pyc'), 'zz');
+  await writeFile(path.join(dir, 'stray.pyc'), 'zz');
+  assert.equal(await computeSnapshotHash(dir), clean, 'cache items do not change the hash');
+  assert.deepEqual(Object.keys((await fingerprintFiles(dir)).files), ['main.py']);
+  await writeFile(path.join(dir, 'main.py'), 'x = 2\n', 'utf8');
+  assert.notEqual(await computeSnapshotHash(dir), clean, 'a source change still does');
+});
+
+test('computeSnapshotHash and fingerprintFiles: an untracked, not ignored cache file in a git repo does not change the hash or the listed files [slow]', async (t) => {
+  const { fingerprintFiles, computeFingerprint } = await import('../preflight.mjs');
+  const dir = await makeGitRepo(t);
+  const before = [await computeSnapshotHash(dir), await fingerprintFiles(dir), await computeFingerprint(dir)];
+  await mkdir(path.join(dir, 'pkg', '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, 'pkg', '__pycache__', 'm.cpython-311.pyc'), 'zz');
+  assert.equal(await computeSnapshotHash(dir), before[0]);
+  assert.deepEqual(await fingerprintFiles(dir), before[1]);
+  assert.deepEqual(await computeFingerprint(dir), before[2]);
+  await writeFile(path.join(dir, 'new.py'), 'y = 1\n', 'utf8');
+  assert.notEqual(await computeSnapshotHash(dir), before[0], 'an untracked source file still counts');
+  assert.deepEqual(Object.keys((await fingerprintFiles(dir)).files), ['new.py']);
 });

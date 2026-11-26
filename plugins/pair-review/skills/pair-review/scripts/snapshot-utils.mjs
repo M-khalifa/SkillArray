@@ -10,6 +10,14 @@ const GIT_ONLY = new Set(['.git']);
 // Python and Gradle write these when code runs or builds; skipCaches leaves them out of a source snapshot's hash.
 const CACHE_DIRS = new Set(['__pycache__', '.pytest_cache', '.gradle']);
 const CACHE_FILE_RE = /\.py[co]$/;
+
+// A relative path (either separator) inside a cache folder or naming a .pyc/.pyo file: the items the drift check leaves out.
+export function isCachePath(rel) {
+  const parts = String(rel).split(/[\\/]/).filter(Boolean);
+  // A folder entry ("pkg/__pycache__/", as git status lists an untracked folder) counts by its own name.
+  if (/[\\/]$/.test(String(rel))) parts.push('');
+  return parts.slice(0, -1).some((p) => CACHE_DIRS.has(p)) || CACHE_FILE_RE.test(parts.at(-1) ?? '');
+}
 export const DEFAULT_MAX_FILES = 20000;
 
 // Returns { files: { 'rel/path': sha256 }, snapshotHash }, plus skippedCaches (the cache folders and

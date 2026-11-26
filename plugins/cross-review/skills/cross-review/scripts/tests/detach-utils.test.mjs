@@ -32,6 +32,10 @@ async function harness(t) {
     "  const brief = argv[argv.indexOf('--brief') + 1];",
     "  const envMode = argv.includes('--env-inherit') ? 'inherit' : 'filtered';",
     "  const envPassthrough = argv.includes('--custom') ? ['CUSTOM_TOKEN'] : [];",
+    "  if (argv.includes('--hold')) {",
+    "    await atomicWriteJson(path.join(path.dirname(brief), 'result.json'), runningRecord(argv, {worker}));",
+    "    while (!(await fs.access(path.join(path.dirname(brief), 'release')).then(() => true, () => false))) await new Promise(r => setTimeout(r, 50));",
+    "  }",
     "  const env = buildChildEnv({envMode, envPassthrough, providerAllowlist:['CODEX_HOME']});",
     '  const res = spawnSync(process.execPath, [' + JSON.stringify(child) + "], {env, encoding:'utf8'});",
     "  if (res.status !== 0) throw new Error(res.stderr);",
@@ -223,6 +227,31 @@ test('R2-F17: wait refuses a live pid that is not the recorded worker (reused pi
   await fs.writeFile(h.result, JSON.stringify({ status: 'running', workerPid: child.pid, workerStartedAt: spawnedAt, startedAt: spawnedAt }));
   const alive = h.run(['--wait', h.result, '--max-wait', '1']);
   assert.equal(alive.status, 3, 'a matching start time keeps the worker running');
+});
+
+test('R2-F17: on Windows the live worker records the start time the OS reports [slow]', { skip: process.platform !== 'win32' }, async (t) => {
+  const h = await harness(t);
+  const brief = path.join(h.dir, 'brief.txt');
+  await fs.writeFile(brief, 'fake brief');
+  const release = path.join(h.dir, 'release');
+  let pid;
+  t.after(async () => {
+    // Releases and stops the held worker also when an assertion failed before pid was read.
+    await fs.writeFile(release, '').catch(() => {});
+    const held = pid ?? (await fs.readFile(h.result, 'utf8').then(JSON.parse).catch(() => ({}))).workerPid;
+    try { if (held) process.kill(held); } catch { /* already gone */ }
+  });
+  assert.equal(h.run(['--detach', '--brief', brief, '--hold']).status, 0);
+  let record;
+  for (let i = 0; i < 200 && !record?.workerPid; i++) {
+    record = await fs.readFile(h.result, 'utf8').then(JSON.parse).catch(() => undefined);
+    if (!record?.workerPid) await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(record?.workerPid, 'the running record carries the worker pid');
+  pid = record.workerPid;
+  const gap = Math.abs(Date.parse(record.workerStartedAt) - processStartMs(pid));
+  await fs.writeFile(release, '');
+  assert.ok(gap <= 100, `recorded start is ${gap} ms from the OS start time`);
 });
 
 test('R2-F17: the detached worker records its own start time with its pid [slow]', async (t) => {

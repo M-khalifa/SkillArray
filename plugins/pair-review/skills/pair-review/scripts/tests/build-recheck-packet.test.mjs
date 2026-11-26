@@ -719,6 +719,19 @@ test('field run: recheck prints the step-back note from round 3 on, also with --
   await fs.mkdir(path.join(dir, 'b'), { recursive: true });
   const ok2 = await runCli(['--from-run', run, '--round', '2', '--out', path.join(dir, 'b', 'task-packet.md')]);
   assert.doesNotMatch(ok2.stdout, /findings keep coming from fixes/);
+  assert.match(ok3.stdout, /every combination of the inputs/);
+  await fs.writeFile(path.join(run, 'task-packet.md'), OLD_PACKET.replace('Profile: Code.', 'Profile: Document.'));
+  await fs.mkdir(path.join(dir, 'c'), { recursive: true });
+  const doc3 = await runCli(['--from-run', run, '--round', '3', '--out', path.join(dir, 'c', 'task-packet.md')]);
+  assert.equal(doc3.status, 0, doc3.stderr);
+  assert.match(doc3.stdout, /consider rewriting the section they keep landing in instead of patching it again/);
+  assert.doesNotMatch(doc3.stdout, /every combination/);
+});
+
+test('a Document-profile old packet gets no edge-value hypothesis at round 2 and no edge line in the count', () => {
+  const oldPacket = ['# Task packet: X', '', 'Profile: Document. Target: x.md', '', '## Scope', 's', '', '## Acceptance criteria', '- [AC-1] one', '', '## Hypotheses to test', '- [H1] old hypothesis', ''].join('\n');
+  const built = buildRecheckPacket({ oldPacket, findingsDoc: { findings: [{ id: 'F1', title: 'One.' }] }, round: 2 });
+  assert.doesNotMatch(built.text, /Not a previous finding|input edge values/);
 });
 
 test('--drop-tag with a hypothesis tag is refused (H1..Hn are the previous findings); the packet counts carried and decided findings', () => {

@@ -11,17 +11,20 @@ import {
   RunDescriptorError, readRunDescriptor, seatOutputDir, canonicalPath, privateOutputPath, channelFor, publishSeatOutput,
   assertGrantsIsolated,
 } from './run-descriptor.mjs';
-import { computeSnapshotHash, driftedFiles, fingerprintFiles, outsideReadWarning, packetReach } from './preflight.mjs';
+import { createHash } from 'node:crypto';
+import { computeSnapshotHash, snapshotMatches, driftedFiles, fingerprintFiles, isCodeProfile, isGitRepo, outsideReadWarning, packetProfile, packetReach, readReviewRules } from './preflight.mjs';
+import { approvedRulesFile, readApprovedRules } from './review-config.mjs';
 import { parseFenceLines, refutesByInference, runStep as relabelStep, seatClaimProblems } from './blind-relabel.mjs';
 import { runStep as exchangeStep } from './exchange.mjs';
 import { runDirNamedIn, runStep as briefStep } from './build-brief.mjs';
 import { firstBriefTime, hashFile, runStep as manifestStep } from './build-manifest.mjs';
-import { runStep as reportStep } from './build-report.mjs';
-import { runStep as recheckStep } from './build-recheck-packet.mjs';
+import { OUTCOMES, finalSeverity, seatLines, runStep as reportStep } from './build-report.mjs';
+import { notesOutcomes, runStep as recheckStep } from './build-recheck-packet.mjs';
 import { parseSeatFile, hasPassContent } from './seat-file.mjs';
 import { processExists, recordedWorkerProven, workerIsLive, retryDeadline, stopRecordedChild, stopRecordedWorker } from './detach-utils.mjs';
 import { findAgentTranscripts, agentState, agentLastReply, agentStats } from './native-agent.mjs';
-import { foldsCase, isMainModule, setFoldsCase } from './path-utils.mjs';
+import { comparablePath, foldsCase, isInsidePath, isMainModule, setFoldsCase } from './path-utils.mjs';
+import { isCachePath } from './snapshot-utils.mjs';
 
 const SCRIPTS = path.dirname(fileURLToPath(import.meta.url));
 const SKILL = path.basename(path.dirname(SCRIPTS));
@@ -54,6 +57,9 @@ Usage:
   node review-run.mjs recheck  --from-run <old-run-dir> --out <new-run-dir>/task-packet.md [--since-diff <diff> | --since-dirs <old> <new>... | --since-commit <commit>] [--preflight <evidence preflight.json>] [--since-only <path>]... [--target <dir>] [--repo-target <old>=<new>]... [--title <text>] [--skip F7,F8] [--drop-tag <tag>]... [--notes <file>] [--round N]
   node review-run.mjs splice   --file <seat file> (--match-heading "## A3" | --match-line <line> | --match-line-file <file>) (--with <reply file> | --with-result <result.json>)
   node review-run.mjs scan     --in <file> [--target-dir <dir>] [--phase1-dir <dir> --forbid-seats A|B|A,B] [--phase2-dir <dir>] [--tokens <a>,<b>] [--target-urls <file>] [--source-dir <dir>]... [--checklist <NAME>]...
+  node review-run.mjs outcome  --run-dir <dir> <ID>=<fixed|wrong|intentional|not-worth-it|pre-existing|decided>[:<reason>]...
+  node review-run.mjs rules-suggest --runs-root <dir> --repo <target dir> [--min-severity CRITICAL|HIGH|MEDIUM|LOW] [--json]
+  node review-run.mjs rules-write --repo <dir> (--line "<text>" [--line "<text>"]... [--section "<heading>"] | --approve-existing) [--dry-run]
   node review-run.mjs verifier-brief --claim <claim block file> --rebuttal <rebuttal file> --target-dir <dir> --out <brief.txt> [--source-dir <dir>]...
   node review-run.mjs audit  --run-dir <dir> --prepare | --finish [--max-wait <seconds>] [--native-done auditor] [--native-agent auditor=<agent id, Codex thread id or rollout path>] [--accept-missing-verifiers] [--accept-drift] [--local]
 
@@ -74,7 +80,12 @@ packet for a re-review of an earlier run (the references/phase-3-scorecard.md "R
 splice puts a seat's corrected block back into its file during a redaction round; scan scans a file again (the
 phase-2 file's "Redaction scope"). verifier-brief builds one falsification verifier's brief (phase-3 file, falsification).
 status prints one line per run folder (its step, and each seat's progress during a phase) and runs nothing; use it for
-several runs at once. cleanup lists the seats' scratch folders of a finished run with their sizes; --yes deletes them.
+several runs at once. outcome records the author's outcome per finding in phase3/report-notes.md (reason required for wrong,
+intentional, not-worth-it and decided). rules-suggest reads past runs of one repository and lists their confirmed findings
+(it writes nothing). rules-write adds the lines the user approved to the repository's REVIEW.md (at the git top level; default
+section "Always check"; a line already there is skipped; 8192 bytes at most, counting every REVIEW.md the review reads) and
+records the file's hash as approved, so the next review reads it without a commit; --approve-existing only records the hash of
+a REVIEW.md that is already there; --dry-run writes nothing. cleanup lists the seats' scratch folders of a finished run with their sizes; --yes deletes them.
 --local adds a first line with the current time on this machine's clock and in UTC.
 A native seat's file alone never ends --wait (the agent writes findings as it goes): once its agent
 replied "written", pass --native-done with its letter.
@@ -113,8 +124,61 @@ function parseArgs(argv) {
     if (!args.runDir) throw new UsageError('cleanup takes --run-dir <dir> [--yes]');
     return args;
   }
+  if (command === 'outcome') {
+    const args = { command, runDir: null, specs: [] };
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--run-dir' && rest[i + 1] !== undefined && !rest[i + 1].startsWith('--')) {
+        args.runDir = rest[++i];
+        continue;
+      }
+      const m = /^(F\d+)=([^:]*)(?::([\s\S]*))?$/.exec(rest[i]);
+      if (!m) throw new UsageError(`outcome takes --run-dir <dir> and <ID>=<word>[:<reason>], got "${rest[i]}"`);
+      const word = m[2].trim().toLowerCase();
+      const reason = (m[3] ?? '').replace(/\s+/g, ' ').trim();
+      if (!OUTCOMES.includes(word)) throw new UsageError(`${m[1]}: "${m[2]}" is not an outcome word; use one of ${OUTCOMES.join(', ')}`);
+      if (reason === '' && !NO_REASON_OK.includes(word)) throw new UsageError(`${m[1]}: ${word} needs a reason (${m[1]}=${word}:<reason>)`);
+      if (args.specs.some((s) => s.id === m[1])) throw new UsageError(`${m[1]} is given twice`);
+      args.specs.push({ id: m[1], word, reason });
+    }
+    if (!args.runDir || args.specs.length === 0) throw new UsageError('outcome takes --run-dir <dir> and one or more <ID>=<word>[:<reason>]');
+    return args;
+  }
+  if (command === 'rules-suggest') {
+    const args = { command, runsRoot: null, repo: null, minSeverity: 'MEDIUM', json: false };
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--json') args.json = true;
+      else if (['--runs-root', '--repo', '--min-severity'].includes(rest[i]) && rest[i + 1] !== undefined && !rest[i + 1].startsWith('--')) {
+        const v = rest[i + 1];
+        if (rest[i] === '--runs-root') args.runsRoot = v;
+        else if (rest[i] === '--repo') args.repo = v;
+        else if (Object.hasOwn(SEVERITY_RANK, v.toUpperCase())) args.minSeverity = v.toUpperCase();
+        else throw new UsageError(`--min-severity takes ${Object.keys(SEVERITY_RANK).join(', ')}, got "${v}"`);
+        i++;
+      } else throw new UsageError('rules-suggest takes --runs-root <dir> --repo <target dir> [--min-severity MEDIUM] [--json]');
+    }
+    if (!args.runsRoot || !args.repo) throw new UsageError('rules-suggest takes --runs-root <dir> --repo <target dir> [--min-severity MEDIUM] [--json]');
+    return args;
+  }
+  if (command === 'rules-write') {
+    const usage = 'rules-write takes --repo <dir> and --line "<text>" (repeatable) [--section "<heading>"] or --approve-existing, and [--dry-run]';
+    const args = { command, repo: null, lines: [], section: null, approveExisting: false, dryRun: false };
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--approve-existing') args.approveExisting = true;
+      else if (rest[i] === '--dry-run') args.dryRun = true;
+      else if (['--repo', '--line', '--section'].includes(rest[i]) && rest[i + 1] !== undefined && !rest[i + 1].startsWith('--')) {
+        const v = rest[++i];
+        if (rest[i - 1] === '--repo') args.repo = v;
+        else if (rest[i - 1] === '--section') args.section = v.replace(/\s+/g, ' ').trim();
+        else args.lines.push(v.replace(/\s+/g, ' ').trim().replace(/^-\s+/, '').trim());
+      } else throw new UsageError(usage);
+    }
+    if (!args.repo || args.lines.some((l) => l === '') || args.section === '') throw new UsageError(usage);
+    if (args.approveExisting === (args.lines.length > 0)) throw new UsageError(`${usage}; give either --line or --approve-existing`);
+    if (args.approveExisting && args.section !== null) throw new UsageError('--section goes with --line');
+    return args;
+  }
   if (Object.hasOwn(FORWARD, command)) return { command, forward: rest };
-  if (!Object.hasOwn(HALVES, command)) throw new UsageError(`first argument must be phase1, phase2, audit, manifest, report, recheck, splice, scan, verifier-brief, status or cleanup, got "${command}"`);
+  if (!Object.hasOwn(HALVES, command)) throw new UsageError(`first argument must be phase1, phase2, audit, manifest, report, recheck, splice, scan, verifier-brief, outcome, rules-suggest, rules-write, status or cleanup, got "${command}"`);
   const args = { command, runDir: null, half: null, maxWait: DEFAULT_MAX_WAIT_S, nativeDone: [], nativeAgents: {}, acceptMissingVerifiers: false, acceptDrift: false, local: false, incompleteSeat: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -335,20 +399,34 @@ function endedAs(record) {
 }
 
 // A CLI actor that changed the real target fails its step, whichever attempt recorded the write; an unrecorded
-// inventory is reported, not assumed clean.
-async function checkTouched(label, file) {
+// inventory is reported, not assumed clean. skipAttemptCache leaves out the cache-only warnings of earlier attempts a redispatch already reported.
+async function checkTouched(label, file, nativePeer = null, { skipAttemptCache = false } = {}) {
   const dir = path.dirname(file);
   const attempts = (await fs.readdir(dir).catch(() => [])).filter((f) => /^result\.attempt-\d+\.json$/.test(f)).sort();
+  const list = (touched) => `${touched.slice(0, 5).join(', ')}${touched.length > 5 ? ', ...' : ''}`;
+  const cacheOnly = [];
   for (const name of [path.basename(file), ...attempts]) {
     const touched = (await readResultAt(path.join(dir, name)))?.touchedFiles;
     if (Array.isArray(touched) && touched.length > 0) {
-      throw new StepError(`${label} touched files`, `${label} wrote into the target (${touched.slice(0, 5).join(', ')}${touched.length > 5 ? ', ...' : ''}; recorded in ${name}); a review must leave the target unchanged`);
+      // Cache items alone are a warning, as the drift check leaves them out too; any other path stops the step.
+      if (touched.every(isCachePath)) {
+        if (!skipAttemptCache || name === path.basename(file)) cacheOnly.push(`${list(touched)}; recorded in ${name}`);
+        continue;
+      }
+      // The record compares the target before and after this CLI actor's run, so a native seat working in the same target meanwhile counts too.
+      const peer = nativePeer
+        ? `. ${nativePeer} is a native agent working in the same target at the same time and may have made these writes; a new run with --transport cli gives a Claude seat its own worktree, out of the real target`
+        : '';
+      throw new StepError(`${label} touched files`, `${label} wrote into the target (${list(touched)}; recorded in ${name}); a review must leave the target unchanged${peer}`);
     }
   }
+  const cacheWarning = cacheOnly.length > 0
+    ? `warning: only Python or Gradle cache items changed in the target while ${label} ran (${cacheOnly.join('; ')}); the review goes on, as the drift check leaves them out too (Python writes __pycache__ unless it runs with -B)`
+    : '';
   const record = await readResultAt(file);
   const note = typeof record?.touchedFilesNote === 'string' ? record.touchedFilesNote : '';
-  if (record?.touchedFiles == null) return `touchedFiles unavailable, check the target by hand${note ? ` (${note})` : ''}`;
-  return note;
+  const own = record?.touchedFiles == null ? `touchedFiles unavailable, check the target by hand${note ? ` (${note})` : ''}` : note;
+  return [cacheWarning, own].filter(Boolean).join('; ');
 }
 
 // Every verifier folder, registered in run.json or found under phase3, is held to the same no-write rule as a seat.
@@ -374,13 +452,15 @@ export async function warnExtraRepos(desc) {
   for (const repo of desc.extraRepos ?? []) {
     if (warnedRepos.has(repo.dir)) continue;
     let current = null;
+    let same = false;
     try {
       current = await computeSnapshotHash(repo.dir);
+      same = current === repo.snapshotHash || await computeSnapshotHash(repo.dir, null, { legacy: true }) === repo.snapshotHash;
     } catch (err) {
       process.stderr.write(`review-run: WARNING: cannot check ${repo.dir}: ${err.message}\n`);
       continue;
     }
-    if (current !== repo.snapshotHash) {
+    if (!same) {
       warnedRepos.add(repo.dir);
       process.stderr.write(`review-run: WARNING: ${repo.dir} changed since preflight (recorded ${repo.snapshotHash.slice(0, 12)}, now ${current.slice(0, 12)}); the seats read it too, so treat findings that cite it as stale\n`);
     }
@@ -400,8 +480,7 @@ async function assertFingerprint(desc, { acceptDrift = false, report = null, ste
   acceptDrift = acceptDrift || report?.acceptDrift === true;
   await warnExtraRepos(desc);
   if (!desc.fingerprint?.snapshotHash) return;
-  const current = await computeSnapshotHash(desc.targetDir);
-  if (current === desc.fingerprint.snapshotHash) return;
+  if (await snapshotMatches(desc.targetDir, desc.fingerprint.snapshotHash)) return;
   const files = await driftList(desc);
   const named = files === null ? 'the changed files are not recorded for this run' : files.length > 0 ? `changed: ${files.slice(0, 5).join(', ')}${files.length > 5 ? ` and ${files.length - 5} more` : ''}` : 'no listed file differs (a folder or link changed)';
   if (acceptDrift) {
@@ -593,6 +672,8 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
   const budget = () => Math.max(0, Math.floor(maxWait - (Date.now() - began) / 1000));
   for (const role of roles) {
     const actor = desc[`seat${role}`];
+    const otherRole = ['A', 'B'].find((r) => r !== role && desc[`seat${r}`] && !isCli(desc[`seat${r}`]));
+    const nativePeer = otherRole ? `seat ${otherRole}` : null;
     if (isCli(actor)) {
       const prior = await recheckGone(resultFile(desc, phase, role), await readResult(desc, phase, role));
       rateLimitGate(`seat ${role}`, prior);
@@ -613,7 +694,8 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
       if (ended) rateLimitGate(`seat ${role}`, ended);
       if (ended || neverStarted) {
         stopRecordedChild(prior);
-        await checkTouched(`seat ${role}`, resultFile(desc, phase, role));
+        const earlier = prior ? await checkTouched(`seat ${role}`, resultFile(desc, phase, role), nativePeer) : '';
+        if (earlier) report.lines.push(`seat ${role}: earlier attempt: ${earlier}`);
         await assertFingerprint(desc, { report, step: phase });
         // A format rewrite that failed is dispatched again as the rewrite, on the same session, not as a new pass.
         const rewriteBrief = path.join(dispatchDir(desc, phase, role), 'rewrite-brief.txt');
@@ -624,6 +706,7 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
           ? `seat ${role}: previous attempt ended with status ${endedAs(ended ?? prior)}; dispatched again (the earlier result is kept as an attempt file)`
           : `seat ${role}: not started by an earlier --start (no result.json); dispatched now`);
       }
+      const redispatched = Boolean(prior) && Boolean(ended || neverStarted);
       let done;
       try {
         // At least 1 s: a dispatcher's --wait reads 0 as "wait without limit".
@@ -635,7 +718,7 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
         throw err;
       }
       if (!done) throw new StillRunning(`seat ${role} (${actor.runtime}) is still running; rerun this command`);
-      const note = await checkTouched(`seat ${role}`, resultFile(desc, phase, role));
+      const note = await checkTouched(`seat ${role}`, resultFile(desc, phase, role), nativePeer, { skipAttemptCache: redispatched });
       report.lines.push(`seat ${role}: completed (cli ${actor.runtime})${note ? `; ${note}` : ''}`);
       await noteAnswerStop(desc, await readResult(desc, phase, role), `seat ${role}`, phase, report);
     } else {
@@ -938,7 +1021,7 @@ async function laterStepDone(desc, phase, report) {
   if (await finishedRecord(path.join(desc.runDir, 'phase3', 'findings.json'))) {
     report.lines.push(`${phase}: already done, and the audit has finished; nothing was run`);
     // The finished result was checked against the target when it was written; a later change does not make it wrong.
-    if (desc.fingerprint?.snapshotHash && (await computeSnapshotHash(desc.targetDir).catch(() => null)) !== desc.fingerprint.snapshotHash) {
+    if (desc.fingerprint?.snapshotHash && !(await snapshotMatches(desc.targetDir, desc.fingerprint.snapshotHash).catch(() => false))) {
       report.lines.push('note: the target changed after the review finished; the results describe the Phase 1 snapshot');
     }
     report.next = `run: review-run manifest --run-dir ${desc.runDir}, then review-run report --run-dir ${desc.runDir}`;
@@ -1245,6 +1328,12 @@ async function finishZeroClaimRun(desc, report, args) {
 }
 
 async function auditPrepare(desc, args, report) {
+  // Audit prep needs the Phase 1 done marker, or a finished exchange, which implies Phase 1 passed.
+  if (!(await finishedRecord(phase1DoneFile(desc))) && !(await finishedRecord(path.join(desc.runDir, 'phase2', 'exchange-result.json')))) {
+    const err = new StepError('audit-prep', `Phase 1 has not finished (no ${phase1DoneFile(desc)}): a seat may still be running, or its findings were not validated yet (a run started before this version has no marker: one phase1 --wait validates it and writes it)`);
+    err.next = `run: review-run phase1 --run-dir ${desc.runDir} --wait (rerun it while it exits 3), then audit --prepare`;
+    throw err;
+  }
   const p1 = path.join(desc.runDir, 'phase1');
   const p2 = path.join(desc.runDir, 'phase2');
   const mapping = mappingFile(desc);
@@ -1375,7 +1464,8 @@ async function dispatchAuditor(desc, args, report, briefPath, outputExists) {
   const redispatch = !prior || Boolean(ended);
   if (redispatch) {
     stopRecordedChild(prior);
-    if (prior) await checkTouched('auditor', result);
+    const earlier = prior ? await checkTouched('auditor', result) : '';
+    if (earlier) report.lines.push(`auditor: earlier attempt: ${earlier}`);
     await assertFingerprint(desc, { acceptDrift: args.acceptDrift, report, step: 'audit' });
     const leftover = path.join(auditInputDir(desc), 'findings.audit.json');
     if (await exists(leftover)) report.lines.push(`auditor: the failed attempt's output is kept as ${await archiveAuditOutput(path.join(desc.runDir, 'phase3'), leftover)}`);
@@ -1399,7 +1489,7 @@ async function dispatchAuditor(desc, args, report, briefPath, outputExists) {
     }
     if (waited.status === 3) throw new StillRunning('the auditor is still running; rerun this command');
   }
-  const note = await checkTouched('auditor', result);
+  const note = await checkTouched('auditor', result, null, { skipAttemptCache: redispatch && Boolean(prior) });
   report.lines.push(`auditor: completed${note ? `; ${note}` : ''}`);
   await noteAnswerStop(desc, await readResultAt(result), 'auditor', 'audit', report);
 }
@@ -1738,6 +1828,382 @@ export function print(report, out) {
   out.write(`${lines.join('\n')}${lines.length > 0 ? '\n' : ''}next: ${report.next}\n`);
 }
 
+const NO_REASON_OK = ['fixed', 'pre-existing'];
+const FINDING_LINE_RE = /^\s*[-*|]?\s*\**(F\d+(?:\s*,\s*F\d+)*)\**\s*[:|\-–—]\s*(.+?)[\s|]*$/;
+const isTable = (line) => line.trim().startsWith('|');
+// A "|" in the status would split the cell, so it is written as "/".
+const tableCells = (line) => line.replace(/\r$/, '').trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+// An existing row keeps its other cells and gets a new status (second cell); a new row has as many cells as the header.
+function tableRow(id, status, cr, existing = null, header = null) {
+  const cells = existing !== null ? tableCells(existing) : [id, '', ...Array(Math.max((header === null ? 2 : tableCells(header).length) - 2, 0)).fill('')];
+  cells[1] = status.replace(/\|/g, '/');
+  return `| ${cells.join(' | ')} |${cr}`;
+}
+// The first line of the table the line at index i belongs to.
+function tableHeader(lines, i) {
+  let top = i;
+  while (top > 0 && isTable(lines[top - 1])) top--;
+  return lines[top];
+}
+
+// Writes the author's outcomes into <run-dir>/phase3/report-notes.md ("## Finding status"); every other line stays as it was.
+async function recordOutcomes(runDir, specs) {
+  const findingsFile = path.join(path.resolve(runDir), 'phase3', 'findings.json');
+  let doc;
+  try {
+    doc = await readJson(findingsFile);
+  } catch (err) {
+    return { code: 1, lines: [`FAILED outcome: cannot read ${findingsFile}: ${err.message}`, 'next: run the audit first (the findings come from phase3/findings.json)'] };
+  }
+  const known = new Set((Array.isArray(doc) ? doc : doc?.findings ?? []).map((f) => f?.id));
+  const unknown = specs.filter((s) => !known.has(s.id)).map((s) => s.id);
+  if (unknown.length > 0) return { code: 1, lines: [`FAILED outcome: not in ${findingsFile}: ${unknown.join(', ')}`, 'next: use the ids of phase3/findings.json; nothing was written'] };
+  const notesFile = path.join(path.resolve(runDir), 'phase3', 'report-notes.md');
+  let text = '';
+  try {
+    text = await fs.readFile(notesFile, 'utf8');
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  // A leading BOM would hide the first heading from the match below; it is kept when the file is written back.
+  const bom = text.charCodeAt(0) === 0xfeff ? String.fromCharCode(0xfeff) : '';
+  if (bom) text = text.slice(1);
+  const crlf = text.includes('\r\n');
+  const cr = crlf ? '\r' : '';
+  // Every line keeps its own line ending; the file's last line gets one so appended lines start on a new line.
+  const lines = text === '' ? [] : text.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  else if (lines.length > 0) lines[lines.length - 1] += cr;
+  // Line ranges of every "## Finding status" section, any heading case: the report and recheck parsers merge them all.
+  const statusSections = () => {
+    const found = [];
+    let open = null;
+    lines.forEach((l, i) => {
+      const h = /^##\s+(.+?)\s*$/.exec(l);
+      if (h === null) return;
+      if (open !== null) open.end = i;
+      open = h[1].toLowerCase() === 'finding status' ? { start: i, end: lines.length } : null;
+      if (open !== null) found.push(open);
+    });
+    return found;
+  };
+  if (statusSections().length === 0) {
+    if (lines.length > 0) lines.push(cr);
+    lines.push(`## Finding status${cr}`);
+  }
+  const report = [];
+  for (const s of specs) {
+    const sections = statusSections();
+    const status = s.reason ? `${s.word}: ${s.reason}` : s.word;
+    const gone = [];
+    let old = null;
+    let placed = false;
+    for (const sec of sections) {
+      for (let i = sec.start + 1; i < sec.end; i++) {
+        const m = FINDING_LINE_RE.exec(lines[i].replace(/\r$/, ''));
+        if (m === null) continue;
+        const ids = m[1].split(',').map((x) => x.trim());
+        if (!ids.includes(s.id)) continue;
+        // The parsers keep the last line that names the id.
+        old = lines[i].trim().startsWith('|') ? m[2].split('|')[0].trim() : m[2];
+        if (ids.length > 1) lines[i] = lines[i].replace(m[1], ids.filter((x) => x !== s.id).join(', '));
+        else if (sec === sections[0] && !placed) {
+          lines[i] = isTable(lines[i]) ? tableRow(s.id, status, cr, lines[i]) :`- ${s.id}: ${status}${cr}`;
+          placed = true;
+        } else gone.push(i);
+      }
+    }
+    if (!placed) {
+      let at = sections[0].end;
+      while (at - 1 > sections[0].start && (gone.includes(at - 1) || lines[at - 1].trim() === '')) at--;
+      // A section whose last line is a table row takes the new id as a table row.
+      lines.splice(at, 0, at - 1 > sections[0].start && isTable(lines[at - 1]) ? tableRow(s.id, status, cr, null, tableHeader(lines, at - 1)) :`- ${s.id}: ${status}${cr}`);
+      for (let k = 0; k < gone.length; k++) if (gone[k] >= at) gone[k]++;
+    }
+    for (const i of gone.sort((a, b) => b - a)) lines.splice(i, 1);
+    report.push(old === null ? `${s.id}: set ${status}` : `${s.id}: ${old} -> ${status}`);
+  }
+  await fs.writeFile(notesFile, `${bom}${lines.join('\n')}\n`, 'utf8');
+  return { code: 0, lines: [...report, 'next: the report and review-run recheck read these; review-run rules-suggest uses them'] };
+}
+
+const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+const REVIEW_MD_LIMIT = 8192;
+const oneLine = (s, n = 240) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+
+// Run folders under root, up to 3 levels deep, that hold run.json and phase3/findings.json.
+async function findRunFolders(root, errOut = process.stderr) {
+  const found = [];
+  const walk = async (dir, depth) => {
+    let entries = [];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') errOut.write(`review-run: skipping ${dir}: ${err.message}\n`);
+      return;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.endsWith('-target-copy') || e.name.endsWith('-audit-input')) continue;
+      const sub = path.join(dir, e.name);
+      const isRun = await fs.access(path.join(sub, 'run.json')).then(() => fs.access(path.join(sub, 'phase3', 'findings.json'))).then(() => true, () => false);
+      if (isRun) found.push(sub);
+      else if (depth < 3) await walk(sub, depth + 1);
+    }
+  };
+  await walk(root, 1);
+  return found.sort();
+}
+
+function gitTop(dir) {
+  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+  return r.status === 0 && r.stdout.trim() !== '' ? path.resolve(r.stdout.trim()) : null;
+}
+
+// The REVIEW.md the review reads for a repository: the git top level's, or the folder's own for a plain folder.
+const reviewMdFile = (repo) => path.join(gitTop(repo) ?? path.resolve(repo), 'REVIEW.md');
+
+const sha256Of = (buf) => createHash('sha256').update(buf).digest('hex');
+
+// What preflight counts against its limit for a file: the text without a BOM, with LF line ends.
+function ruleBytes(buf) {
+  let text = buf.toString('utf8');
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  return Buffer.byteLength(text.replace(/\r\n/g, '\n'));
+}
+
+// Every REVIEW.md a worktree-mode review of the repository would read, each with its size, and their total.
+async function reviewMdRead(repo) {
+  try {
+    const rules = await readReviewRules([repo], 'worktree');
+    const files = [];
+    for (const f of rules?.record.files.filter((x) => x.used) ?? []) {
+      const file = path.join(f.dir, f.path);
+      files.push({ path: file, bytes: ruleBytes(await fs.readFile(file)) });
+    }
+    return { files, total: files.reduce((n, f) => n + f.bytes, 0), error: null };
+  } catch (err) {
+    return { files: [], total: null, error: err.message };
+  }
+}
+
+async function reviewMdStatus(repo) {
+  const top = gitTop(repo);
+  const file = reviewMdFile(repo);
+  let raw = null;
+  try {
+    raw = await fs.readFile(file);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+    raw = null;
+  }
+  const tracked = top === null ? null : spawnSync('git', ['ls-files', '--error-unmatch', 'REVIEW.md'], { cwd: top, encoding: 'utf8', windowsHide: true }).status === 0;
+  let approved = null;
+  let approvedError = null;
+  if (raw !== null) {
+    try {
+      const want = comparablePath(file);
+      const entry = (await readApprovedRules(approvedRulesFile(process.env))).find((e) => comparablePath(e.path) === want && e.sha256 === sha256Of(raw));
+      approved = entry ? { at: entry.at ?? null } : null;
+    } catch (err) {
+      approved = null;
+      approvedError = err.message;
+    }
+  }
+  return { path: file, bytes: raw === null ? null : ruleBytes(raw), limit: REVIEW_MD_LIMIT, tracked, approved, approvedError, read: await reviewMdRead(repo) };
+}
+
+// Read-only: the confirmed findings of past reviews of one repository, for drafting REVIEW.md "Always check" lines.
+async function suggestRules(args, errOut) {
+  const root = path.resolve(args.runsRoot);
+  const repo = path.resolve(args.repo);
+  const minRank = SEVERITY_RANK[args.minSeverity];
+  const rows = [];
+  let runs = 0;
+  let nonCode = 0;
+  for (const dir of await findRunFolders(root, errOut)) {
+    const rel = path.relative(root, dir).split(path.sep).join('/');
+    let desc;
+    let doc;
+    try {
+      desc = await readJson(path.join(dir, 'run.json'));
+    } catch (err) {
+      errOut.write(`review-run: skipping ${rel}: run.json does not parse (${err.message})\n`);
+      continue;
+    }
+    const dirs = [desc?.targetDir, ...(Array.isArray(desc?.extraRepos) ? desc.extraRepos.map((r) => r?.dir) : [])].filter((d) => typeof d === 'string' && d !== '');
+    // A run started with --cd on a subfolder records that subfolder.
+    if (!dirs.some((d) => isInsidePath(path.resolve(d), repo))) continue;
+    let packet = '';
+    try {
+      packet = await fs.readFile(path.join(dir, 'task-packet.md'), 'utf8');
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    if (!isCodeProfile(packetProfile(packet))) {
+      nonCode++;
+      continue;
+    }
+    try {
+      doc = await readJson(path.join(dir, 'phase3', 'findings.json'));
+    } catch (err) {
+      errOut.write(`review-run: skipping ${rel}: findings.json does not parse (${err.message})\n`);
+      continue;
+    }
+    runs++;
+    let notes = '';
+    try {
+      notes = await fs.readFile(path.join(dir, 'phase3', 'report-notes.md'), 'utf8');
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+    }
+    const outcomes = notesOutcomes(notes);
+    for (const f of Array.isArray(doc) ? doc : doc?.findings ?? []) {
+      const word = outcomes.get(f?.id)?.word;
+      const severity = finalSeverity(f ?? {});
+      if ((SEVERITY_RANK[severity] ?? 0) < minRank) continue;
+      if (word === 'wrong' || word === 'intentional' || word === 'not-worth-it') continue;
+      // A finding marked pre-existing is still a real bug, so it stays when the reviewers settled on it.
+      const label = word === 'fixed' ? 'author-confirmed'
+        : word === undefined && f.final_state === 'settled-agree' ? 'review-confirmed'
+          : word === 'pre-existing' && f.final_state === 'settled-agree' ? 'review-confirmed (pre-existing)' : null;
+      if (label) rows.push({ run: rel, id: f.id, severity, label, summary: oneLine(f.summary || f.title), same_shape: Array.isArray(f.same_shape) ? f.same_shape.filter((s) => seatLines([s], true) !== '').map((s) => oneLine(s)) : oneLine(f.same_shape) });
+    }
+  }
+  rows.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || (a.run < b.run ? -1 : a.run > b.run ? 1 : 0) || a.id.localeCompare(b.id, 'en', { numeric: true }));
+  const reviewMd = await reviewMdStatus(repo);
+  if (args.json) return JSON.stringify({ runs, nonCodeRunsSkipped: nonCode, repo, findings: rows.map((r) => ({ ...r, same_shape: Array.isArray(r.same_shape) ? r.same_shape : r.same_shape || null })), reviewMd }, null, 2) + String.fromCharCode(10);
+  const author = rows.filter((r) => r.label === 'author-confirmed').length;
+  const skipped = nonCode > 0 ? `, ${nonCode} non-code runs skipped` : '';
+  const lines = [`${runs} runs of ${repo}, ${rows.length} confirmed findings (${author} author-confirmed, ${rows.length - author} review-confirmed)${skipped}`];
+  for (const r of rows) {
+    lines.push(`${r.run} ${r.id} ${r.severity} ${r.label}`, `  summary: ${r.summary}`);
+    const shape = Array.isArray(r.same_shape) ? r.same_shape.join(' | ') : r.same_shape;
+    if (shape) lines.push(`  same shape: ${shape}`);
+  }
+  lines.push(`REVIEW.md: ${reviewMd.path}`, `  size: ${reviewMd.bytes === null ? 'none' : `${reviewMd.bytes} bytes`} (limit ${reviewMd.limit} bytes)`, `  git: ${reviewMd.tracked === null ? 'not a git repository' : reviewMd.tracked ? 'tracked' : 'not tracked'}`,
+    `  approved: ${reviewMd.approved ? `yes (${reviewMd.approved.at ?? 'time unknown'})` : reviewMd.approvedError ? `unknown (${reviewMd.approvedError})` : 'no'}`);
+  const read = reviewMd.read;
+  if (read.error) lines.push(`  read: ${read.error}`);
+  else if (read.files.length > 0) lines.push(`  read: ${read.total} of ${reviewMd.limit} bytes (${read.files.map((f) => `${f.path} ${f.bytes}`).join(', ')})`);
+  lines.push('next: group findings that share one bug class across 2 or more runs into at most 3 REVIEW.md lines; show them to the user before editing REVIEW.md');
+  return `${lines.join(String.fromCharCode(10))}${String.fromCharCode(10)}`;
+}
+
+const RULES_NEXT = 'next: the next review of this repository reads this REVIEW.md; commit it on the default branch when the team should share it';
+
+const sectionStart = (lines, fenced, section) => lines.findIndex((l, i) => {
+  const h = /^##\s+(.+?)\s*$/.exec(l);
+  return !fenced[i] && h !== null && h[1].toLowerCase() === section.toLowerCase();
+});
+
+const sectionEnd = (lines, fenced, start, heading) => {
+  const i = lines.findIndex((l, j) => j > start && !fenced[j] && heading.test(l));
+  return i === -1 ? lines.length : i;
+};
+
+// The file's text with the lines added at the end of the section's own text, before its first sub-heading (or in a new section), every other byte kept.
+function addRuleLines(raw, section, add) {
+  const bom = raw !== null && raw.length >= 3 && raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf ? raw.subarray(0, 3) : Buffer.alloc(0);
+  const text = raw === null ? '' : raw.subarray(bom.length).toString('utf8');
+  if (raw === null) return Buffer.from(`# Review instructions\n\n## ${section}\n\n${add.map((l) => `- ${l}\n`).join('')}`, 'utf8');
+  const cr = text.includes('\r\n') ? '\r' : '';
+  const lines = text === '' ? [] : text.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  else if (lines.length > 0) lines[lines.length - 1] += cr;
+  const bullets = add.map((l) => `- ${l}${cr}`);
+  const fenced = parseFenceLines(text).lines.map((l) => l.inFence);
+  const start = sectionStart(lines, fenced, section);
+  if (start === -1) {
+    const blank = lines.length > 0 && lines[lines.length - 1].trim() !== '';
+    lines.push(...(blank ? [cr] : []), `## ${section}${cr}`, cr, ...bullets);
+  } else {
+    let end = sectionEnd(lines, fenced, start, /^#{1,6}\s/);
+    while (end - 1 > start && lines[end - 1].trim() === '') end--;
+    lines.splice(end, 0, ...bullets);
+  }
+  return Buffer.concat([bom, Buffer.from(`${lines.join('\n')}\n`, 'utf8')]);
+}
+
+// True when the tracked REVIEW.md equals (git-normalised) the merge-base copy with origin/HEAD; with no merge-base it is false (approve with --approve-existing), because an approval outlives the missing origin.
+// The branch's own commits are not trusted, so a branch cannot approve the rules it wrote.
+function equalsPreflightBase(repo) {
+  const top = gitTop(repo);
+  if (top === null) return false;
+  const git = (args) => spawnSync('git', args, { cwd: top, encoding: 'utf8', windowsHide: true });
+  const spec = ':(top)REVIEW.md';
+  if (git(['ls-files', '--error-unmatch', '--', spec]).status !== 0) return false;
+  const mb = git(['merge-base', 'HEAD', 'refs/remotes/origin/HEAD']);
+  if (mb.status !== 0 || mb.stdout.trim() === '') return false;
+  const base = mb.stdout.trim();
+  if (git(['cat-file', '-e', `${base}:REVIEW.md`]).status !== 0) return false;
+  return git(['diff', '--quiet', base, '--', spec]).status === 0;
+}
+
+// Creates or extends the repository's REVIEW.md with the lines the user approved, and records the file's hash as approved.
+async function writeRules(args) {
+  const fail = (message, next = 'next: fix that and run rules-write again; nothing was written') => ({ code: 1, lines: [`FAILED rules-write: ${message}`, next] });
+  const repo = path.resolve(args.repo);
+  if (!(await fs.stat(repo).then((s) => s.isDirectory(), () => false))) return fail(`${repo} is not a folder`);
+  const file = reviewMdFile(repo);
+  const raw = await fs.readFile(file).catch((err) => {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  });
+  if (args.approveExisting && raw === null) return fail(`${file} does not exist; nothing to approve`);
+  const limit = REVIEW_MD_LIMIT;
+  const approvedFile = approvedRulesFile(process.env);
+  let approved;
+  try {
+    approved = await readApprovedRules(approvedFile);
+  } catch (err) {
+    return fail(`${approvedFile} does not parse (${err.message})`, 'next: fix or remove that file, then run rules-write again; nothing was written');
+  }
+  const section = args.section ?? 'Always check';
+  const text = raw === null ? '' : raw.toString('utf8').replace(/^\u{FEFF}/u, '');
+  const textLines = text.split('\n');
+  const parsed = parseFenceLines(text);
+  const fenced = parsed.lines.map((l) => l.inFence);
+  if (!args.approveExisting && parsed.unterminated) {
+    return fail(`REVIEW.md has an unclosed code fence (line ${parsed.lines.map((l) => l.isOpen).lastIndexOf(true) + 1})`, 'next: close it, then run rules-write again; nothing was written');
+  }
+  const first = sectionStart(textLines, fenced, section);
+  const last = first === -1 ? 0 : sectionEnd(textLines, fenced, first, /^#{1,2}\s/);
+  const have = new Set(first === -1 ? [] : textLines.slice(first + 1, last).filter((_, i) => !fenced[first + 1 + i]).map((l) => /^\s*[-*]\s+(.*?)\s*$/.exec(l)?.[1]).filter((t) => t !== undefined));
+  const add = [];
+  const there = [];
+  for (const l of args.lines) (have.has(l) || add.includes(l) ? there : add).push(l);
+  const next = add.length > 0 ? addRuleLines(raw, section, add) : raw;
+  const lines = [...add.map((l) => `added to "## ${section}": - ${l}`), ...there.map((l) => `already there: - ${l}`)];
+  if (add.length > 0) {
+    if (ruleBytes(next) > limit) return fail(`the new ${file} would be ${ruleBytes(next)} bytes; the limit is ${limit} bytes`, 'next: shorten the lines or the file; nothing was written');
+    const read = await reviewMdRead(repo);
+    if (read.error) return fail(read.error);
+    const total = read.total + ruleBytes(next) - (raw === null ? 0 : ruleBytes(raw));
+    if (total > limit) return fail(`every REVIEW.md the review reads would total ${total} bytes (${read.files.map((f) => `${f.path} ${f.bytes}`).join(', ') || 'none'} now, ${ruleBytes(next) - (raw === null ? 0 : ruleBytes(raw))} bytes added); the limit is ${limit} bytes`, 'next: shorten the lines or the files; nothing was written');
+  }
+  const sha = sha256Of(next);
+  const want = comparablePath(file);
+  // The approval covers the whole file: the rest must be new, approved before or the committed copy, unless --approve-existing.
+  const restTrusted = args.approveExisting || raw === null || approved.some((e) => comparablePath(e.path) === want && e.sha256 === sha256Of(raw))
+    || equalsPreflightBase(repo);
+  // A plain folder needs no approval (preflight reads it from disk), and none is recorded for bytes nobody vouched for.
+  const plain = !restTrusted && !(await isGitRepo(repo).catch(() => false));
+  const plainLine = 'plain folder: no approval needed (preflight reads it from disk)';
+  const notApproved = `not approved: the rest of ${file} was never approved or committed; show the user the whole file, then run rules-write --repo "${repo}" --approve-existing`;
+  if (args.dryRun) {
+    return { code: 0, lines: ['dry run: nothing was written', ...lines, `file: ${file}`, `final size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, restTrusted ? `would approve: ${sha.slice(0, 12)}` : plain ? plainLine : notApproved] };
+  }
+  if (add.length > 0) await fs.writeFile(file, next);
+  if (!restTrusted) return { code: 0, lines: [...lines, `file: ${file}`, `size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, plain ? plainLine : notApproved] };
+  const at = new Date().toISOString();
+  const entries = [...approved.filter((e) => comparablePath(e.path) !== want), { path: file, sha256: sha, at }];
+  await fs.mkdir(path.dirname(approvedFile), { recursive: true });
+  const tmp = `${approvedFile}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, `${JSON.stringify({ version: 1, approved: entries }, null, 2)}\n`, 'utf8');
+  await fs.rename(tmp, approvedFile);
+  return { code: 0, lines: [...lines, `file: ${file}`, `size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, `approved: ${sha.slice(0, 12)} at ${at}`, RULES_NEXT] };
+}
+
 async function run(argv, io = {}) {
   const out = io.stdout ?? process.stdout;
   const errOut = io.stderr ?? process.stderr;
@@ -1766,6 +2232,20 @@ async function run(argv, io = {}) {
     const r = await FORWARD[args.command](args.forward, { tty: out.isTTY === true });
     out.write(r.stdout);
     errOut.write(r.stderr);
+    return r.code;
+  }
+  if (args.command === 'outcome') {
+    const r = await recordOutcomes(args.runDir, args.specs);
+    out.write(`${r.lines.join(String.fromCharCode(10))}${String.fromCharCode(10)}`);
+    return r.code;
+  }
+  if (args.command === 'rules-suggest') {
+    out.write(await suggestRules(args, errOut));
+    return 0;
+  }
+  if (args.command === 'rules-write') {
+    const r = await writeRules(args);
+    out.write(`${r.lines.join(String.fromCharCode(10))}${String.fromCharCode(10)}`);
     return r.code;
   }
   if (args.command === 'status') {

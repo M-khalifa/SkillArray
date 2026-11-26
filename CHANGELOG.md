@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.3 - 2026-11-25
+
+- Step 0 (Claude Code): `/code-review` runs before a code review of a change; the author fixes findings that fail through the real entry point. `/code-review ultra` is offered, never run. No tests or mutation sweeps on the same tree while it runs.
+- REVIEW.md is read for code reviews only. New `review-run rules-write` creates or updates it with lines the user approved; an approved copy is used without a commit, and any later edit drops the approval. An untracked REVIEW.md is reported as "not in git" with the fix.
+- New `review-run outcome` records what the author did with each finding; new `review-run rules-suggest` lists repeat bugs per repository. The report groups findings by outcome.
+- Short report: findings only, one line each, sorted by severity, with a colored severity dot; CRITICAL and HIGH lines are red. A severity the auditor changed shows the reviewers' value. Confirmed suspected bugs that no finding is tagged with are named (a finding may still describe them). Low-impact caveats are counted, not printed (the full report lists them); a split verdict on a suspected bug and the criteria not met or partial with no finding stay in view, as do partly confirmed suspected bugs.
+- Seats: `Blocked:` is only for a check a verdict depends on; a command the packet already answered, one the brief forbids, or a failed optional side step no longer forces a new run.
+- A known deviation in the packet excuses only itself, not new effects it has with the change.
+- Auditor: a counter-fact that covers only some cases refutes only those cases.
+- Non-code reviews (the packet's `Profile:` line, read above the first `##` heading): no edge-value hypothesis from round 2; the round-3 step-back note says to rewrite the section the findings keep landing in.
+- Drift check: Python/Gradle cache items are left out of the snapshot hash (plain folder, and untracked files in git), so a seat's test run no longer reads as "no listed file differs"; a run started before the update still matches its recorded hash. Cache folders listed by git status (`pkg/__pycache__/`) count as cache, and an older run's drift list leaves untracked cache files out; a tracked cache file that changed is named, one that did not is not. Cache files written to the target are a warning, not a failure; the error names a native seat as a possible writer and suggests `--transport cli`.
+- `rules-suggest` uses the auditor's severity and falls back to the title; `rules-write` counts size as preflight does (no BOM, LF line ends); a REVIEW.md in a subfolder gets no approve hint (only the top-level one can be approved); with no merge-base, `rules-write` asks for `--approve-existing`; new rule lines never go inside a code block and go before a `###` sub-heading; "already there" counts only bullets of that section; a plain folder's REVIEW.md needs no approval and gets none recorded; a REVIEW.md with an unclosed code fence is refused; an approved copy that differs only in line ends is the committed copy. The evidence preflight notes that REVIEW.md warnings apply to code reviews only.
+- `audit --prepare` before Phase 1 finished stops with a clear message and creates nothing.
+- Windows: the job wrapper waits for exiting processes and keeps a command's own exit code; a detached worker records the OS start time.
+- Preflight: warns when the Codex sandbox runs PowerShell in Constrained Language mode; the `rg` warning gives a copy command for a WinGet or user-profile `rg.exe` and says it matters mostly on large targets; packet paths with a `<placeholder>` are not checked (a path followed by an HTML tag still is).
+- Blind exchange: a vendor word in a folder name above the run folder (claude-work) is no longer an identity hit.
+- `--out`, `--json` and `--html` create a missing folder.
+- Known limits: `rules-write` does not read setext (underlined) headings; the blind scan masks a vendor-word folder name above the run folder also in prose; the short report counts open findings past 20 without their IDs; on Linux and macOS a file name holding a backslash after a cache folder name counts as cache; a code fence that starts on a list-marker line makes `rules-write` refuse the file as an unclosed fence; the short report does not name a suspected bug that a seat named without an outcome word or that no seat checked (the full report does).
+- Model catalog: GPT-6.2 Astra, GPT-6.2 Sol and GPT-6.1 Terra added, GPT-5.5 removed (as listed by Codex CLI 0.171); Fable is 5.2.
+- Docs: in Claude Code auto mode `phase1 --start` is tried directly, with `!` only after a refusal; `report --all` only on request; a BOM-safe `codex debug models` example; `--a-effort`/`--b-effort` in `--help`.
+- Packet template: paste pre-flight result lines, list open PRs, one hypothesis per failing test; a Codex seat without the test tool cites the Evidence result lines instead of running tests; a dense target needs more than one run.
+
 ## 1.2.2 - 2026-11-09
 
 - SKILL.md tells the orchestrator to re-read the whole file and the current phase file after a context compaction

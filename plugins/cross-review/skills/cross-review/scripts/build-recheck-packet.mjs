@@ -8,7 +8,7 @@ import process from 'node:process';
 
 import { firstSentence, stepBackNote, expandTagRange, splitTicketEntries, TICKETS_LINE_RE, notesSections, findingStatus, outcomeOf, evidenceLocations, diffPath } from './build-report.mjs';
 import { comparablePath, NAME_CONTINUES, pathSpellingsOf } from './path-utils.mjs';
-import { driftedFiles, fingerprintFiles } from './preflight.mjs';
+import { driftedFiles, fingerprintFiles, isCodeProfile, packetProfile } from './preflight.mjs';
 import { makeIo, refuseDirectRun, runStep as runStepWith } from './step-io.mjs';
 
 class PacketError extends Error {}
@@ -249,7 +249,7 @@ export function buildRecheckPacket({ oldPacket, findingsDoc, diffText = '', drif
   const previous = findingsDoc.findings.filter((f) => !settled(f));
   const counts = { total: findingsDoc.findings.length, carried: previous.length, decided: findingsDoc.findings.length - previous.length };
   // From round 2 one more hypothesis: fixes keep missing the edge values of the fields they read.
-  const edge = reviewRound >= 2 ? [`- [H${previous.length + 1}] Not a previous finding: some field the changed code reads is handled wrongly when it is null, missing, empty, zero or negative, or an invariant the code relies on does not hold across those input points. Try each of these values on every field the change reads; CONFIRMED names the field and value that break it, REFUTED means all of them hold.`] : [];
+  const edge = reviewRound >= 2 && isCodeProfile(packetProfile(oldPacket)) ? [`- [H${previous.length + 1}] Not a previous finding: some field the changed code reads is handled wrongly when it is null, missing, empty, zero or negative, or an invariant the code relies on does not hold across those input points. Try each of these values on every field the change reads; CONFIRMED names the field and value that break it, REFUTED means all of them hold.`] : [];
   const countLine = `The previous review had ${counts.total} finding(s): ${counts.carried} are the hypotheses below, ${counts.decided} were decided and are listed under Known deviations.${edge.length > 0 ? ' The last hypothesis is a check on input edge values, not a previous finding.' : ''}`;
   const hypotheses = previous.length > 0
     ? ['In `## Checks performed`, end each hypothesis line with CONFIRMED (the previous defect is still there), REFUTED (it is gone) or PARTLY CONFIRMED; the report prints that outcome.', countLine, ...previous.map((f, i) => findingHypothesis(f, i + 1, outcomes.get(f.id)?.word === 'pre-existing', files.map((d) => String(d.path ?? d.headerPath ?? '').replace(/\\/g, '/')))), ...edge].join('\n')
@@ -573,7 +573,7 @@ async function packet(argv) {
   if (built.fromNotes.length > 0) io.out(`build-recheck-packet: outcomes from ${notesFile}: ${built.fromNotes.join(', ')}\n`);
   // The count follows this run's chain of re-reviews only; other reviews of the same code (another skill, another chain) are unknown.
   if (args.round === null) io.out(`build-recheck-packet: Review round: ${built.round} counts this chain of re-reviews only; if the same code had other reviews, rerun with --round <N> in a new folder, or after deleting the packet and previous-run.json\n`);
-  if (built.round >= 3) io.out(`build-recheck-packet: ${stepBackNote(built.round)}\n`);
+  if (built.round >= 3) io.out(`build-recheck-packet: ${stepBackNote(built.round, isCodeProfile(packetProfile(oldPacket)))}\n`);
   // Spellings through a variable or "~" are not rewritten, and none is guessed at: the reminder is the same every time.
   if (args.target || args.repoTargets.length > 0) io.out('build-recheck-packet: old paths written through a variable or "~" (%TEMP%\\..., $HOME/..., ~/...) are not rewritten: check the packet for them by hand\n');
   io.out(`build-recheck-packet: wrote ${out}\n${fills.length} FILL marker(s) to complete before the seats start:\n${fills.map((f) => `  line ${f.line}: ${f.text}`).join('\n')}\n`);

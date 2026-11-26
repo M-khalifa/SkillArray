@@ -1,6 +1,6 @@
 // Builds the review report from the run's own files, so IDs, counts and states are never retyped.
 // The terminal report is the default output; --out writes a markdown copy, --html an optional standalone page.
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -11,6 +11,7 @@ import { parseFenceLines, splitLineSpans } from './blind-relabel.mjs';
 import { parseSeatFile } from './seat-file.mjs';
 import { compareVersions } from './path-utils.mjs';
 import { makeIo, refuseDirectRun, runStep as runStepWith } from './step-io.mjs';
+import { isCodeProfile, packetProfile } from './preflight.mjs';
 
 // Which skill wrote a report or scorecard: its name and version from this copy's SKILL.md (the version that ran, from the
 // manifest, wins) and the project's home page. Printed as one line at the end of each output.
@@ -41,6 +42,7 @@ class ReportError extends Error {}
 const io = makeIo();
 
 const SEV_ORDER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+const SEV_DOT = { CRITICAL: '\u{1F6D1}', HIGH: '\u{1F534}', MEDIUM: '\u{1F7E0}', LOW: '\u{1F7E1}' };
 const overlapText = (o) => `seat A only ${o.aOnly}, seat B only ${o.bOnly}, both ${o.both} (observed counts)`;
 const SEV_KEY = { CRITICAL: 'critical', HIGH: 'high', MEDIUM: 'medium', LOW: 'low' };
 
@@ -100,7 +102,9 @@ const ABBREVIATION_RE = /(?:^|[^A-Za-z])(?:e\.g|i\.e|etc|vs|cf|approx|no)$/i;
 
 // The text up to the first sentence end, skipping a full stop that closes an abbreviation such as "e.g." or "etc.".
 // Said by the report and by recheck (before the round is paid for) from round 3 on.
-export const stepBackNote = (round) => `Round ${round}: findings keep coming from fixes. Before another round, consider a test that tries every combination of the inputs the findings name, or a redesign of the function they keep landing in.`;
+export const stepBackNote = (round, code = true) => (code
+  ? `Round ${round}: findings keep coming from fixes. Before another round, consider a test that tries every combination of the inputs the findings name, or a redesign of the function they keep landing in.`
+  : `Round ${round}: findings keep coming from fixes. Before another round, consider rewriting the section they keep landing in instead of patching it again.`);
 
 export function firstSentence(text) {
   const clean = String(text ?? '').replace(/\s+/g, ' ').trim();
@@ -595,7 +599,9 @@ export function findingStatus(text) {
 export function notesSections(text) {
   const sections = {};
   let name = null;
-  for (const line of text.split(/\r?\n/)) {
+  // A UTF-8 BOM in front of the first heading would hide it.
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  for (const line of body.split(/\r?\n/)) {
     const h = /^##\s+(.+?)\s*$/.exec(line);
     if (h) {
       name = h[1].toLowerCase();
@@ -606,7 +612,7 @@ export function notesSections(text) {
 }
 
 // "A1: text" lines from translate joined into one; with skipNone, "A1: none found ..." entries are left out.
-function seatLines(list, skipNone = false) {
+export function seatLines(list, skipNone = false) {
   if (!Array.isArray(list)) return '';
   return list.map((s) => String(s).replace(/\s+/g, ' ').trim())
     .filter((s) => s !== '' && !(skipNone && /^(?:[AB]\d+:\s*)?none\b/i.test(s))).join(' | ');
@@ -821,6 +827,11 @@ const evidenceText = (f) => (Array.isArray(f.evidence) ? f.evidence.join('\n') :
 // executed findings the auditor only read, and web-backed claims conceded unopened.
 function certaintyCaveats({ findingsDoc, withdrawnIds, seatTexts, checksBySeat, criteria, rebuttalTexts, lightAudit = false }) {
   const out = [];
+  const minors = [];
+  const minor = (text, label, extra = {}) => {
+    out.push(text);
+    minors.push({ text, label, ...extra });
+  };
   const standing = findingsDoc.findings.filter((f) => !withdrawnIds.has(f.id) && !WITHDRAWN_STATES.includes(f.final_state));
   const web = standing.filter((f) => f.basis === 'SOURCE_CITATION' && /https?:\/\//i.test(evidenceText(f)));
   if (web.length > 0) out.push(`${idsOf(web.map((f) => f.id))}: web citation, not re-checked by the auditor (it has no web access)`);
@@ -844,16 +855,16 @@ function certaintyCaveats({ findingsDoc, withdrawnIds, seatTexts, checksBySeat, 
       room -= shown.length;
       if (shown.length > 0) parts.push(`seat ${seat}: ${shown.join('; ')}`);
     }
-    out.push(`Checks not done — ${parts.join('; ')}${total > 8 ? `; +${total - 8} more` : ''}`);
+    minor(`Checks not done — ${parts.join('; ')}${total > 8 ? `; +${total - 8} more` : ''}`, 'checks not done');
   }
   for (const [seat, p] of Object.entries(criteria?.passes ?? {})) {
-    if (p.bare > 0) out.push(`Seat ${seat}: ${p.bare} of ${p.passes} MET or REFUTED check lines cite no file:line, backticked command, link, claim ID or finding ID the report could find`);
+    if (p.bare > 0) minor(`Seat ${seat}: ${p.bare} of ${p.passes} MET or REFUTED check lines cite no file:line, backticked command, link, claim ID or finding ID the report could find`, `${p.bare} uncited check lines`, { kind: 'uncited', n: p.bare });
   }
   // A hypothesis a seat refuted while saying its own check was incomplete (the hypothesis rows show no doubt marker).
   const doubtedHyp = (criteria?.rows ?? []).filter((r) => r.kind === 'hypothesis' && r.doubt.length > 0 && ['refuted', 'split'].includes(r.verdict));
   for (const r of doubtedHyp) out.push(`${r.tag}: seat ${r.doubt.join(', ')} said its check was incomplete`);
   const readOnly = standing.filter((f) => f.basis === 'EXECUTED' && f.auditor_check?.result === 'CONFIRMED' && f.auditor_check?.basis && f.auditor_check.basis !== 'EXECUTED');
-  if (readOnly.length > 0) out.push(`${idsOf(readOnly.map((f) => f.id))}: the seat ran it; the auditor confirmed by reading only`);
+  if (readOnly.length > 0) minor(`${idsOf(readOnly.map((f) => f.id))}: the seat ran it; the auditor confirmed by reading only`, 'read-only confirm');
   const unrun = standing.filter((f) => ['HIGH', 'CRITICAL'].includes(finalSeverity(f)) && f.basis !== 'EXECUTED' && f.auditor_check?.basis !== 'EXECUTED'
     && !(f.verifications ?? []).some((v) => v?.basis === 'EXECUTED'));
   if (unrun.length > 0) out.push(`${idsOf(unrun.map((f) => f.id))}: HIGH or CRITICAL, but no one ran it (read only)`);
@@ -863,7 +874,7 @@ function certaintyCaveats({ findingsDoc, withdrawnIds, seatTexts, checksBySeat, 
   for (const [seat, n] of Object.entries(unopenedWebConcedes(rebuttalTexts)).sort()) {
     out.push(`Seat ${seat} accepted ${n} web-backed finding${n === 1 ? '' : 's'} without opening the source`);
   }
-  return out;
+  return { caveats: out, minors };
 }
 
 export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts = {}, notesText = '', files = {}, timing = null, changeDiffs = [], briefText = null, staleManifest = false, rebuttalTexts = null, update = null }) {
@@ -952,6 +963,12 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   };
 
   const caveats = [];
+  // Low-impact caveats: the short chat report folds them into one Notes line; every other caveat stays in view.
+  const minorCaveats = [];
+  const minor = (text, label, extra = {}) => {
+    caveats.push(text);
+    minorCaveats.push({ text, label, ...extra });
+  };
   if (findingsDoc.phase1_only === true) caveats.push("phase3/findings.json is missing, so the run stopped before the audit: these are each seat's own Phase 1 claims under the seat's claim IDs, neither cross-examined nor checked by the auditor, and one defect may appear once per seat. Read this report as incomplete.");
   if (zeroClaims && findingsDoc.synthesized === true) caveats.push("Neither seat raised a claim, so no auditor ran; but phase3/findings.json is missing, so the zero-claim step that checks the target against the Phase 1 snapshot did not run (run review-run audit --prepare): read this report as incomplete. The criteria below come from the seats' own checks.");
   else if (zeroClaims) caveats.push("Neither seat raised a claim, so no auditor ran and there is no scorecard (the target was still checked against the Phase 1 snapshot); the criteria below come from the seats' own checks.");
@@ -994,7 +1011,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   const unrecorded = (Array.isArray(m.support) ? m.support : []).filter((row) => row.transport === 'native' && row.role
     && !recorded(m.seat_usage?.[row.role]) && !(m.reviewers ?? []).some((r) => r.role === row.role && recorded(r.usage)));
   for (const row of unrecorded) {
-    caveats.push(`Seat ${row.role} ran as a native agent with no transcript, so its model and token use are not recorded: rerun review-run manifest with --seat-transcript ${row.role}=<its transcript or rollout>.`);
+    minor(`Seat ${row.role} ran as a native agent with no transcript, so its model and token use are not recorded: rerun review-run manifest with --seat-transcript ${row.role}=<its transcript or rollout>.`, 'usage not recorded');
   }
   for (const row of [...(m.reviewers ?? []), ...(m.actors ?? [])]) {
     const d = row?.permission_denials;
@@ -1002,10 +1019,10 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
     const tools = Object.entries(d.tools ?? {}).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t} ${n}`).join(', ');
     const role = String(row.role);
     const who = /^[A-Z]$/.test(role) ? `Seat ${role}` : /^verifier-/.test(role) ? `Verifier ${role.slice('verifier-'.length)}` : `The ${role}`;
-    caveats.push(`${who}: Claude Code refused ${d.count} tool call${d.count === 1 ? '' : 's'}${tools ? ` (${tools})` : ''}; it may have reviewed with less than it asked for. See permissionDenials in its result.json.`);
+    minor(`${who}: Claude Code refused ${d.count} tool call${d.count === 1 ? '' : 's'}${tools ? ` (${tools})` : ''}; it may have reviewed with less than it asked for. See permissionDenials in its result.json.`, `${d.count} refused tool call${d.count === 1 ? '' : 's'}`, { kind: 'refused', n: d.count });
   }
   if ((m.reviewers ?? []).some((r) => r.provider === 'anthropic' && r.transport === 'cli')) {
-    caveats.push('Claude CLI seats: file tools are enforced (fileTools: enforced) and the shell is prompt-only (shell: prompt-only), so a shell can still read peer files and write by absolute path; touchedFiles in each result.json is the check.');
+    minor('Claude CLI seats: file tools are enforced (fileTools: enforced) and the shell is prompt-only (shell: prompt-only), so a shell can still read peer files and write by absolute path; touchedFiles in each result.json is the check.', 'CLI shell note');
   }
 
   const failing = (criteria?.rows ?? []).filter((x) => x.failedSeats.length > 0);
@@ -1025,9 +1042,11 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   const splitHyp = (criteria?.rows ?? []).filter((r) => r.kind === 'hypothesis' && r.verdict === 'split').map((r) => r.tag);
   if (splitHyp.length > 0) caveats.push(splitHypCaveat(splitHyp));
   const fixWorded = (criteria?.rows ?? []).filter((r) => r.fixWorded && r.status !== 'not-verified').map((r) => r.tag);
-  if (fixWorded.length > 0) caveats.push(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a run whose seats were not told what CONFIRMED means (a 1.1.0 run), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`);
-  if (criteria?.silentSeats.length > 0) caveats.push(`${criteria.silentSeats.map((x) => `Seat ${x}`).join(', ')} wrote checks but named no criterion or hypothesis tag, so the criteria and hypotheses counts reflect only the seat(s) that did.`);
-  caveats.push(...certaintyCaveats({ findingsDoc, withdrawnIds, seatTexts, checksBySeat, criteria, rebuttalTexts: rebuttalTexts ?? seatTexts, lightAudit: depth === 'light' }));
+  if (fixWorded.length > 0) minor(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a run whose seats were not told what CONFIRMED means (a 1.1.0 run), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`, '1.1.0 wording');
+  if (criteria?.silentSeats.length > 0) minor(`${criteria.silentSeats.map((x) => `Seat ${x}`).join(', ')} wrote checks but named no criterion or hypothesis tag, so the criteria and hypotheses counts reflect only the seat(s) that did.`, 'untagged seat checks');
+  const certainty = certaintyCaveats({ findingsDoc, withdrawnIds, seatTexts, checksBySeat, criteria, rebuttalTexts: rebuttalTexts ?? seatTexts, lightAudit: depth === 'light' });
+  caveats.push(...certainty.caveats);
+  minorCaveats.push(...certainty.minors);
   // A CLI seat whose usage sits in seat_usage keeps its count on its reviewers[] or actors[] entry.
   const entryCommands = (role) => [...(m.reviewers ?? []), ...(m.actors ?? [])].find((x) => x?.role === role)?.commands;
   const cost = Object.entries(m.seat_usage ?? {}).map(([name, u]) => withCommands(seatCostRow(name === 'auditor' || name === 'orchestrator' ? name : `seat ${name}`, u), u?.commands ?? entryCommands(name)));
@@ -1048,7 +1067,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   for (const [id, status] of statusById) {
     // A line that starts with a link ("https://dev.azure.com/...") is not a mistyped outcome word.
     const word = /^\s*([a-z]+(?:-[a-z]+)*)\s*:(?!\/\/)/i.exec(status)?.[1];
-    if (word && !outcomeOf(status)) caveats.push(`${id}'s line in the report notes starts with "${word}:", which is not an outcome word (${OUTCOMES.join(', ')}); it is read as free text.`);
+    if (word && !outcomeOf(status)) minor(`${id}'s line in the report notes starts with "${word}:", which is not an outcome word (${OUTCOMES.join(', ')}); it is read as free text.`, 'note wording');
   }
   // A finding the author marked wrong (with a reason, when it is a blocker) is withdrawn: it leaves the blockers and the severity counts.
   if (markedWrong.length > 0) caveats.push(`${markedWrong.map((f) => f.id).join(', ')} ${markedWrong.length === 1 ? 'is' : 'are'} marked wrong in the report notes, so ${markedWrong.length === 1 ? 'it is' : 'they are'} counted as withdrawn, not under ${markedWrong.length === 1 ? 'its' : 'their'} severity or as a blocker; the auditor's result is unchanged.`);
@@ -1067,12 +1086,11 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
   for (const f of findings.filter((x) => x.blocker && outcomeOf(x.status)?.word === 'wrong' && outcomeOf(x.status).reason === '')) {
     caveats.push(`${f.id} is marked wrong in the report notes with no reason, so it stays a blocker; write the reason after "wrong:" to withdraw it.`);
   }
-  const isFixed = (text) => noteKinds(text).fixed;
-  if ([...statusById.values()].some(isFixed)) caveats.push(`Changes made after the reviewed snapshot were not re-reviewed (${[...statusById.entries()].filter(([, s]) => isFixed(s)).map(([id]) => id).join(', ')}); the findings describe the code the reviewers read.`);
+  if ([...statusById.values()].some(isFixedNote)) caveats.push(`Changes made after the reviewed snapshot were not re-reviewed (${[...statusById.entries()].filter(([, s]) => isFixedNote(s)).map(([id]) => id).join(', ')}); the findings describe the code the reviewers read.`);
   const blockers = findings.filter((f) => f.blocker);
   // build-recheck-packet writes "Review round: N" under the packet title.
   const round = Number(/^Review round:\s*(\d+)\s*$/m.exec(packetText)?.[1]) || null;
-  if (round >= 3) caveats.push(stepBackNote(round));
+  if (round >= 3) caveats.push(stepBackNote(round, isCodeProfile(packetProfile(packetText))));
 
   return {
     generator: generatorInfo(m.skill_version),
@@ -1091,6 +1109,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
     criteria,
     coverage,
     caveats,
+    minorCaveats,
     cost,
     time: runTime(timing, m),
     changeDiffs: changeDiffs.map((d) => ({ name: d.name, sha256: createHash('sha256').update(d.text).digest('hex') })),
@@ -1398,6 +1417,12 @@ export function outcomeOf(note) {
   return { word: m[1].toLowerCase(), reason: m[2].trim() };
 }
 
+// An outcome word decides whether a note means fixed; free-text kinds are read only for a note with no outcome word.
+const isFixedNote = (note) => {
+  const o = outcomeOf(note);
+  return o ? o.word === 'fixed' : noteKinds(note).fixed;
+};
+
 // A "wrong" outcome withdraws a finding only with a reason when the finding is a blocker.
 const authorWithdrawn = (f) => {
   const o = outcomeOf(f.status);
@@ -1411,7 +1436,7 @@ export function groupFindings(report) {
     const kinds = noteKinds(f.status);
     const outcome = outcomeOf(f.status)?.word;
     if (WITHDRAWN_STATES.includes(f.state) || authorWithdrawn(f)) groups.withdrawn.push(f);
-    else if (kinds.fixed) groups.fixed.push(f);
+    else if (isFixedNote(f.status)) groups.fixed.push(f);
     else if (['intentional', 'not-worth-it', 'decided'].includes(outcome)) groups.canWait.push(f);
     // An unresolved blocker is a decision, not a fix: the seats still disagree, and the report gives both positions.
     else if (f.state === 'unresolved-high-stakes' || (String(f.state).startsWith('unresolved') && f.blocker) || kinds.decide) groups.decide.push(f);
@@ -1437,6 +1462,25 @@ function severityBars(counts) {
 
 const chatId = (f) => clipTo(String(f?.id ?? '?'), 12);
 const idList = (list, cap = 30) => (list.length === 0 ? 'none' : list.length > cap ? `${list.slice(0, cap).map(chatId).join(' ')} (+${list.length - cap} more)` : list.map(chatId).join(' '));
+
+const MAX_OPEN_LINES = 20;
+const naturalId = (a, b) => String(a.id ?? '').localeCompare(String(b.id ?? ''), 'en', { numeric: true });
+const sevRank = (f) => (SEV_ORDER.indexOf(f.severity) + 1 || SEV_ORDER.length + 1);
+
+// The open findings (fix now, decide, fix next, can wait) as { f, action }, worst severity first, then ID in natural order.
+// Past 20, every CRITICAL, HIGH, fix-now and decide finding stays; the rest fill up to 20. hidden counts what was left out.
+export function selectOpenFindings(groups, limit = MAX_OPEN_LINES) {
+  const all = [['fix now', groups.fixNow], ['decide', groups.decide], ['fix next', groups.fixNext], ['can wait', groups.canWait]]
+    .flatMap(([action, list]) => list.map((f) => ({ f, action })))
+    .sort((x, y) => sevRank(x.f) - sevRank(y.f) || naturalId(x.f, y.f));
+  const must = (x) => ['CRITICAL', 'HIGH'].includes(x.f.severity) || x.action === 'fix now' || x.action === 'decide';
+  let shown = all;
+  if (all.length > limit) {
+    let room = limit - all.filter(must).length;
+    shown = all.filter((x) => must(x) || room-- > 0);
+  }
+  return { shown, hidden: all.length - shown.length };
+}
 
 function trafficLight(report, groups) {
   const lines = [];
@@ -1523,6 +1567,65 @@ function trafficLight(report, groups) {
   return lines;
 }
 
+// The short report's finding block: severity, id, BLOCKER or DECIDE where it applies, then the title cut at a word boundary.
+function shortFindingLines(groups) {
+  const { shown, hidden } = selectOpenFindings(groups);
+  const lines = shown.map(({ f, action }) => {
+    const sev = String(f.severity ?? '');
+    const id = chatId(f);
+    const prefix = action === 'fix now' ? 'BLOCKER  ' : action === 'decide' ? 'DECIDE   ' : '';
+    // The block is a diff fence: a leading "-" paints a CRITICAL or HIGH line red; each emoji is 2 code units and 2 columns.
+    const head = `${['CRITICAL', 'HIGH'].includes(sev) ? '-' : ' '} ${SEV_DOT[sev] ?? '  '} ${sev.padEnd(8)}${sev.length >= 8 ? ' ' : ''}${id.padEnd(4)}${id.length >= 4 ? ' ' : ''}${prefix}`;
+    const label = f.claimedSeverity ? ` (auditor; reviewers said ${f.claimedSeverity})` : '';
+    return `${head}${shortTitle(f, Math.max(20, CHAT_LINE - head.length - label.length))}${label}`.trimEnd();
+  });
+  if (hidden > 0) lines.push(`  +${hidden} more findings in the full report`);
+  return lines;
+}
+
+// Plain sentences after the finding block: a reviewer that only read the code, and each ticket verdict.
+function shortSentences(report) {
+  const out = [];
+  for (const r of report.cost.filter((x) => /^seat [AB]$/.test(x.seat) && x.commands && x.commands.failed === x.commands.tried)) {
+    const who = `Reviewer ${r.seat.slice(5)}`;
+    const ran = (r.commands.scripts ?? 0) - (r.commands.scriptsFailed ?? 0);
+    const rest = ran > 0 ? `it ran ${plural(ran, 'tool script')} instead` : 'its findings rest on reading only';
+    out.push(r.commands.tried === 0 ? `${who} ran no commands; ${rest}.` : `${who}'s commands all failed; ${rest}.`);
+  }
+  // A suspected bug a reviewer confirmed with no finding behind it, and requirements no reviewer checked, have no line of their own.
+  const rows = report.criteria?.rows ?? [];
+  const confirmedRows = rows.filter((r) => r.kind === 'hypothesis' && r.status !== 'not-verified' && (r.verdict === 'confirmed' || r.verdict === 'partly') && !(r.findings?.length > 0));
+  const confirmedHyp = confirmedRows.length;
+  if (confirmedHyp > 0) {
+    out.push(`${confirmedHyp === 1 ? 'A suspected bug was' : `${confirmedHyp} suspected bugs were`} ${confirmedRows.some((r) => r.verdict === 'partly') ? 'confirmed or partly confirmed' : 'confirmed'} by the reviewers, but no finding is tagged with ${confirmedHyp === 1 ? 'it' : 'them'} (a finding may still describe ${confirmedHyp === 1 ? 'it' : 'them'}):`);
+    for (const r of confirmedRows.slice(0, 3)) out.push(`  - ${shortTitle({ title: r.text }, CHAT_LINE - 4)}`);
+    if (confirmedHyp > 3) out.push(`  - and ${confirmedHyp - 3} more in the full report`);
+    out.push('');
+  }
+  const unchecked = report.criteria?.criteriaStats?.notVerified ?? 0;
+  if (unchecked > 0) out.push(`${unchecked === 1 ? '1 requirement was' : `${unchecked} requirements were`} not checked by any reviewer.`);
+  const tickets = report.criteria?.tickets ?? [];
+  for (const t of tickets.some((x) => x.verdict) ? tickets : []) {
+    out.push(`Ticket ${t.id}: ${t.verdict ?? 'NO VERDICT'}${new Set(Object.values(t.seats)).size > 1 ? ' (reviewers disagree)' : ''}`);
+  }
+  // The blank line after the bullets keeps the next sentence out of the last bullet.
+  while (out.at(-1) === '') out.pop();
+  return out;
+}
+
+// Refused tool calls and uncited check lines are one note each, however many seats reported them.
+const minorNoteCount = (minors) => new Set((minors ?? []).map((c) => (c.kind && Number.isFinite(c.n) ? c.kind : c.label))).size;
+
+function closingLine(report, groups) {
+  const m = minorNoteCount(report.minorCaveats);
+  const parts = [
+    ...(groups.withdrawn.length > 0 ? [`${plural(groups.withdrawn.length, 'finding')} dropped as not real`] : []),
+    ...(groups.preExisting.length > 0 ? [`${groups.preExisting.length} that existed before this change`] : []),
+    ...(groups.fixed.length > 0 ? [`${groups.fixed.length} fixed but not re-reviewed`] : []),
+  ];
+  return `_Ask for the full report for each finding's evidence and fix${report.criteria?.criteriaCount > 0 ? ', the requirements check' : ''}, the cost${m > 0 ? ` and ${m} minor note${m === 1 ? '' : 's'}` : ''}${parts.length > 0 ? `; it also lists ${parts.join(', ')}` : ''}._`;
+}
+
 export function renderChat(report, { all = false } = {}) {
   const groups = groupFindings(report);
   // The blocker count is report.blockers, as in every other format; blockers the report notes moved out of "Fix now" are named.
@@ -1539,12 +1642,13 @@ export function renderChat(report, { all = false } = {}) {
   const findingsText = report.total === 0 ? 'no findings' : `${report.total} finding${report.total === 1 ? '' : 's'}`;
   const critRows = (report.criteria?.rows ?? []).filter((r) => r.kind === 'criterion');
   const withFindings = critRows.filter((r) => r.status === 'issue').map((r) => r.tag);
-  const notMet = critRows.filter((r) => r.status === 'clean' && (r.met === 'NOT MET' || r.failedSeats.length > 0)).map((r) => r.tag);
+  const notMet = critRows.filter((r) => (all ? r.status === 'clean' && (r.met === 'NOT MET' || r.failedSeats.length > 0) : isUnmet(r))).map((r) => r.tag);
   const tagList = (list) => `${list.slice(0, 8).join(', ')}${list.length > 8 ? ', ...' : ''}`;
-  const criteriaText = `${withFindings.length > 0 ? ` · ${withFindings.length} criteri${withFindings.length === 1 ? 'on' : 'a'} with findings (${tagList(withFindings)})` : ''}${notMet.length > 0 ? ` · ${notMet.length} not met, no finding (${tagList(notMet)})` : ''}`;
-  const out = [`> **${head}${report.round ? ` · round ${report.round}` : ''} · ${blockText}${decideText}${criteriaText} · ${findingsText}**`, ''];
+  const withFindingsText = withFindings.length > 0 ? ` · ${withFindings.length} criteri${withFindings.length === 1 ? 'on' : 'a'} with findings (${tagList(withFindings)})` : '';
+  const notMetText = notMet.length > 0 ? ` · ${notMet.length} not met${all ? '' : ' or partial'}, no finding (${tagList(notMet)})` : '';
+  const out = [`> **${head}${report.round ? ` · round ${report.round}` : ''} · ${blockText}${all ? decideText + withFindingsText : ''}${notMetText} · ${findingsText}**`, ''];
   if (report.why) out.push(`Why: ${report.why}`, '');
-  if (report.total > 0) {
+  if (report.total > 0 && all) {
     // Every finding withdrawn leaves no bar; no empty code block then.
     const bars = severityBars(report.counts);
     if (bars.length > 0) out.push('```', ...bars, '```', '');
@@ -1559,11 +1663,19 @@ export function renderChat(report, { all = false } = {}) {
     if (groups.withdrawn.length > 0) out.push(`| Withdrawn | ${idList(groups.withdrawn)} | ${groups.withdrawn.length} |`);
     out.push('');
   }
-  const light = trafficLight(report, groups);
-  if (light.length > 0) out.push('```diff', ...light, '```', '');
+  if (all) {
+    const light = trafficLight(report, groups);
+    if (light.length > 0) out.push('```diff', ...light, '```', '');
+  } else {
+    const block = shortFindingLines(groups);
+    if (block.length > 0) out.push('```diff', ...block, '```', '');
+    const notes = shortSentences(report);
+    if (notes.length > 0) out.push(...notes, '');
+  }
   if (report.decisions) out.push('**Decisions needed**', '', report.decisions, '');
-  for (const caveat of report.caveats) out.push(`> Caveat: ${caveat}`, '');
-  if (!all) out.push('_Short report. Ask for the full one: every finding, every criterion and the cost._');
+  const minorTexts = new Set(all ? [] : (report.minorCaveats ?? []).map((c) => c.text));
+  for (const caveat of report.caveats) if (!minorTexts.has(caveat)) out.push(`> Caveat: ${caveat}`, '');
+  if (!all) out.push(closingLine(report, groups));
   else out.push('---', '', renderMarkdown(report).trimEnd());
   if (!all) out.push('', generatorLine(report.generator));
   if (!all && report.update) out.push('', updateNote(report.update));
@@ -1713,9 +1825,13 @@ async function main(argv, tty = false) {
     const forced = process.env.FORCE_COLOR !== undefined && process.env.FORCE_COLOR !== '' && process.env.FORCE_COLOR !== '0';
     const color = args.color === 'always' || (args.color === 'auto' && !process.env.NO_COLOR && (forced || tty));
     // The files first: a reader that closes stdout early must not cost a requested file.
-    if (args.out) await writeFile(path.resolve(args.out), renderMarkdown(report), 'utf8');
-    if (args.json) await writeFile(path.resolve(args.json), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-    if (args.html) await writeFile(path.resolve(args.html), renderHtml(report), 'utf8');
+    const writeOut = async (file, text) => {
+      await mkdir(path.dirname(path.resolve(file)), { recursive: true });
+      await writeFile(path.resolve(file), text, 'utf8');
+    };
+    if (args.out) await writeOut(args.out, renderMarkdown(report));
+    if (args.json) await writeOut(args.json, `${JSON.stringify(report, null, 2)}\n`);
+    if (args.html) await writeOut(args.html, renderHtml(report));
     io.out(args.format === 'chat' ? renderChat(report, { all: args.all }) : renderText(report, { color }));
     return 0;
   } catch (err) {

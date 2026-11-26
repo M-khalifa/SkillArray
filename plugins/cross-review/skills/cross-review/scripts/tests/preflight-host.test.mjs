@@ -7,8 +7,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { resolveHost, missingDispatchers, leanFlagGaps, codexSandboxFailure, codexSandboxProbe, pluginCopyDrift, packetReach, packetPorts, readReviewRules, peerLabelLines } from '../preflight.mjs';
+import { resolveHost, missingDispatchers, leanFlagGaps, codexSandboxFailure, codexSandboxProbe, pluginCopyDrift, packetReach, packetPorts, readReviewRules, reviewRulesEarlyWarnings, peerLabelLines, packetProfile, isCodeProfile } from '../preflight.mjs';
 import { readRunDescriptor } from '../run-descriptor.mjs';
+import { approvedRulesFile } from '../review-config.mjs';
+import { createHash } from 'node:crypto';
 
 const SCRIPTS = fileURLToPath(new URL('../', import.meta.url));
 const SKILL = path.basename(path.dirname(path.resolve(SCRIPTS)));
@@ -65,6 +67,7 @@ async function harness(t, { help = HELP, scriptsDir = SCRIPTS, seatA = {}, seatB
   const gitDir = path.dirname(locator.stdout.trim().split(/\r?\n/)[0]);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
   env.PATH = bin + path.delimiter + gitDir;
+  env.REVIEW_SKILLS_CONFIG_DIR = path.join(dir, 'config');
   const run = path.join(dir, 'run');
   const actor = (role, extra = {}) => ({
     provider: 'anthropic', runtime: 'claude', model: 'opus', transport: 'cli', ...extra, role,
@@ -237,6 +240,87 @@ test('readReviewRules: with a default branch the rules come from the merge-base,
   assert.deepEqual((await readReviewRules([unborn])).record.files.map((f) => [f.ref, f.used]), [['not committed yet', false]]);
 });
 
+test('readReviewRules: an untracked REVIEW.md is "not in git" and unused in head mode, read in worktree mode; a staged one is "added by the change"', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules untracked '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const git = (...a) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git('init', '-q');
+  await fs.writeFile(path.join(dir, 'code.txt'), 'x\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  await fs.writeFile(path.join(dir, 'REVIEW.md'), 'My own rules.\n');
+  const head = await readReviewRules([dir]);
+  assert.equal(head.text, null);
+  assert.deepEqual(head.record.files.map((f) => [f.ref, f.used]), [['not in git', false]]);
+  assert.match((await readReviewRules([dir], 'worktree')).text, /My own rules\./);
+  git('add', 'REVIEW.md');
+  assert.deepEqual((await readReviewRules([dir])).record.files.map((f) => [f.ref, f.used]), [['added by the change', false]]);
+});
+
+test('readReviewRules with origin/HEAD: untracked is "not in git", committed on the feature branch is "added by the change", committed on the base is used; early warnings give the worktree hint only where it is safe', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules base '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const git = (...a) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git('init', '-q', '-b', 'main');
+  await fs.writeFile(path.join(dir, 'code.txt'), 'x\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+  git('checkout', '-q', '-b', 'feature');
+  await fs.writeFile(path.join(dir, 'code.txt'), 'y\n');
+  git('commit', '-q', '-am', 'change under review');
+  await fs.writeFile(path.join(dir, 'REVIEW.md'), 'My own rules.\n');
+  assert.deepEqual((await readReviewRules([dir])).record.files.map((f) => [f.ref, f.used]), [['not in git', false]]);
+  const untracked = (await reviewRulesEarlyWarnings([dir])).join('\n');
+  assert.match(untracked, /commit it on the default branch.*--review-rules worktree/);
+  git('add', 'REVIEW.md');
+  git('commit', '-q', '-m', 'commit it on the branch');
+  const onBranch = await readReviewRules([dir]);
+  assert.equal(onBranch.text, null);
+  assert.deepEqual(onBranch.record.files.map((f) => [f.ref, f.used]), [['added by the change', false]]);
+  const added = (await reviewRulesEarlyWarnings([dir])).join('\n');
+  assert.match(added, /added by the change: the base of the branch has no REVIEW\.md there/);
+  assert.doesNotMatch(added, /worktree/);
+  git('checkout', '-q', 'main');
+  await fs.writeFile(path.join(dir, 'REVIEW.md'), 'Base rules.\n');
+  git('add', 'REVIEW.md');
+  git('commit', '-q', '-m', 'rules on the base');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  git('checkout', '-q', '-b', 'feature2');
+  assert.match((await readReviewRules([dir])).text, /Base rules\./);
+  await fs.rm(path.join(dir, 'REVIEW.md'));
+});
+
+test('--host warns that an untracked REVIEW.md is not in git, not used, and how to use it [slow]', async (t) => {
+  const h = await harness(t);
+  for (const args of [['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'one']]) assert.equal(spawnSync('git', args, { cwd: h.target }).status, 0);
+  await fs.writeFile(path.join(h.target, 'REVIEW.md'), 'My own rules.\n');
+  const r = h.launch();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /WARNING: .*REVIEW\.md is not in git \(untracked\), so it is not used.*commit it.*new run folder.*--review-rules worktree/);
+  assert.doesNotMatch(r.stderr, /added by the change|base of the branch/);
+});
+
+test('the evidence preflight warns early about an untracked REVIEW.md, still exits 0 and writes --out [slow]', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules early '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  for (const args of [['init', '-q'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'one']]) assert.equal(spawnSync('git', args, { cwd: dir }).status, 0);
+  await fs.writeFile(path.join(dir, 'REVIEW.md'), 'My own rules.\n');
+  const out = path.join(dir, '..', `${path.basename(dir)}-evidence.json`);
+  t.after(() => fs.rm(out, { force: true }));
+  const r = spawnSync(process.execPath, [path.join(SCRIPTS, 'preflight.mjs'), '--cd', dir, '--out', out], { encoding: 'utf8', timeout: 120000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout + r.stderr, /WARNING: .*REVIEW\.md is not in git \(untracked\), so it is not used.*--review-rules worktree to the second preflight/);
+  await fs.access(out);
+});
+
 test('peerLabelLines: a bare P1, or one after an undeclared prefix, is named; a declared checklist prefix is not', () => {
   const text = 'P1: never log secrets.\nSee CHK-P2 and CHK-P3-P4.\nOTHER-P5 applies.\nVersion 2.1 notes.';
   assert.deepEqual(peerLabelLines(text), ['P1: never log secrets.', 'See CHK-P2 and CHK-P3-P4.', 'OTHER-P5 applies.']);
@@ -280,6 +364,236 @@ test('--host writes review-rules.md and run.json reviewRules when the target has
   assert.match(edited.stderr, /WARNING: no default branch \(origin\/HEAD\) to compare with/);
   assert.equal((await readRunDescriptor(path.join(h.dir, 'run3'))).reviewRules.changedByTarget, true);
   assert.doesNotMatch(await fs.readFile(path.join(h.dir, 'run3', 'review-rules.md'), 'utf8'), /Nothing is HIGH/);
+});
+
+async function rulesRepo(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules approved '));
+  const config = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules config '));
+  const saved = process.env.REVIEW_SKILLS_CONFIG_DIR;
+  process.env.REVIEW_SKILLS_CONFIG_DIR = config;
+  t.after(async () => {
+    if (saved === undefined) delete process.env.REVIEW_SKILLS_CONFIG_DIR; else process.env.REVIEW_SKILLS_CONFIG_DIR = saved;
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(config, { recursive: true, force: true });
+  });
+  const git = (...a) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git('init', '-q', '-b', 'main');
+  await fs.writeFile(path.join(dir, 'code.txt'), 'x\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+  git('checkout', '-q', '-b', 'feature');
+  const file = path.join(dir, 'REVIEW.md');
+  const approve = async (entries) => {
+    await fs.mkdir(config, { recursive: true });
+    await fs.writeFile(approvedRulesFile(process.env), JSON.stringify({ version: 1, approved: entries }));
+  };
+  const entry = async (p = file) => ({ path: p, sha256: createHash('sha256').update(await fs.readFile(file)).digest('hex'), at: '2026-11-18T10:00:00.000Z' });
+  return { dir, config, git, file, approve, entry };
+}
+
+test('readReviewRules: an untracked REVIEW.md with an approved hash is used as "approved copy"; an edit after approval, or another path, is not', async (t) => {
+  const r = await rulesRepo(t);
+  await fs.writeFile(r.file, 'Approved rules.\n');
+  await r.approve([await r.entry()]);
+  const ok = await readReviewRules([r.dir]);
+  assert.match(ok.text, /Approved rules\./);
+  assert.deepEqual(ok.record.files.map((f) => [f.ref, f.used, f.changed, f.at]), [['approved copy', true, true, '2026-11-18T10:00:00.000Z']]);
+  assert.equal(ok.record.changedByTarget, true);
+  await fs.writeFile(r.file, 'Approved rules, then edited.\n');
+  const edited = await readReviewRules([r.dir]);
+  assert.equal(edited.text, null);
+  assert.deepEqual(edited.record.files.map((f) => [f.ref, f.used]), [['not in git', false]]);
+  await fs.writeFile(r.file, 'Approved rules.\n');
+  await r.approve([await r.entry(path.join(r.dir, 'sub', 'REVIEW.md'))]);
+  assert.equal((await readReviewRules([r.dir])).text, null);
+  assert.equal((await readReviewRules([r.dir], 'worktree')).record.files[0].ref, 'working tree');
+});
+
+test('readReviewRules: a tracked REVIEW.md edited in the working tree is read from disk only when its hash is approved', async (t) => {
+  const r = await rulesRepo(t);
+  await fs.writeFile(r.file, 'Base rules.\n');
+  r.git('add', 'REVIEW.md');
+  r.git('commit', '-q', '-m', 'rules');
+  r.git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  r.git('checkout', '-q', '-b', 'feature2');
+  await fs.writeFile(r.file, 'Edited rules.\n');
+  const plain = await readReviewRules([r.dir]);
+  assert.match(plain.text, /Base rules\./);
+  assert.doesNotMatch(plain.text, /Edited rules\./);
+  assert.equal(plain.record.files[0].edited, true);
+  await r.approve([await r.entry()]);
+  const approved = await readReviewRules([r.dir]);
+  assert.match(approved.text, /Edited rules\./);
+  assert.doesNotMatch(approved.text, /Base rules\./);
+  assert.equal(approved.record.files[0].ref, 'approved copy');
+  await fs.writeFile(r.file, 'Base rules.\n');
+  const same = await readReviewRules([r.dir]);
+  assert.equal(same.record.files[0].ref.startsWith('merge-base'), true, 'a disk copy equal to the ref copy is the ref copy');
+});
+
+test('readReviewRules under core.autocrlf: a clean CRLF checkout of a tracked REVIEW.md is not edited and is read from the ref; a real edit is', async (t) => {
+  const r = await rulesRepo(t);
+  r.git('config', 'core.autocrlf', 'true');
+  await fs.writeFile(r.file, 'Base rules.\nSecond line.\n');
+  r.git('add', 'REVIEW.md');
+  r.git('commit', '-q', '-m', 'rules');
+  r.git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  r.git('checkout', '-q', '-b', 'feature2');
+  await fs.rm(r.file);
+  r.git('checkout', '--', 'REVIEW.md');
+  assert.ok((await fs.readFile(r.file, 'utf8')).includes('\r\n'), 'the working file has CRLF while the blob is LF');
+  const clean = await readReviewRules([r.dir]);
+  assert.match(clean.record.files[0].ref, /^merge-base /);
+  assert.equal(clean.record.files[0].edited, undefined);
+  assert.equal(clean.record.files[0].changed, false);
+  assert.match(clean.text, /Base rules\./);
+  await fs.appendFile(r.file, 'Extra line.\r\n');
+  const dirty = await readReviewRules([r.dir]);
+  assert.equal(dirty.record.files[0].edited, true);
+  assert.doesNotMatch(dirty.text, /Extra line/);
+});
+
+test('readReviewRules: an approved CRLF checkout equal to the ref under core.autocrlf is the ref copy; an approved CRLF-only edit without autocrlf is still an approved copy', async (t) => {
+  const r = await rulesRepo(t);
+  r.git('config', 'core.autocrlf', 'true');
+  await fs.writeFile(r.file, 'Base rules.\nSecond line.\n');
+  r.git('add', 'REVIEW.md');
+  r.git('commit', '-q', '-m', 'rules');
+  r.git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  r.git('checkout', '-q', '-b', 'feature2');
+  await fs.writeFile(r.file, 'Base rules.\r\nSecond line.\r\n');
+  await r.approve([await r.entry()]);
+  const same = await readReviewRules([r.dir]);
+  assert.match(same.record.files[0].ref, /^merge-base /);
+  assert.equal(same.record.files[0].changed, false);
+  assert.equal(same.record.files[0].edited, undefined);
+  r.git('config', 'core.autocrlf', 'false');
+  const edited = await readReviewRules([r.dir]);
+  assert.equal(edited.record.files[0].ref, 'approved copy');
+  assert.equal(edited.record.files[0].changed, true);
+});
+
+test('the evidence preflight adds one note that REVIEW.md warnings apply to code reviews only, and only with a warning [slow]', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules note '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  for (const args of [['init', '-q'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'one']]) assert.equal(spawnSync('git', args, { cwd: dir }).status, 0);
+  const out = path.join(dir, '..', `${path.basename(dir)}-note.json`);
+  t.after(() => fs.rm(out, { force: true }));
+  const launch = () => spawnSync(process.execPath, [path.join(SCRIPTS, 'preflight.mjs'), '--cd', dir, '--out', out], { encoding: 'utf8', timeout: 120000 });
+  const clean = launch();
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.doesNotMatch(clean.stdout + clean.stderr, /for code reviews only/);
+  await fs.writeFile(path.join(dir, 'REVIEW.md'), 'My own rules.\n');
+  const warned = launch();
+  assert.equal(warned.status, 0, warned.stderr);
+  assert.match(warned.stdout + warned.stderr, /REVIEW\.md is not in git[^\n]*\n[^\n]*REVIEW\.md is read for code reviews only/);
+});
+
+test('packetProfile and isCodeProfile: bold and bullet lines, text before Target, an empty or missing profile reads as code', () => {
+  assert.equal(packetProfile('**Profile:** Document\n'), 'Document');
+  assert.equal(packetProfile('- Profile: Document\n'), 'Document');
+  assert.equal(packetProfile('Profile: Document. target: src/code/a.md\n'), 'Document');
+  assert.equal(packetProfile('Title\nProfile: Code + Architecture\r\nTarget: x\n'), 'Code + Architecture');
+  assert.equal(packetProfile('Profile:\nTarget: x\n'), null);
+  assert.equal(packetProfile('Profile: Target: x\n'), null);
+  assert.equal(packetProfile('no such line'), null);
+  assert.equal(packetProfile(''), null);
+  assert.equal(packetProfile('Target: x\n\n## Hypotheses\n- Profile: staging\n'), null);
+  assert.equal(packetProfile('Profile: Document. Target: x\n\n## Hypotheses\n- Profile: staging\n'), 'Document');
+  assert.equal(isCodeProfile('Document'), false);
+  assert.equal(isCodeProfile('Architecture + code'), true);
+  assert.equal(isCodeProfile(null), true);
+});
+
+test('early warnings: a nested untracked REVIEW.md is not offered the top-level-only approve command', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules nested '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const git = (...a) => assert.equal(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir }).status, 0);
+  git('init', '-q');
+  await fs.mkdir(path.join(dir, 'sub'));
+  await fs.writeFile(path.join(dir, 'sub', 'code.txt'), 'x\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  await fs.writeFile(path.join(dir, 'sub', 'REVIEW.md'), 'My own rules.\n');
+  const nested = (await reviewRulesEarlyWarnings([path.join(dir, 'sub')])).join('\n');
+  assert.match(nested, /sub.REVIEW\.md is not in git/);
+  assert.match(nested, /rules-write approves only the top-level REVIEW\.md/);
+  assert.doesNotMatch(nested, /--approve-existing/);
+  await fs.rename(path.join(dir, 'sub', 'REVIEW.md'), path.join(dir, 'REVIEW.md'));
+  assert.match((await reviewRulesEarlyWarnings([path.join(dir, 'sub')])).join('\n'), /--approve-existing/);
+});
+
+test('packetReach: an HTML tag after a file name is no placeholder, and a "<name>" folder still is one', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'packet-html-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'target');
+  const runDir = path.join(root, 'runs', 'this');
+  for (const dir of [target, path.join(runDir, 'phase1')]) await fs.mkdir(dir, { recursive: true });
+  const reach = await packetReach(`${path.join(root, 'out')}/<cluster>/tables.json and ${path.join(root, 'out')}/<name>.json docs/a.md<b> x/a.md<em>`, { cdAbs: target, runDir });
+  assert.deepEqual(reach.notFound, [], 'a placeholder or an HTML tag is never a missing file');
+});
+
+test('readReviewRules: a malformed approved file warns and changes nothing; the early warnings repeat it and name --approve-existing', async (t) => {
+  const r = await rulesRepo(t);
+  await fs.writeFile(r.file, 'My own rules.\n');
+  await fs.mkdir(r.config, { recursive: true });
+  await fs.writeFile(approvedRulesFile(process.env), '{ not json');
+  const warnings = [];
+  const res = await readReviewRules([r.dir], 'head', warnings);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /approved REVIEW\.md copies file could not be read/);
+  assert.deepEqual(res.record.files.map((f) => [f.ref, f.used]), [['not in git', false]]);
+  const early = (await reviewRulesEarlyWarnings([r.dir])).join('\n');
+  assert.match(early, /approved REVIEW\.md copies file could not be read/);
+  assert.match(early, /review-run rules-write --repo .* --approve-existing/);
+});
+
+test('--host reads REVIEW.md only for a packet whose Profile names Code; a packet with no Profile line reads it with a warning [slow]', async (t) => {
+  const h = await harness(t);
+  await fs.writeFile(path.join(h.target, 'REVIEW.md'), 'Style is out of scope.\n');
+  const launch = async (name, packet) => {
+    const runDir = path.join(h.dir, name);
+    await fs.mkdir(runDir, { recursive: true });
+    await fs.writeFile(path.join(runDir, 'task-packet.md'), packet);
+    const r = h.launch(['--review-rules', 'worktree'], { runDir });
+    assert.equal(r.status, 0, r.stderr);
+    return { stderr: r.stderr, desc: await readRunDescriptor(runDir), runDir };
+  };
+  const arch = await launch('run-arch', 'Profile: Architecture. Target: x\n');
+  assert.match(arch.stderr, /preflight: REVIEW\.md not read: the packet's profile is Architecture; REVIEW\.md rules are for code reviews/);
+  assert.equal(arch.desc.reviewRules, undefined);
+  await assert.rejects(fs.access(path.join(arch.runDir, 'review-rules.md')));
+  const both = await launch('run-both', 'Profile: Architecture + Code. Target: x\n');
+  assert.doesNotMatch(both.stderr, /REVIEW\.md not read/);
+  assert.equal(both.desc.reviewRules.files[0].ref, 'not versioned');
+  const none = await launch('run-none', 'Target: x\n');
+  assert.match(none.stderr, /WARNING: the task packet has no Profile line, so REVIEW\.md was read as for a code review/);
+  assert.match(await fs.readFile(path.join(none.runDir, 'review-rules.md'), 'utf8'), /Style is out of scope\./);
+});
+
+test('--host: an approved untracked REVIEW.md reaches the seats and the warning names the approval [slow]', async (t) => {
+  const h = await harness(t);
+  for (const args of [['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'one']]) assert.equal(spawnSync('git', args, { cwd: h.target }).status, 0);
+  const file = path.join(h.target, 'REVIEW.md');
+  await fs.writeFile(file, 'Approved rules.\n');
+  const before = h.launch([], { runDir: path.join(h.dir, 'run-before') });
+  assert.match(before.stderr, /not in git.*or approve this copy with review-run rules-write --repo .* --approve-existing/);
+  await fs.mkdir(path.join(h.dir, 'config'), { recursive: true });
+  await fs.writeFile(approvedRulesFile({ REVIEW_SKILLS_CONFIG_DIR: path.join(h.dir, 'config') }), JSON.stringify({ version: 1, approved: [{ path: file, sha256: createHash('sha256').update(await fs.readFile(file)).digest('hex'), at: '2026-11-18T10:00:00.000Z' }] }));
+  const after = h.launch([], { runDir: path.join(h.dir, 'run-after') });
+  assert.equal(after.status, 0, after.stderr);
+  assert.match(after.stderr, /REVIEW\.md: the seats get the working-tree copy approved with review-run rules-write \(2026-11-18T10:00:00\.000Z\)/);
+  assert.match(await fs.readFile(path.join(h.dir, 'run-after', 'review-rules.md'), 'utf8'), /Approved rules\./);
+});
+
+test('early warnings: a worktree read that fails for a reason other than the size limit is warned about', async () => {
+  const lines = (await reviewRulesEarlyWarnings([42])).join(' | ');
+  assert.match(lines, /WARNING: REVIEW\.md could not be read from the working tree: /);
 });
 
 test('--host records HEAD, the diff hash and the untracked hash for a git target [slow]', async (t) => {
