@@ -458,6 +458,42 @@ test('readReviewRules under core.autocrlf: a clean CRLF checkout of a tracked RE
   assert.doesNotMatch(dirty.text, /Extra line/);
 });
 
+test('readReviewRules: an approved CRLF checkout equal to the ref under core.autocrlf is the ref copy; an approved CRLF-only edit without autocrlf is still an approved copy', async (t) => {
+  const r = await rulesRepo(t);
+  r.git('config', 'core.autocrlf', 'true');
+  await fs.writeFile(r.file, 'Base rules.\nSecond line.\n');
+  r.git('add', 'REVIEW.md');
+  r.git('commit', '-q', '-m', 'rules');
+  r.git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  r.git('checkout', '-q', '-b', 'feature2');
+  await fs.writeFile(r.file, 'Base rules.\r\nSecond line.\r\n');
+  await r.approve([await r.entry()]);
+  const same = await readReviewRules([r.dir]);
+  assert.match(same.record.files[0].ref, /^merge-base /);
+  assert.equal(same.record.files[0].changed, false);
+  assert.equal(same.record.files[0].edited, undefined);
+  r.git('config', 'core.autocrlf', 'false');
+  const edited = await readReviewRules([r.dir]);
+  assert.equal(edited.record.files[0].ref, 'approved copy');
+  assert.equal(edited.record.files[0].changed, true);
+});
+
+test('the evidence preflight adds one note that REVIEW.md warnings apply to code reviews only, and only with a warning [slow]', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules note '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  for (const args of [['init', '-q'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'one']]) assert.equal(spawnSync('git', args, { cwd: dir }).status, 0);
+  const out = path.join(dir, '..', `${path.basename(dir)}-note.json`);
+  t.after(() => fs.rm(out, { force: true }));
+  const launch = () => spawnSync(process.execPath, [path.join(SCRIPTS, 'preflight.mjs'), '--cd', dir, '--out', out], { encoding: 'utf8', timeout: 120000 });
+  const clean = launch();
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.doesNotMatch(clean.stdout + clean.stderr, /for code reviews only/);
+  await fs.writeFile(path.join(dir, 'REVIEW.md'), 'My own rules.\n');
+  const warned = launch();
+  assert.equal(warned.status, 0, warned.stderr);
+  assert.match(warned.stdout + warned.stderr, /REVIEW\.md is not in git[^\n]*\n[^\n]*REVIEW\.md is read for code reviews only/);
+});
+
 test('packetProfile and isCodeProfile: bold and bullet lines, text before Target, an empty or missing profile reads as code', () => {
   assert.equal(packetProfile('**Profile:** Document\n'), 'Document');
   assert.equal(packetProfile('- Profile: Document\n'), 'Document');

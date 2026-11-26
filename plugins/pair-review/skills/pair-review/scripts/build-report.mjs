@@ -1597,7 +1597,7 @@ function shortSentences(report) {
   const confirmedRows = rows.filter((r) => r.kind === 'hypothesis' && r.status !== 'not-verified' && r.verdict === 'confirmed' && !(r.findings?.length > 0));
   const confirmedHyp = confirmedRows.length;
   if (confirmedHyp > 0) {
-    out.push(`${confirmedHyp === 1 ? 'A suspected bug was' : `${confirmedHyp} suspected bugs were`} confirmed by the reviewers but no finding covers ${confirmedHyp === 1 ? 'it' : 'them'}:`);
+    out.push(`${confirmedHyp === 1 ? 'A suspected bug was' : `${confirmedHyp} suspected bugs were`} confirmed by the reviewers, but no finding is tagged with ${confirmedHyp === 1 ? 'it' : 'them'} (a finding may still describe ${confirmedHyp === 1 ? 'it' : 'them'}):`);
     for (const r of confirmedRows.slice(0, 3)) out.push(`  - ${shortTitle({ title: r.text }, CHAT_LINE - 4)}`);
     if (confirmedHyp > 3) out.push(`  - and ${confirmedHyp - 3} more in the full report`);
     out.push('');

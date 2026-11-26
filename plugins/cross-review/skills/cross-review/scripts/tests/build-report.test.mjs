@@ -2652,14 +2652,14 @@ test('short chat: a reviewer that ran only tool scripts is not called read-only;
   const packet = lines('# P', '## Hypotheses', '- [H1] a');
   const seat = lines('# S', '', '## Checks performed', '- H1: confirmed by running node t.mjs, it throws.');
   const hyp = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: seat } });
-  assert.match(renderChat(hyp), /^A suspected bug was confirmed by the reviewers but no finding covers it:\n {2}- a\n\n/m);
+  assert.match(renderChat(hyp), /^A suspected bug was confirmed by the reviewers, but no finding is tagged with it \(a finding may still describe it\):\n {2}- a\n\n/m);
 });
 
 test('short chat: confirmed suspected bugs with no finding are named, first 3 only, then +N more; no H-ids', () => {
   const packet = lines('# P', '## Hypotheses', '- [H1] First bug.', '- [H2] Second bug.', '- [H3] Third bug.', '- [H4] Fourth bug.');
   const seat = lines('# S', '', '## Checks performed', '- H1: confirmed by running node t.mjs.', '- H2: confirmed by running node t.mjs.', '- H3: confirmed by running node t.mjs.', '- H4: confirmed by running node t.mjs.');
   const out = renderChat(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: seat } }));
-  assert.match(out, /^4 suspected bugs were confirmed by the reviewers but no finding covers them:\n {2}- First bug\.\n {2}- Second bug\.\n {2}- Third bug\.\n {2}- and 1 more in the full report\n\n/m);
+  assert.match(out, /^4 suspected bugs were confirmed by the reviewers, but no finding is tagged with them \(a finding may still describe them\):\n {2}- First bug\.\n {2}- Second bug\.\n {2}- Third bug\.\n {2}- and 1 more in the full report\n\n/m);
   assert.doesNotMatch(out, /Fourth bug|H\d/);
 });
 

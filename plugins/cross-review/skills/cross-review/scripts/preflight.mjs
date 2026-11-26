@@ -1857,8 +1857,9 @@ async function fingerprintFiles(cd) {
 
 // The files that differ between two fingerprintFiles records; a moved HEAD is named first.
 function driftedFiles(before, after) {
-  const source = (all) => Object.fromEntries(Object.entries(all ?? {}).filter(([key]) => !isCachePath(key)));
-  const files = diffInventories(source(before?.files), source(after.files));
+  // Only the older record can hold untracked cache files; a cache file in the new one is a tracked file that changed.
+  const older = Object.fromEntries(Object.entries(before?.files ?? {}).filter(([key]) => !isCachePath(key)));
+  const files = diffInventories(older, after.files ?? {});
   return before?.head && after.head && before.head !== after.head ? [`HEAD (${before.head.slice(0, 7)} -> ${after.head.slice(0, 7)})`, ...files] : files;
 }
 
@@ -2097,7 +2098,7 @@ export async function readReviewRules(dirs, mode = 'head', warnings = []) {
       const bytes = mode === 'worktree' ? disk : atRef.code === 0 ? atRef.stdout : null;
       const gitDiffers = (await runCapture('git', ['diff', '--quiet', ref, '--', spec], dir)).code !== 0;
       const changed = gitDiffers || (atRef.code !== 0 && disk !== null);
-      const approved = mode === 'head' && disk !== null && (atRef.code !== 0 || !disk.equals(atRef.stdout))
+      const approved = mode === 'head' && disk !== null && (atRef.code !== 0 || gitDiffers)
         ? approvals.find((e) => comparablePath(e.path) === comparablePath(path.join(top, rel)) && e.sha256 === sha256(disk))
         : undefined;
       if (approved) {
@@ -2426,7 +2427,9 @@ async function main() {
         );
       }
     }
-    notes.push(...await reviewRulesEarlyWarnings([path.resolve(args.cd), ...(args.repos ?? []).map((r) => path.resolve(r))]));
+    const ruleNotes = await reviewRulesEarlyWarnings([path.resolve(args.cd), ...(args.repos ?? []).map((r) => path.resolve(r))]);
+    if (ruleNotes.length > 0) ruleNotes.push('preflight: note: REVIEW.md is read for code reviews only; ignore the REVIEW.md warnings above for a document or design review.');
+    notes.push(...ruleNotes);
     const text = JSON.stringify(result, null, 2) + '\n';
     if (args.out) {
       await mkdir(path.dirname(path.resolve(args.out)), { recursive: true });

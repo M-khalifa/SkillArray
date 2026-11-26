@@ -12,7 +12,7 @@ import {
   assertGrantsIsolated,
 } from './run-descriptor.mjs';
 import { createHash } from 'node:crypto';
-import { computeSnapshotHash, snapshotMatches, driftedFiles, fingerprintFiles, isCodeProfile, outsideReadWarning, packetProfile, packetReach, readReviewRules } from './preflight.mjs';
+import { computeSnapshotHash, snapshotMatches, driftedFiles, fingerprintFiles, isCodeProfile, isGitRepo, outsideReadWarning, packetProfile, packetReach, readReviewRules } from './preflight.mjs';
 import { approvedRulesFile, readApprovedRules } from './review-config.mjs';
 import { parseFenceLines, refutesByInference, runStep as relabelStep, seatClaimProblems } from './blind-relabel.mjs';
 import { runStep as exchangeStep } from './exchange.mjs';
@@ -2091,7 +2091,17 @@ async function suggestRules(args, errOut) {
 
 const RULES_NEXT = 'next: the next review of this repository reads this REVIEW.md; commit it on the default branch when the team should share it';
 
-// The file's text with the lines added at the end of the section "## <section>" (or in a new one), every other byte kept.
+const sectionStart = (lines, fenced, section) => lines.findIndex((l, i) => {
+  const h = /^##\s+(.+?)\s*$/.exec(l);
+  return !fenced[i] && h !== null && h[1].toLowerCase() === section.toLowerCase();
+});
+
+const sectionEnd = (lines, fenced, start, heading) => {
+  const i = lines.findIndex((l, j) => j > start && !fenced[j] && heading.test(l));
+  return i === -1 ? lines.length : i;
+};
+
+// The file's text with the lines added at the end of the section's own text, before its first sub-heading (or in a new section), every other byte kept.
 function addRuleLines(raw, section, add) {
   const bom = raw !== null && raw.length >= 3 && raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf ? raw.subarray(0, 3) : Buffer.alloc(0);
   const text = raw === null ? '' : raw.subarray(bom.length).toString('utf8');
@@ -2102,23 +2112,19 @@ function addRuleLines(raw, section, add) {
   else if (lines.length > 0) lines[lines.length - 1] += cr;
   const bullets = add.map((l) => `- ${l}${cr}`);
   const fenced = parseFenceLines(text).lines.map((l) => l.inFence);
-  const start = lines.findIndex((l, i) => {
-    const h = /^##\s+(.+?)\s*$/.exec(l);
-    return !fenced[i] && h !== null && h[1].toLowerCase() === section.toLowerCase();
-  });
+  const start = sectionStart(lines, fenced, section);
   if (start === -1) {
     const blank = lines.length > 0 && lines[lines.length - 1].trim() !== '';
     lines.push(...(blank ? [cr] : []), `## ${section}${cr}`, cr, ...bullets);
   } else {
-    let end = lines.findIndex((l, i) => i > start && !fenced[i] && /^#{1,2}\s/.test(l));
-    if (end === -1) end = lines.length;
+    let end = sectionEnd(lines, fenced, start, /^#{1,6}\s/);
     while (end - 1 > start && lines[end - 1].trim() === '') end--;
     lines.splice(end, 0, ...bullets);
   }
   return Buffer.concat([bom, Buffer.from(`${lines.join('\n')}\n`, 'utf8')]);
 }
 
-// True when the tracked REVIEW.md equals (git-normalised) the copy preflight head mode reads: the merge-base with origin/HEAD, or HEAD when that fails.
+// True when the tracked REVIEW.md equals (git-normalised) the merge-base copy with origin/HEAD; with no merge-base it is false (approve with --approve-existing), because an approval outlives the missing origin.
 // The branch's own commits are not trusted, so a branch cannot approve the rules it wrote.
 function equalsPreflightBase(repo) {
   const top = gitTop(repo);
@@ -2153,7 +2159,12 @@ async function writeRules(args) {
     return fail(`${approvedFile} does not parse (${err.message})`, 'next: fix or remove that file, then run rules-write again; nothing was written');
   }
   const section = args.section ?? 'Always check';
-  const have = new Set(raw === null ? [] : raw.toString('utf8').split('\n').map((l) => /^\s*[-*]\s+(.*?)\s*$/.exec(l)?.[1]).filter((t) => t !== undefined));
+  const text = raw === null ? '' : raw.toString('utf8').replace(/^\u{FEFF}/u, '');
+  const textLines = text.split('\n');
+  const fenced = parseFenceLines(text).lines.map((l) => l.inFence);
+  const first = sectionStart(textLines, fenced, section);
+  const last = first === -1 ? 0 : sectionEnd(textLines, fenced, first, /^#{1,2}\s/);
+  const have = new Set(first === -1 ? [] : textLines.slice(first + 1, last).filter((_, i) => !fenced[first + 1 + i]).map((l) => /^\s*[-*]\s+(.*?)\s*$/.exec(l)?.[1]).filter((t) => t !== undefined));
   const add = [];
   const there = [];
   for (const l of args.lines) (have.has(l) || add.includes(l) ? there : add).push(l);
@@ -2170,7 +2181,7 @@ async function writeRules(args) {
   const want = comparablePath(file);
   // The approval covers the whole file: the rest must be new, approved before or the committed copy, unless --approve-existing.
   const restTrusted = args.approveExisting || raw === null || approved.some((e) => comparablePath(e.path) === want && e.sha256 === sha256Of(raw))
-    || equalsPreflightBase(repo);
+    || equalsPreflightBase(repo) || !(await isGitRepo(repo).catch(() => false));
   const notApproved = `not approved: the rest of ${file} was never approved or committed; show the user the whole file, then run rules-write --repo "${repo}" --approve-existing`;
   if (args.dryRun) {
     return { code: 0, lines: ['dry run: nothing was written', ...lines, `file: ${file}`, `final size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, restTrusted ? `would approve: ${sha.slice(0, 12)}` : notApproved] };

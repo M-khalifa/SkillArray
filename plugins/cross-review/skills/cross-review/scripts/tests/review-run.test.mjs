@@ -3658,6 +3658,8 @@ test('rules-write --dry-run writes neither file; --approve-existing needs a file
 test('rules-write approves only when the rest of REVIEW.md was new, approved before or committed', async (t) => {
   const config = await configDir(t);
   const { dir, file } = await plainRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir }).status, 0);
   await fs.writeFile(file, '# Review instructions\n\n## Always check\n\n- written by someone else\n');
   const r = await cliIn('rules-write', '--repo', dir, '--line', 'new rule');
   assert.equal(r.code, 0, r.out + r.err);
@@ -3669,6 +3671,32 @@ test('rules-write approves only when the rest of REVIEW.md was new, approved bef
   const next = await cliIn('rules-write', '--repo', dir, '--line', 'third rule');
   assert.match(next.out, /^approved: [0-9a-f]{12} at /m);
   assert.equal((await approvedEntries(config)).approved[0].sha256, sha(await fs.readFile(file)));
+});
+
+test('rules-write trusts the rest of a REVIEW.md in a plain folder, which preflight reads from disk without approval', async (t) => {
+  await configDir(t);
+  const { dir, file } = await plainRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(file, '# Review instructions\n\n## Always check\n\n- written by someone else\n');
+  const out = (await cliIn('rules-write', '--repo', dir, '--line', 'x', '--dry-run')).out;
+  assert.doesNotMatch(out, /^not approved:/m);
+  assert.match(out, /^would approve: /m);
+});
+
+test('rules-write looks for a line only in the target section outside code fences, and adds before the first sub-heading', async (t) => {
+  await configDir(t);
+  const { dir, file } = await plainRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(file, '# R\n\n## Always check\n- a\n\n## Examples\n\n```md\n- check X\n```\n\n- elsewhere\n');
+  const r = await cliIn('rules-write', '--repo', dir, '--line', 'check X', '--line', 'elsewhere');
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.doesNotMatch(r.out, /already there/);
+  assert.equal(await fs.readFile(file, 'utf8'), '# R\n\n## Always check\n- a\n- check X\n- elsewhere\n\n## Examples\n\n```md\n- check X\n```\n\n- elsewhere\n');
+  await fs.writeFile(file, '# R\n\n## Always check\n- a\n\n### Python\n- p\n\n## Other\n');
+  const s = await cliIn('rules-write', '--repo', dir, '--line', 'y', '--line', 'p');
+  assert.equal(s.code, 0, s.out + s.err);
+  assert.match(s.out, /^already there: - p$/m);
+  assert.equal(await fs.readFile(file, 'utf8'), '# R\n\n## Always check\n- a\n- y\n\n### Python\n- p\n\n## Other\n');
 });
 
 const BASE_RULES = '# Review instructions\n\n## Always check\n\n- base rule\n';

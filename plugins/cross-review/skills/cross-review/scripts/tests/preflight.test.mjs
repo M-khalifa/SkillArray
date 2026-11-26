@@ -1112,7 +1112,21 @@ test('driftedFiles: cache files in an older fingerprint record are not drift, a 
   const { driftedFiles } = await import('../preflight.mjs');
   const before = { head: null, files: { 'a.py': 'h1', '__pycache__/a.pyc': 'h2', 'm.pyc': 'h3' } };
   assert.deepEqual(driftedFiles(before, { head: null, files: { 'a.py': 'h1' } }), []);
-  assert.deepEqual(driftedFiles(before, { head: null, files: { 'a.py': 'h9', '__pycache__/a.pyc': 'h8' } }), ['a.py']);
+  assert.deepEqual(driftedFiles(before, { head: null, files: { 'a.py': 'h9' } }), ['a.py']);
+});
+
+test('driftedFiles: a tracked cache file that changed is named, an untracked new cache file is not [slow]', async (t) => {
+  const { fingerprintFiles, driftedFiles } = await import('../preflight.mjs');
+  const dir = await makeGitRepo(t);
+  await writeFile(path.join(dir, 'a.pyc'), 'v1', 'utf8');
+  git(['add', 'a.pyc'], dir);
+  git(['commit', '-q', '-m', 'pyc'], dir);
+  const before = await fingerprintFiles(dir);
+  await mkdir(path.join(dir, '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, '__pycache__', 'new.cpython-311.pyc'), 'x', 'utf8');
+  assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), []);
+  await writeFile(path.join(dir, 'a.pyc'), 'v2', 'utf8');
+  assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), ['a.pyc']);
 });
 
 test('snapshotMatches: a hash recorded without the cache filter still matches a git target and a plain folder, and a real change does not', async (t) => {
