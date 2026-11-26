@@ -1040,7 +1040,7 @@ export function buildReport({ findingsDoc, manifest, packetText = '', seatTexts 
       : `${split}; the exchange did not reconcile it, so read both seat files before you act.`);
   }
   const splitHyp = (criteria?.rows ?? []).filter((r) => r.kind === 'hypothesis' && r.verdict === 'split').map((r) => r.tag);
-  if (splitHyp.length > 0) minor(splitHypCaveat(splitHyp), `split ${splitHyp.join(' ')}`);
+  if (splitHyp.length > 0) caveats.push(splitHypCaveat(splitHyp));
   const fixWorded = (criteria?.rows ?? []).filter((r) => r.fixWorded && r.status !== 'not-verified').map((r) => r.tag);
   if (fixWorded.length > 0) minor(`${fixWorded.join(', ')} ${fixWorded.length > 1 ? 'were' : 'was'} worded "Confirm it is fixed" in a run whose seats were not told what CONFIRMED means (a 1.1.0 run), so a seat's CONFIRMED there meant fixed: the report shows ${fixWorded.length > 1 ? 'their' : 'its'} outcomes flipped, and REFUTED means the defect is gone.`, '1.1.0 wording');
   if (criteria?.silentSeats.length > 0) minor(`${criteria.silentSeats.map((x) => `Seat ${x}`).join(', ')} wrote checks but named no criterion or hypothesis tag, so the criteria and hypotheses counts reflect only the seat(s) that did.`, 'untagged seat checks');
@@ -1644,8 +1644,9 @@ export function renderChat(report, { all = false } = {}) {
   const withFindings = critRows.filter((r) => r.status === 'issue').map((r) => r.tag);
   const notMet = critRows.filter((r) => r.status === 'clean' && (r.met === 'NOT MET' || r.failedSeats.length > 0)).map((r) => r.tag);
   const tagList = (list) => `${list.slice(0, 8).join(', ')}${list.length > 8 ? ', ...' : ''}`;
-  const criteriaText = `${withFindings.length > 0 ? ` · ${withFindings.length} criteri${withFindings.length === 1 ? 'on' : 'a'} with findings (${tagList(withFindings)})` : ''}${notMet.length > 0 ? ` · ${notMet.length} not met, no finding (${tagList(notMet)})` : ''}`;
-  const out = [`> **${head}${report.round ? ` · round ${report.round}` : ''} · ${blockText}${all ? decideText + criteriaText : ''} · ${findingsText}**`, ''];
+  const withFindingsText = withFindings.length > 0 ? ` · ${withFindings.length} criteri${withFindings.length === 1 ? 'on' : 'a'} with findings (${tagList(withFindings)})` : '';
+  const notMetText = notMet.length > 0 ? ` · ${notMet.length} not met, no finding (${tagList(notMet)})` : '';
+  const out = [`> **${head}${report.round ? ` · round ${report.round}` : ''} · ${blockText}${all ? decideText + withFindingsText : ''}${notMetText} · ${findingsText}**`, ''];
   if (report.why) out.push(`Why: ${report.why}`, '');
   if (report.total > 0 && all) {
     // Every finding withdrawn leaves no bar; no empty code block then.

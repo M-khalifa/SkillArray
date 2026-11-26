@@ -14,6 +14,8 @@ const CACHE_FILE_RE = /\.py[co]$/;
 // A relative path (either separator) inside a cache folder or naming a .pyc/.pyo file: the items the drift check leaves out.
 export function isCachePath(rel) {
   const parts = String(rel).split(/[\\/]/).filter(Boolean);
+  // A folder entry ("pkg/__pycache__/", as git status lists an untracked folder) counts by its own name.
+  if (/[\\/]$/.test(String(rel))) parts.push('');
   return parts.slice(0, -1).some((p) => CACHE_DIRS.has(p)) || CACHE_FILE_RE.test(parts.at(-1) ?? '');
 }
 export const DEFAULT_MAX_FILES = 20000;

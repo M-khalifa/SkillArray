@@ -1023,7 +1023,11 @@ test('job report: "exit <code>" means the leftover check is not done; afterJobSe
   const set = (fn, ms) => { ran.push(`deferred ${ms}`); return 'timer'; };
   assert.equal(afterJobSettles(report, () => ran.push('now'), { set, ms: 3000 }), 'timer');
   assert.deepEqual(ran, ['deferred 3000'], 'the command ended: the kill waits for the wrapper');
-  for (const text of ['left 7', 'nojob CreateJobObject failed: 5', '']) {
+  await writeFile(report, '');
+  ran.length = 0;
+  assert.equal(afterJobSettles(report, () => ran.push('now'), { set, ms: 3000 }), 'timer');
+  assert.deepEqual(ran, ['deferred 3000'], 'an empty report is the rewrite after "exit": wait');
+  for (const text of ['left 7', 'nojob CreateJobObject failed: 5']) {
     await writeFile(report, text);
     ran.length = 0;
     assert.equal(afterJobSettles(report, () => ran.push('now'), { set }), null);
@@ -1102,6 +1106,36 @@ test('field run: on a plain folder the drift check ignores Python and Gradle cac
   assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), []);
   await writeFile(path.join(dir, 'new.py'), 'x');
   assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), ['new.py']);
+});
+
+test('driftedFiles: cache files in an older fingerprint record are not drift, a source change still is', async () => {
+  const { driftedFiles } = await import('../preflight.mjs');
+  const before = { head: null, files: { 'a.py': 'h1', '__pycache__/a.pyc': 'h2', 'm.pyc': 'h3' } };
+  assert.deepEqual(driftedFiles(before, { head: null, files: { 'a.py': 'h1' } }), []);
+  assert.deepEqual(driftedFiles(before, { head: null, files: { 'a.py': 'h9', '__pycache__/a.pyc': 'h8' } }), ['a.py']);
+});
+
+test('snapshotMatches: a hash recorded without the cache filter still matches a git target and a plain folder, and a real change does not', async (t) => {
+  const { snapshotMatches } = await import('../preflight.mjs');
+  const dir = await makeGitRepo(t);
+  await mkdir(path.join(dir, '__pycache__'), { recursive: true });
+  await writeFile(path.join(dir, '__pycache__', 'm.cpython-311.pyc'), 'x');
+  const legacy = await computeSnapshotHash(dir, null, { legacy: true });
+  assert.notEqual(legacy, await computeSnapshotHash(dir), 'the filter changes the hash');
+  assert.equal(await snapshotMatches(dir, legacy), true);
+  assert.equal(await snapshotMatches(dir, await computeSnapshotHash(dir)), true);
+  await writeFile(path.join(dir, 'a.txt'), 'edited\n');
+  assert.equal(await snapshotMatches(dir, legacy), false);
+  const plain = await mkdtemp(path.join(tmpdir(), 'snapshot-plain-'));
+  t.after(() => rm(plain, { recursive: true, force: true }));
+  await writeFile(path.join(plain, 'main.py'), 'print(1)');
+  await mkdir(path.join(plain, '__pycache__'), { recursive: true });
+  await writeFile(path.join(plain, '__pycache__', 'main.cpython-311.pyc'), 'x');
+  const plainLegacy = await computeSnapshotHash(plain, null, { legacy: true });
+  assert.notEqual(plainLegacy, await computeSnapshotHash(plain));
+  assert.equal(await snapshotMatches(plain, plainLegacy), true);
+  await writeFile(path.join(plain, 'main.py'), 'print(2)');
+  assert.equal(await snapshotMatches(plain, plainLegacy), false);
 });
 
 test('changeSizeWarning: a change over 500 files or 8,000 lines suggests scoped runs; at or under both, nothing', () => {

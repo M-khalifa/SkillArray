@@ -467,9 +467,39 @@ test('packetProfile and isCodeProfile: bold and bullet lines, text before Target
   assert.equal(packetProfile('Profile: Target: x\n'), null);
   assert.equal(packetProfile('no such line'), null);
   assert.equal(packetProfile(''), null);
+  assert.equal(packetProfile('Target: x\n\n## Hypotheses\n- Profile: staging\n'), null);
+  assert.equal(packetProfile('Profile: Document. Target: x\n\n## Hypotheses\n- Profile: staging\n'), 'Document');
   assert.equal(isCodeProfile('Document'), false);
   assert.equal(isCodeProfile('Architecture + code'), true);
   assert.equal(isCodeProfile(null), true);
+});
+
+test('early warnings: a nested untracked REVIEW.md is not offered the top-level-only approve command', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review rules nested '));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const git = (...a) => assert.equal(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir }).status, 0);
+  git('init', '-q');
+  await fs.mkdir(path.join(dir, 'sub'));
+  await fs.writeFile(path.join(dir, 'sub', 'code.txt'), 'x\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  await fs.writeFile(path.join(dir, 'sub', 'REVIEW.md'), 'My own rules.\n');
+  const nested = (await reviewRulesEarlyWarnings([path.join(dir, 'sub')])).join('\n');
+  assert.match(nested, /sub.REVIEW\.md is not in git/);
+  assert.match(nested, /rules-write approves only the top-level REVIEW\.md/);
+  assert.doesNotMatch(nested, /--approve-existing/);
+  await fs.rename(path.join(dir, 'sub', 'REVIEW.md'), path.join(dir, 'REVIEW.md'));
+  assert.match((await reviewRulesEarlyWarnings([path.join(dir, 'sub')])).join('\n'), /--approve-existing/);
+});
+
+test('packetReach: an HTML tag after a file name is no placeholder, and a "<name>" folder still is one', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'packet-html-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'target');
+  const runDir = path.join(root, 'runs', 'this');
+  for (const dir of [target, path.join(runDir, 'phase1')]) await fs.mkdir(dir, { recursive: true });
+  const reach = await packetReach(`${path.join(root, 'out')}/<cluster>/tables.json and ${path.join(root, 'out')}/<name>.json docs/a.md<b> x/a.md<em>`, { cdAbs: target, runDir });
+  assert.deepEqual(reach.notFound, [], 'a placeholder or an HTML tag is never a missing file');
 });
 
 test('readReviewRules: a malformed approved file warns and changes nothing; the early warnings repeat it and name --approve-existing', async (t) => {

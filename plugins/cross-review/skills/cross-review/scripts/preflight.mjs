@@ -545,8 +545,9 @@ function sourceInventory(cd) {
 // Scoped to --cd: the committed tree of that folder, its binary diff against HEAD (so a binary
 // change is distinguishable), and a content hash per untracked file (so a created file counts).
 // A commit or edit elsewhere in a monorepo does not make this target's evidence stale.
-async function computeSnapshotHash(cd, inventory = null) {
-  if (!(await isGitRepo(cd))) return (inventory ?? (await sourceInventory(cd))).snapshotHash;
+// legacy: hash without cache filtering, to match a hash recorded that way.
+async function computeSnapshotHash(cd, inventory = null, { legacy = false } = {}) {
+  if (!(await isGitRepo(cd))) return (legacy ? await hashInventory(cd) : (inventory ?? (await sourceInventory(cd)))).snapshotHash;
   const headRes = await runCapture('git', ['rev-parse', 'HEAD'], cd);
   if (headRes.code !== 0) {
     throw new RelayError(`could not resolve HEAD in "${cd}" (not a git repo, or no commits yet)`);
@@ -557,7 +558,7 @@ async function computeSnapshotHash(cd, inventory = null) {
   const treeId = treeRes.code === 0 ? treeRes.stdout.toString('utf8').trim() : 'no-committed-tree';
   const diffRes = await gitOut([...GIT_PLAIN, 'diff', ...DIFF_PLAIN, 'HEAD', '--binary', '--relative', '--', '.'], cd);
   const untrackedRes = await gitOut(['ls-files', '--others', '--exclude-standard', '-z'], cd);
-  const untrackedEntries = gitNames(untrackedRes.stdout).filter((e) => !e.text.endsWith('/') && !isCachePath(e.text)).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+  const untrackedEntries = gitNames(untrackedRes.stdout).filter((e) => !e.text.endsWith('/') && (legacy || !isCachePath(e.text))).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
 
   const hash = createHash('sha256');
   hash.update(treeId);
@@ -570,6 +571,11 @@ async function computeSnapshotHash(cd, inventory = null) {
     hash.update(await entrySha256(entryPath(cd, entry)));
   }
   return hash.digest('hex');
+}
+
+// True when the target's current hash equals one recorded earlier, by this release or one that did not filter caches.
+async function snapshotMatches(cd, recorded) {
+  return (await computeSnapshotHash(cd)) === recorded || (await computeSnapshotHash(cd, null, { legacy: true })) === recorded;
 }
 
 // Tier 2's --exec command is an arbitrary caller-supplied shell command
@@ -1040,7 +1046,7 @@ function freshnessWarnings(records) {
 // the evidence; only reports match/mismatch as a fact.
 async function checkStale(cd, snapshotHash) {
   const current = await computeSnapshotHash(cd);
-  return { stale: current !== snapshotHash, currentSnapshotHash: current };
+  return { stale: current !== snapshotHash && (await computeSnapshotHash(cd, null, { legacy: true })) !== snapshotHash, currentSnapshotHash: current };
 }
 
 // One stdout line for a run written to --out, so the hash and exit codes can be read without opening the JSON.
@@ -1401,7 +1407,8 @@ export async function codexPowerShellConstrained(cwd, { run = (dir) => sandboxRu
   try {
     const r = await run(cwd);
     return r?.code === 0 && /ConstrainedLanguage/.test(String(r.text ?? ''));
-  } catch {
+  } catch (err) {
+    process.stderr.write(`preflight: PowerShell language-mode probe failed: ${err.message}${String.fromCharCode(10)}`);
     return false;
   }
 }
@@ -1586,7 +1593,7 @@ async function packetPaths(text, baseDir) {
   };
   // A "<name>" segment inside a path ("out/<cluster>/tables.json") is a placeholder: the word is neither found nor missing.
   // An HTML tag after a file name ("a.md</td>", "a.md<sup>1</sup>", "a.md<br>") is not one.
-  const hasPlaceholder = (w) => /[\\/][^\\/\s<>]*<(?!br\b)[^<>\s\\/]+>[^\\/\s<>]*(?=[\\/]|$)/i.test(w);
+  const hasPlaceholder = (w) => /[\\/][^\\/\s<>]*(?<!\.[A-Za-z0-9]+)<(?!br\b)[^<>\s\\/]+>[^\\/\s<>]*(?=[\\/]|$)/i.test(w);
   const wordsOf = (s) => s.split(/\s+/).filter((w) => !hasPlaceholder(w)).map(trimWord);
   const words = wordsOf(raw.replace(/`[^`\r\n]+`/g, ' ').replace(/<br\s*\/?>/gi, ' '));
   // True when the word named a path that exists or (with missingToo) a missing file.
@@ -1850,7 +1857,8 @@ async function fingerprintFiles(cd) {
 
 // The files that differ between two fingerprintFiles records; a moved HEAD is named first.
 function driftedFiles(before, after) {
-  const files = diffInventories(before?.files ?? {}, after.files);
+  const source = (all) => Object.fromEntries(Object.entries(all ?? {}).filter(([key]) => !isCachePath(key)));
+  const files = diffInventories(source(before?.files), source(after.files));
   return before?.head && after.head && before.head !== after.head ? [`HEAD (${before.head.slice(0, 7)} -> ${after.head.slice(0, 7)})`, ...files] : files;
 }
 
@@ -2004,7 +2012,7 @@ export async function reviewRulesEarlyWarnings(dirs) {
     for (const f of head?.record.files.filter((x) => !x.used) ?? []) {
       const file = path.join(f.dir, f.path);
       lines.push(f.ref === 'not in git'
-        ? `preflight: WARNING: ${file} ${NOT_IN_GIT_WARNING} If it is your own rules file, commit it on the default branch (the base the review compares with), or pass --review-rules worktree to the second preflight (--host), or approve this copy with review-run rules-write --repo ${f.dir} --approve-existing.`
+        ? `preflight: WARNING: ${file} ${NOT_IN_GIT_WARNING} If it is your own rules file, commit it on the default branch (the base the review compares with), or pass --review-rules worktree to the second preflight (--host)${f.path === 'REVIEW.md' ? `, or approve this copy with review-run rules-write --repo ${f.dir} --approve-existing.` : '. review-run rules-write approves only the top-level REVIEW.md.'}`
         : f.ref === 'not committed yet'
           ? `preflight: WARNING: ${file} is not used by the second preflight (--host) in head mode (${f.ref}); --review-rules worktree reads the file on disk.`
           : `preflight: WARNING: ${file} is not used by the second preflight (--host) in head mode (${f.ref}: ${f.ref === 'deleted in the working tree' ? 'the working tree deleted it' : 'the base of the branch has no REVIEW.md there'}).`);
@@ -2031,9 +2039,11 @@ export function peerLabelLines(text, checklists = []) {
   return text.split('\n').filter((l) => /\b[ABPXY]\d+\b/.test(masked ? l.replace(masked, '') : l));
 }
 
-// The packet's Profile line ("Profile: Code", "**Profile:** Document. Target: ..."): its text before "Target:", or null when there is none or it is empty.
+// The packet header's Profile line (before the first "## " heading) ("Profile: Code", "**Profile:** Document. Target: ..."): its text before "Target:", or null when there is none or it is empty.
 export function packetProfile(text) {
-  const m = /^\W*Profile\W*:[ \t*_]*(.*)$/im.exec(String(text ?? ''));
+  const all = String(text ?? '');
+  const body = /^## /m.exec(all);
+  const m = /^\W*Profile\W*:[ \t*_]*(.*)$/im.exec(body === null ? all : all.slice(0, body.index));
   if (m === null) return null;
   return m[1].split(/target:/i)[0].trim().replace(/[.\s]+$/, '') || null;
 }
@@ -2303,7 +2313,7 @@ async function hostPreflight(args) {
   if (rules) {
     if (rules.text) await writeFile(path.join(runDir, 'review-rules.md'), rules.text, 'utf8');
     for (const f of rules.record.files.filter((x) => x.changed)) {
-      const approve = `or approve this copy with review-run rules-write --repo ${f.dir} --approve-existing`;
+      const approve = f.path === 'REVIEW.md' ? `or approve this copy with review-run rules-write --repo ${f.dir} --approve-existing` : 'review-run rules-write approves only the top-level REVIEW.md';
       if (f.ref === 'not in git') {
         process.stderr.write(`preflight: WARNING: ${path.join(f.dir, f.path)} ${NOT_IN_GIT_WARNING} If it is your own rules file, commit it on the default branch (the base the review compares with), or start a new run folder and pass --review-rules worktree (this run.json is already written), ${approve}.${nl}`);
         continue;
@@ -2457,4 +2467,4 @@ if (isDirectRun) {
   });
 }
 
-export { stopOnSignal, assertNodeVersion, resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, fingerprintFiles, driftedFiles, pluginCopyDrift, copyDriftWarning, packetReach, hostPreflight, parseArgs, runTier1, runTier2, runWithTimeout, computeSnapshotHash, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };
+export { stopOnSignal, assertNodeVersion, resolveHost, missingDispatchers, leanFlagGaps, computeFingerprint, fingerprintFiles, driftedFiles, pluginCopyDrift, copyDriftWarning, packetReach, hostPreflight, parseArgs, runTier1, runTier2, runWithTimeout, computeSnapshotHash, snapshotMatches, checkStale, run, compactTier2, RelayError, runCapture, isGitRepo, repoFreshness, freshnessWarnings, findReviewArtifacts };

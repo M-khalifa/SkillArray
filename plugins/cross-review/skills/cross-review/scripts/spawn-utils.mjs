@@ -368,6 +368,7 @@ export function readJobReport(report) {
   } catch (err) {
     return { unreadable: err.code || err.message };
   }
+  if (text === '') return { unreadable: 'empty report', empty: true };
   if (text.startsWith('nojob')) return { refused: text.slice(5).trim() };
   const exited = /^exit (-?\d+)$/.exec(text.trim());
   if (exited) return { exited: Number(exited[1]) };
@@ -383,7 +384,9 @@ export function jobSettleMs(env = process.env) {
 
 // Runs `fn` now, or once after jobSettleMs when the job report says the command already ended; returns the new timer or null.
 export function afterJobSettles(report, fn, { set = setTimeout, ms = jobSettleMs() } = {}) {
-  if (report && readJobReport(report).exited !== undefined) return set(fn, ms);
+  const read = report ? readJobReport(report) : null;
+  // An empty report is the wrapper rewriting it after "exit": the command ended, so wait like for "exit".
+  if (read && (read.exited !== undefined || read.empty)) return set(fn, ms);
   fn();
   return null;
 }

@@ -1053,6 +1053,15 @@ test('a note from checkTouched on an earlier attempt is reported when the seat o
   assert.ok(aud.lines.some((l) => /^auditor: earlier attempt: touchedFiles unavailable, check the target by hand/.test(l)), aud.out);
 });
 
+test('a cache-only warning of an earlier attempt is reported once at the redispatch, not again when the auditor completes', async (t) => {
+  const a = await auditorWithBrief(t, { status: 'error', error: 'boom' }, { output: false });
+  await fs.writeFile(path.join(auditDir(a), 'result.attempt-1.json'), JSON.stringify({ status: 'error', touchedFiles: ['pkg/__pycache__/m.cpython-311.pyc'] }));
+  const r = await a.rr('audit', '--run-dir', a.run, '--finish');
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.ok(r.lines.some((l) => /^auditor: earlier attempt: warning: only Python or Gradle cache items changed .*result\.attempt-1\.json/.test(l)), r.out);
+  assert.ok(!r.lines.some((l) => /^auditor: completed.*cache items/.test(l)), r.out);
+});
+
 test('F11: a failed CLI auditor wait names the rerun that dispatches it again', async (t) => {
   const s = await prepared(t);
   await s.ctl({ claudeWait: 1 });
@@ -3533,7 +3542,7 @@ test('rules-suggest prints --json with the REVIEW.md status (a run that lists th
   ]);
   assert.equal(j.findings[0].same_shape, 'same shape of F1');
   assert.equal(j.findings[1].same_shape, null);
-  assert.deepEqual(j.reviewMd, { path: path.join(s.repoX, 'REVIEW.md'), bytes: 10, limit: 8192, tracked: null, approved: null, read: { files: [{ path: path.join(s.repoX, 'REVIEW.md'), bytes: 10 }], total: 10, error: null } });
+  assert.deepEqual(j.reviewMd, { path: path.join(s.repoX, 'REVIEW.md'), bytes: 10, limit: 8192, tracked: null, approved: null, approvedError: null, read: { files: [{ path: path.join(s.repoX, 'REVIEW.md'), bytes: 10 }], total: 10, error: null } });
 });
 
 const BOM = String.fromCharCode(0xfeff);
@@ -3610,7 +3619,7 @@ test('rules-write refuses a file over 8192 bytes, and a total over 8192 with the
   const ok = await cliIn('rules-write', '--repo', path.join(top, 'sub'), '--line', 'z'.repeat(100));
   assert.equal(ok.code, 0, ok.out + ok.err);
   const wrote = ok.out.split('\n').find((l) => l.startsWith('file: ')).slice(6);
-  assert.equal(path.resolve(wrote).toLowerCase(), path.join(fsSync.realpathSync(top), 'REVIEW.md').toLowerCase(), 'a subfolder repo writes the git top level REVIEW.md');
+  assert.equal(path.resolve(wrote).toLowerCase(), path.join(fsSync.realpathSync.native(top), 'REVIEW.md').toLowerCase(), 'a subfolder repo writes the git top level REVIEW.md');
 });
 
 test('rules-write --dry-run writes neither file; --approve-existing needs a file and replaces its own entry only', async (t) => {
@@ -3722,6 +3731,41 @@ test('rules-write approves a REVIEW.md that equals the base copy, and head mode 
   assert.match((await cliIn('rules-write', '--repo', dry.dir, '--line', 'x', '--dry-run')).out, /^would approve: /m);
 });
 
+test('rules-write adds a line after a closing code fence, not inside the block', async (t) => {
+  await configDir(t);
+  const { dir, file } = await plainRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(file, '# Rules\n\n## Always check\n\n```sh\n# run tests first\n```\n\n## Other\n\n- o\n');
+  const r = await cliIn('rules-write', '--repo', dir, '--line', 'y');
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(await fs.readFile(file, 'utf8'), '# Rules\n\n## Always check\n\n```sh\n# run tests first\n```\n- y\n\n## Other\n\n- o\n');
+  await fs.writeFile(file, '# Rules\n\n```sh\n## Always check\n```\n');
+  const s = await cliIn('rules-write', '--repo', dir, '--line', 'z');
+  assert.equal(s.code, 0, s.out + s.err);
+  assert.equal(await fs.readFile(file, 'utf8'), '# Rules\n\n```sh\n## Always check\n```\n\n## Always check\n\n- z\n');
+});
+
+test('rules-write does not trust a branch-committed REVIEW.md when no merge-base resolves', async (t) => {
+  await configDir(t);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rules-nobase-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const git = (...a) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git('init', '-q', '-b', 'main');
+  await fs.writeFile(path.join(dir, 'a.txt'), 'a');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  git('checkout', '-q', '-b', 'feat');
+  await fs.writeFile(path.join(dir, 'REVIEW.md'), BASE_RULES + EVIL);
+  git('add', '-A');
+  git('commit', '-q', '-m', 'branch rules');
+  const out = (await cliIn('rules-write', '--repo', dir, '--line', 'x', '--dry-run')).out;
+  assert.match(out, /^not approved: /m);
+  assert.doesNotMatch(out, /would approve:/);
+});
+
 test('rules-write trusts a CRLF checkout of the base copy under core.autocrlf, and not a working-tree edit of it', async (t) => {
   const r = await rulesBranch(t, { autocrlf: 'true' });
   await fs.rm(r.file);
@@ -3820,6 +3864,36 @@ test('rules-suggest skips runs whose Profile is not Code and counts them in the 
   assert.equal(r.out.split('\n')[0], `3 runs of ${s.repo}, 3 confirmed findings (0 author-confirmed, 3 review-confirmed), 2 non-code runs skipped`);
   assert.doesNotMatch(r.out, /^(arch|doc) F1/m);
   assert.equal(JSON.parse((await cliIn('rules-suggest', '--runs-root', s.runsRoot, '--repo', s.repo, '--json')).out).nonCodeRunsSkipped, 2);
+});
+
+test('rules-suggest uses the auditor severity for the filter and the row, and shows the title when there is no summary', async (t) => {
+  await configDir(t);
+  const s = await runsFixture({ a: {} });
+  const findings = [
+    { id: 'F1', severity: 'MEDIUM', severity_audited: 'HIGH', final_state: 'settled-agree', summary: 'raised to high' },
+    { id: 'F2', severity: 'HIGH', severity_audited: 'LOW', final_state: 'settled-agree', summary: 'lowered to low' },
+    { id: 'F3', severity: 'HIGH', final_state: 'settled-agree', title: 'only a title' },
+  ];
+  await fs.writeFile(path.join(s.runsRoot, 'a', 'phase3', 'findings.json'), JSON.stringify({ findings }));
+  const r = await cliIn('rules-suggest', '--runs-root', s.runsRoot, '--repo', s.repo);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /^a F1 HIGH review-confirmed\n {2}summary: raised to high$/m);
+  assert.doesNotMatch(r.out, /F2/);
+  assert.match(r.out, /^a F3 HIGH review-confirmed\n {2}summary: only a title$/m);
+});
+
+test('rules-write measures the size without BOM and CR the way preflight does', async (t) => {
+  await configDir(t);
+  const { dir, file } = await plainRepo();
+  const rows = Array.from({ length: 2000 }, () => '- a');
+  await fs.writeFile(file, `${BOM}## Always check\r\n${rows.join('\r\n')}\r\n`);
+  const raw = (await fs.readFile(file)).length;
+  assert.ok(raw > 8192, String(raw));
+  const r = await cliIn('rules-write', '--repo', dir, '--line', 'one more', '--dry-run');
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /^added to "## Always check": - one more$/m);
+  assert.match(r.out, /^final size: \d+ bytes \(limit 8192 bytes\)$/m);
+  assert.ok(Number(/^final size: (\d+) bytes/m.exec(r.out)[1]) <= 8192);
 });
 
 test('rules-suggest reads the Profile line the way preflight does: bold and bullet forms, text after Target, an empty profile counts as code', async (t) => {

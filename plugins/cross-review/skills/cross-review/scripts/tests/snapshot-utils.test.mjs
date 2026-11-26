@@ -4,7 +4,12 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { hashInventory, hashWriteInventory, diffInventories } from '../snapshot-utils.mjs';
+import { hashInventory, hashWriteInventory, diffInventories, isCachePath } from '../snapshot-utils.mjs';
+
+test('isCachePath: a cache folder entry counts, a name that only resembles one does not', () => {
+  for (const p of ['pkg/__pycache__/', '.gradle/', '.pytest_cache/', 'a/__pycache__/m.pyc', 'x.pyc']) assert.equal(isCachePath(p), true, p);
+  for (const p of ['src/gradle.py', 'pycache/a.txt', 'a/__pycache__x/b']) assert.equal(isCachePath(p), false, p);
+});
 
 async function tmp(t) {
   const dir = await mkdtemp(path.join(tmpdir(), 'snapshot-utils-test-'));

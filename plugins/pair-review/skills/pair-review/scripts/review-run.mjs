@@ -12,13 +12,13 @@ import {
   assertGrantsIsolated,
 } from './run-descriptor.mjs';
 import { createHash } from 'node:crypto';
-import { computeSnapshotHash, driftedFiles, fingerprintFiles, isCodeProfile, outsideReadWarning, packetProfile, packetReach, readReviewRules } from './preflight.mjs';
+import { computeSnapshotHash, snapshotMatches, driftedFiles, fingerprintFiles, isCodeProfile, outsideReadWarning, packetProfile, packetReach, readReviewRules } from './preflight.mjs';
 import { approvedRulesFile, readApprovedRules } from './review-config.mjs';
 import { parseFenceLines, refutesByInference, runStep as relabelStep, seatClaimProblems } from './blind-relabel.mjs';
 import { runStep as exchangeStep } from './exchange.mjs';
 import { runDirNamedIn, runStep as briefStep } from './build-brief.mjs';
 import { firstBriefTime, hashFile, runStep as manifestStep } from './build-manifest.mjs';
-import { OUTCOMES, seatLines, runStep as reportStep } from './build-report.mjs';
+import { OUTCOMES, finalSeverity, seatLines, runStep as reportStep } from './build-report.mjs';
 import { notesOutcomes, runStep as recheckStep } from './build-recheck-packet.mjs';
 import { parseSeatFile, hasPassContent } from './seat-file.mjs';
 import { processExists, recordedWorkerProven, workerIsLive, retryDeadline, stopRecordedChild, stopRecordedWorker } from './detach-utils.mjs';
@@ -399,8 +399,8 @@ function endedAs(record) {
 }
 
 // A CLI actor that changed the real target fails its step, whichever attempt recorded the write; an unrecorded
-// inventory is reported, not assumed clean.
-async function checkTouched(label, file, nativePeer = null) {
+// inventory is reported, not assumed clean. skipAttemptCache leaves out the cache-only warnings of earlier attempts a redispatch already reported.
+async function checkTouched(label, file, nativePeer = null, { skipAttemptCache = false } = {}) {
   const dir = path.dirname(file);
   const attempts = (await fs.readdir(dir).catch(() => [])).filter((f) => /^result\.attempt-\d+\.json$/.test(f)).sort();
   const list = (touched) => `${touched.slice(0, 5).join(', ')}${touched.length > 5 ? ', ...' : ''}`;
@@ -409,7 +409,10 @@ async function checkTouched(label, file, nativePeer = null) {
     const touched = (await readResultAt(path.join(dir, name)))?.touchedFiles;
     if (Array.isArray(touched) && touched.length > 0) {
       // Cache items alone are a warning, as the drift check leaves them out too; any other path stops the step.
-      if (touched.every(isCachePath)) { cacheOnly.push(`${list(touched)}; recorded in ${name}`); continue; }
+      if (touched.every(isCachePath)) {
+        if (!skipAttemptCache || name === path.basename(file)) cacheOnly.push(`${list(touched)}; recorded in ${name}`);
+        continue;
+      }
       // The record compares the target before and after this CLI actor's run, so a native seat working in the same target meanwhile counts too.
       const peer = nativePeer
         ? `. ${nativePeer} is a native agent working in the same target at the same time and may have made these writes; a new run with --transport cli gives a Claude seat its own worktree, out of the real target`
@@ -449,13 +452,15 @@ export async function warnExtraRepos(desc) {
   for (const repo of desc.extraRepos ?? []) {
     if (warnedRepos.has(repo.dir)) continue;
     let current = null;
+    let same = false;
     try {
       current = await computeSnapshotHash(repo.dir);
+      same = current === repo.snapshotHash || await computeSnapshotHash(repo.dir, null, { legacy: true }) === repo.snapshotHash;
     } catch (err) {
       process.stderr.write(`review-run: WARNING: cannot check ${repo.dir}: ${err.message}\n`);
       continue;
     }
-    if (current !== repo.snapshotHash) {
+    if (!same) {
       warnedRepos.add(repo.dir);
       process.stderr.write(`review-run: WARNING: ${repo.dir} changed since preflight (recorded ${repo.snapshotHash.slice(0, 12)}, now ${current.slice(0, 12)}); the seats read it too, so treat findings that cite it as stale\n`);
     }
@@ -475,8 +480,7 @@ async function assertFingerprint(desc, { acceptDrift = false, report = null, ste
   acceptDrift = acceptDrift || report?.acceptDrift === true;
   await warnExtraRepos(desc);
   if (!desc.fingerprint?.snapshotHash) return;
-  const current = await computeSnapshotHash(desc.targetDir);
-  if (current === desc.fingerprint.snapshotHash) return;
+  if (await snapshotMatches(desc.targetDir, desc.fingerprint.snapshotHash)) return;
   const files = await driftList(desc);
   const named = files === null ? 'the changed files are not recorded for this run' : files.length > 0 ? `changed: ${files.slice(0, 5).join(', ')}${files.length > 5 ? ` and ${files.length - 5} more` : ''}` : 'no listed file differs (a folder or link changed)';
   if (acceptDrift) {
@@ -702,6 +706,7 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
           ? `seat ${role}: previous attempt ended with status ${endedAs(ended ?? prior)}; dispatched again (the earlier result is kept as an attempt file)`
           : `seat ${role}: not started by an earlier --start (no result.json); dispatched now`);
       }
+      const redispatched = Boolean(prior) && Boolean(ended || neverStarted);
       let done;
       try {
         // At least 1 s: a dispatcher's --wait reads 0 as "wait without limit".
@@ -713,7 +718,7 @@ async function waitSeats(desc, phase, roles, maxWait, report, nativeOutput, nati
         throw err;
       }
       if (!done) throw new StillRunning(`seat ${role} (${actor.runtime}) is still running; rerun this command`);
-      const note = await checkTouched(`seat ${role}`, resultFile(desc, phase, role), nativePeer);
+      const note = await checkTouched(`seat ${role}`, resultFile(desc, phase, role), nativePeer, { skipAttemptCache: redispatched });
       report.lines.push(`seat ${role}: completed (cli ${actor.runtime})${note ? `; ${note}` : ''}`);
       await noteAnswerStop(desc, await readResult(desc, phase, role), `seat ${role}`, phase, report);
     } else {
@@ -1016,7 +1021,7 @@ async function laterStepDone(desc, phase, report) {
   if (await finishedRecord(path.join(desc.runDir, 'phase3', 'findings.json'))) {
     report.lines.push(`${phase}: already done, and the audit has finished; nothing was run`);
     // The finished result was checked against the target when it was written; a later change does not make it wrong.
-    if (desc.fingerprint?.snapshotHash && (await computeSnapshotHash(desc.targetDir).catch(() => null)) !== desc.fingerprint.snapshotHash) {
+    if (desc.fingerprint?.snapshotHash && !(await snapshotMatches(desc.targetDir, desc.fingerprint.snapshotHash).catch(() => false))) {
       report.lines.push('note: the target changed after the review finished; the results describe the Phase 1 snapshot');
     }
     report.next = `run: review-run manifest --run-dir ${desc.runDir}, then review-run report --run-dir ${desc.runDir}`;
@@ -1323,7 +1328,7 @@ async function finishZeroClaimRun(desc, report, args) {
 }
 
 async function auditPrepare(desc, args, report) {
-  // A run whose exchange finished passed Phase 1 before the marker existed; any other run needs the marker.
+  // Audit prep needs the Phase 1 done marker, or a finished exchange, which implies Phase 1 passed.
   if (!(await finishedRecord(phase1DoneFile(desc))) && !(await finishedRecord(path.join(desc.runDir, 'phase2', 'exchange-result.json')))) {
     const err = new StepError('audit-prep', `Phase 1 has not finished (no ${phase1DoneFile(desc)}): a seat may still be running, or its findings were not validated yet (a run started before this version has no marker: one phase1 --wait validates it and writes it)`);
     err.next = `run: review-run phase1 --run-dir ${desc.runDir} --wait (rerun it while it exits 3), then audit --prepare`;
@@ -1484,7 +1489,7 @@ async function dispatchAuditor(desc, args, report, briefPath, outputExists) {
     }
     if (waited.status === 3) throw new StillRunning('the auditor is still running; rerun this command');
   }
-  const note = await checkTouched('auditor', result);
+  const note = await checkTouched('auditor', result, null, { skipAttemptCache: redispatch && Boolean(prior) });
   report.lines.push(`auditor: completed${note ? `; ${note}` : ''}`);
   await noteAnswerStop(desc, await readResultAt(result), 'auditor', 'audit', report);
 }
@@ -1927,13 +1932,14 @@ const REVIEW_MD_LIMIT = 8192;
 const oneLine = (s, n = 240) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 
 // Run folders under root, up to 3 levels deep, that hold run.json and phase3/findings.json.
-async function findRunFolders(root) {
+async function findRunFolders(root, errOut = process.stderr) {
   const found = [];
   const walk = async (dir, depth) => {
     let entries = [];
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') errOut.write(`review-run: skipping ${dir}: ${err.message}\n`);
       return;
     }
     for (const e of entries) {
@@ -1986,21 +1992,24 @@ async function reviewMdStatus(repo) {
   let raw = null;
   try {
     raw = await fs.readFile(file);
-  } catch {
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
     raw = null;
   }
   const tracked = top === null ? null : spawnSync('git', ['ls-files', '--error-unmatch', 'REVIEW.md'], { cwd: top, encoding: 'utf8', windowsHide: true }).status === 0;
   let approved = null;
+  let approvedError = null;
   if (raw !== null) {
     try {
       const want = comparablePath(file);
       const entry = (await readApprovedRules(approvedRulesFile(process.env))).find((e) => comparablePath(e.path) === want && e.sha256 === sha256Of(raw));
       approved = entry ? { at: entry.at ?? null } : null;
-    } catch {
+    } catch (err) {
       approved = null;
+      approvedError = err.message;
     }
   }
-  return { path: file, bytes: raw === null ? null : raw.length, limit: REVIEW_MD_LIMIT, tracked, approved, read: await reviewMdRead(repo) };
+  return { path: file, bytes: raw === null ? null : ruleBytes(raw), limit: REVIEW_MD_LIMIT, tracked, approved, approvedError, read: await reviewMdRead(repo) };
 }
 
 // Read-only: the confirmed findings of past reviews of one repository, for drafting REVIEW.md "Always check" lines.
@@ -2011,7 +2020,7 @@ async function suggestRules(args, errOut) {
   const rows = [];
   let runs = 0;
   let nonCode = 0;
-  for (const dir of await findRunFolders(root)) {
+  for (const dir of await findRunFolders(root, errOut)) {
     const rel = path.relative(root, dir).split(path.sep).join('/');
     let desc;
     let doc;
@@ -2050,13 +2059,14 @@ async function suggestRules(args, errOut) {
     const outcomes = notesOutcomes(notes);
     for (const f of Array.isArray(doc) ? doc : doc?.findings ?? []) {
       const word = outcomes.get(f?.id)?.word;
-      if ((SEVERITY_RANK[String(f?.severity).toUpperCase()] ?? 0) < minRank) continue;
+      const severity = finalSeverity(f ?? {});
+      if ((SEVERITY_RANK[severity] ?? 0) < minRank) continue;
       if (word === 'wrong' || word === 'intentional' || word === 'not-worth-it') continue;
       // A finding marked pre-existing is still a real bug, so it stays when the reviewers settled on it.
       const label = word === 'fixed' ? 'author-confirmed'
         : word === undefined && f.final_state === 'settled-agree' ? 'review-confirmed'
           : word === 'pre-existing' && f.final_state === 'settled-agree' ? 'review-confirmed (pre-existing)' : null;
-      if (label) rows.push({ run: rel, id: f.id, severity: String(f.severity).toUpperCase(), label, summary: oneLine(f.summary), same_shape: Array.isArray(f.same_shape) ? f.same_shape.filter((s) => seatLines([s], true) !== '').map((s) => oneLine(s)) : oneLine(f.same_shape) });
+      if (label) rows.push({ run: rel, id: f.id, severity, label, summary: oneLine(f.summary || f.title), same_shape: Array.isArray(f.same_shape) ? f.same_shape.filter((s) => seatLines([s], true) !== '').map((s) => oneLine(s)) : oneLine(f.same_shape) });
     }
   }
   rows.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || (a.run < b.run ? -1 : a.run > b.run ? 1 : 0) || a.id.localeCompare(b.id, 'en', { numeric: true }));
@@ -2071,7 +2081,7 @@ async function suggestRules(args, errOut) {
     if (shape) lines.push(`  same shape: ${shape}`);
   }
   lines.push(`REVIEW.md: ${reviewMd.path}`, `  size: ${reviewMd.bytes === null ? 'none' : `${reviewMd.bytes} bytes`} (limit ${reviewMd.limit} bytes)`, `  git: ${reviewMd.tracked === null ? 'not a git repository' : reviewMd.tracked ? 'tracked' : 'not tracked'}`,
-    `  approved: ${reviewMd.approved ? `yes (${reviewMd.approved.at ?? 'time unknown'})` : 'no'}`);
+    `  approved: ${reviewMd.approved ? `yes (${reviewMd.approved.at ?? 'time unknown'})` : reviewMd.approvedError ? `unknown (${reviewMd.approvedError})` : 'no'}`);
   const read = reviewMd.read;
   if (read.error) lines.push(`  read: ${read.error}`);
   else if (read.files.length > 0) lines.push(`  read: ${read.total} of ${reviewMd.limit} bytes (${read.files.map((f) => `${f.path} ${f.bytes}`).join(', ')})`);
@@ -2091,15 +2101,16 @@ function addRuleLines(raw, section, add) {
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   else if (lines.length > 0) lines[lines.length - 1] += cr;
   const bullets = add.map((l) => `- ${l}${cr}`);
-  const start = lines.findIndex((l) => {
+  const fenced = parseFenceLines(text).lines.map((l) => l.inFence);
+  const start = lines.findIndex((l, i) => {
     const h = /^##\s+(.+?)\s*$/.exec(l);
-    return h !== null && h[1].toLowerCase() === section.toLowerCase();
+    return !fenced[i] && h !== null && h[1].toLowerCase() === section.toLowerCase();
   });
   if (start === -1) {
     const blank = lines.length > 0 && lines[lines.length - 1].trim() !== '';
     lines.push(...(blank ? [cr] : []), `## ${section}${cr}`, cr, ...bullets);
   } else {
-    let end = lines.findIndex((l, i) => i > start && /^#{1,2}\s/.test(l));
+    let end = lines.findIndex((l, i) => i > start && !fenced[i] && /^#{1,2}\s/.test(l));
     if (end === -1) end = lines.length;
     while (end - 1 > start && lines[end - 1].trim() === '') end--;
     lines.splice(end, 0, ...bullets);
@@ -2116,7 +2127,8 @@ function equalsPreflightBase(repo) {
   const spec = ':(top)REVIEW.md';
   if (git(['ls-files', '--error-unmatch', '--', spec]).status !== 0) return false;
   const mb = git(['merge-base', 'HEAD', 'refs/remotes/origin/HEAD']);
-  const base = mb.status === 0 && mb.stdout.trim() !== '' ? mb.stdout.trim() : 'HEAD';
+  if (mb.status !== 0 || mb.stdout.trim() === '') return false;
+  const base = mb.stdout.trim();
   if (git(['cat-file', '-e', `${base}:REVIEW.md`]).status !== 0) return false;
   return git(['diff', '--quiet', base, '--', spec]).status === 0;
 }
@@ -2148,7 +2160,7 @@ async function writeRules(args) {
   const next = add.length > 0 ? addRuleLines(raw, section, add) : raw;
   const lines = [...add.map((l) => `added to "## ${section}": - ${l}`), ...there.map((l) => `already there: - ${l}`)];
   if (add.length > 0) {
-    if (next.length > limit) return fail(`the new ${file} would be ${next.length} bytes; the limit is ${limit} bytes`, 'next: shorten the lines or the file; nothing was written');
+    if (ruleBytes(next) > limit) return fail(`the new ${file} would be ${ruleBytes(next)} bytes; the limit is ${limit} bytes`, 'next: shorten the lines or the file; nothing was written');
     const read = await reviewMdRead(repo);
     if (read.error) return fail(read.error);
     const total = read.total + ruleBytes(next) - (raw === null ? 0 : ruleBytes(raw));
@@ -2161,17 +2173,17 @@ async function writeRules(args) {
     || equalsPreflightBase(repo);
   const notApproved = `not approved: the rest of ${file} was never approved or committed; show the user the whole file, then run rules-write --repo "${repo}" --approve-existing`;
   if (args.dryRun) {
-    return { code: 0, lines: ['dry run: nothing was written', ...lines, `file: ${file}`, `final size: ${next.length} bytes (limit ${limit} bytes)`, restTrusted ? `would approve: ${sha.slice(0, 12)}` : notApproved] };
+    return { code: 0, lines: ['dry run: nothing was written', ...lines, `file: ${file}`, `final size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, restTrusted ? `would approve: ${sha.slice(0, 12)}` : notApproved] };
   }
   if (add.length > 0) await fs.writeFile(file, next);
-  if (!restTrusted) return { code: 0, lines: [...lines, `file: ${file}`, `size: ${next.length} bytes (limit ${limit} bytes)`, notApproved] };
+  if (!restTrusted) return { code: 0, lines: [...lines, `file: ${file}`, `size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, notApproved] };
   const at = new Date().toISOString();
   const entries = [...approved.filter((e) => comparablePath(e.path) !== want), { path: file, sha256: sha, at }];
   await fs.mkdir(path.dirname(approvedFile), { recursive: true });
   const tmp = `${approvedFile}.${process.pid}.tmp`;
   await fs.writeFile(tmp, `${JSON.stringify({ version: 1, approved: entries }, null, 2)}\n`, 'utf8');
   await fs.rename(tmp, approvedFile);
-  return { code: 0, lines: [...lines, `file: ${file}`, `size: ${next.length} bytes (limit ${limit} bytes)`, `approved: ${sha.slice(0, 12)} at ${at}`, RULES_NEXT] };
+  return { code: 0, lines: [...lines, `file: ${file}`, `size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, `approved: ${sha.slice(0, 12)} at ${at}`, RULES_NEXT] };
 }
 
 async function run(argv, io = {}) {

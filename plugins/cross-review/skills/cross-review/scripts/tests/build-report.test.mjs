@@ -1299,6 +1299,9 @@ test('self-review fixes: every format counts a NOT MET or PARTIAL criterion with
   const chat = chatAll(report);
   assert.match(chat, /- VERDICTS {5}4 met, 4 partial, 4 not met$/m);
   assert.match(chat.split(NL)[0], /4 not met, no finding \(AC-3, AC-6, AC-9, AC-12\)/);
+  const short = renderChat(report).split(NL)[0];
+  assert.match(short, /4 not met, no finding \(AC-3, AC-6, AC-9, AC-12\)/, 'the short banner names the unmet criteria too');
+  assert.doesNotMatch(short, /with findings|to decide/, 'the short banner keeps the with-findings and decide parts out');
   let inCode = false;
   for (const line of chat.split(NL)) {
     if (line.startsWith('```')) inCode = !inCode;
@@ -2090,8 +2093,8 @@ test('live run 2c: under the split-hypothesis caveat the full report prints each
   assert.ok(md.includes(`- ${caveat}\n  - H1, seat A: H1: disproved at x.mjs:4, the guard returns early. REFUTED\n  - H1, seat B: `), md);
   assert.match(renderChat(report, { all: true }), /\n {2}- H1, seat B: H1: confirmed by running node t\.mjs, it throws\.\n/);
   assert.doesNotMatch(renderChat(report), /H1, seat [AB]:/, 'the short chat keeps only the caveat');
-  assert.doesNotMatch(renderChat(report), /> Caveat: H1: the seats disagree/, 'split hypotheses are a minor note');
-  assert.match(renderChat(report), /1 minor note\b/);
+  assert.match(renderChat(report), /> Caveat: H1: the seats disagree/, 'a split hypothesis stays visible in the short chat');
+  assert.doesNotMatch(renderChat(report), /minor note/, 'and is not folded into the minor notes');
   assert.match(renderChat(report, { all: true }), /> Caveat: H1: the seats disagree/);
   const cut = buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seatA, B: lines('## Checks performed', '- H2: disproved. REFUTED') } });
   const cutLine = renderText(cut).split('\n').find((l) => l.startsWith('      H2, seat A: '));
@@ -2692,17 +2695,18 @@ test('short chat: findings only, no criteria or hypothesis lines, an important c
   assert.ok(report.minorCaveats.length > 0);
   const out = renderChat(report);
   // Always-shown caveats keep their own wording (the untagged NOT MET one names its criterion tag); the rest of the short report has no tags.
-  const body = out.split('\n').filter((l) => !l.startsWith('> Caveat:')).join('\n');
+  const body = out.split('\n').filter((l) => !l.startsWith('> Caveat:') && !l.startsWith('> **REVIEW')).join('\n');
   for (const word of ['AC-', 'H3', 'UNMET', 'CRITERION', 'SPLIT', 'REFUTED', 'COVERED', 'VERDICTS', '█', '| Do this']) assert.ok(!body.includes(word), `${word} in short output\n${out}`);
   assert.ok(out.includes('```diff\n'), 'finding block is a diff fence');
   assert.match(out, /^ {2}.. MEDIUM {2}F1 {2}The reworded container-metrics/m);
   assert.match(out, /^ {2}.. LOW {5}F3 {2}/m);
   assert.match(out, /^> Caveat: The target changed after Phase 1/m);
   assert.match(out, /^> Caveat: Criterion AC-1 .*no finding is tagged/m);
-  assert.doesNotMatch(out, /the seats disagree/);
+  assert.match(out, /^> Caveat: H3: the seats disagree/m, 'a split suspected bug is a caveat of its own, not a minor note');
+  assert.match(out.split('\n')[0], /1 not met, no finding \(AC-1\)/);
   const m = report.minorCaveats.length;
-  assert.equal(m, 2, JSON.stringify(report.minorCaveats.map((c) => c.label)));
-  assert.match(out, /Ask for the full report for each finding's evidence and fix, the requirements check, the cost and 2 minor notes\._?$/m);
+  assert.equal(m, 1, JSON.stringify(report.minorCaveats.map((c) => c.label)));
+  assert.match(out, /Ask for the full report for each finding's evidence and fix, the requirements check, the cost and 1 minor note\._?$/m);
   assert.doesNotMatch(out, /Notes:/);
   const all = renderChat(report, { all: true });
   assert.match(all, /> Caveat: H3: the seats disagree/);
