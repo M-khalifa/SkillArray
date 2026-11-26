@@ -1129,6 +1129,32 @@ test('driftedFiles: a tracked cache file that changed is named, an untracked new
   assert.deepEqual(driftedFiles(before, await fingerprintFiles(dir)), ['a.pyc']);
 });
 
+test('driftedFiles table: tracked and untracked cache files across record time and change [slow]', async (t) => {
+  const { fingerprintFiles, driftedFiles } = await import('../preflight.mjs');
+  const w = (dir, rel, text) => mkdir(path.dirname(path.join(dir, rel)), { recursive: true }).then(() => writeFile(path.join(dir, rel), text, 'utf8'));
+  const oldStyle = (rec, extra = {}) => ({ ...rec, files: { ...rec.files, ...extra } });
+  const rows = [
+    ['tracked dirty at record, unchanged', async (d) => w(d, 'a.pyc', 'v2'), async () => {}, null, []],
+    ['tracked dirty at record, changed again', async (d) => w(d, 'a.pyc', 'v2'), async (d) => w(d, 'a.pyc', 'v3'), null, ['a.pyc']],
+    ['tracked clean at record, changed', async () => {}, async (d) => w(d, 'a.pyc', 'v2'), null, ['a.pyc']],
+    ['tracked dirty at record, restored (known residual: not named; the snapshot hash still differs)', async (d) => w(d, 'a.pyc', 'v2'), async (d) => git(['checkout', '--', 'a.pyc'], d), null, []],
+    ['untracked new cache after record', async () => {}, async (d) => w(d, '__pycache__/n.cpython-311.pyc', 'x'), null, []],
+    ['untracked cache at record, changed after', async (d) => w(d, '__pycache__/n.cpython-311.pyc', 'x'), async (d) => w(d, '__pycache__/n.cpython-311.pyc', 'y'), null, []],
+    ['old record holding an untracked cache key', async () => {}, async () => {}, (rec) => oldStyle(rec, { 'pkg/__pycache__/m.pyc': 'h' }), []],
+    ['source file changed next to an untracked cache key in an old record',async () => {}, async (d) => w(d, 'src.py', 'x'), (rec) => oldStyle(rec, { 'pkg/__pycache__/m.pyc': 'h' }), ['src.py']],
+  ];
+  for (const [name, atRecord, after, transform, want] of rows) {
+    const dir = await makeGitRepo(t);
+    await w(dir, 'a.pyc', 'v1');
+    git(['add', 'a.pyc'], dir);
+    git(['commit', '-q', '-m', 'pyc'], dir);
+    await atRecord(dir);
+    const rec = await fingerprintFiles(dir);
+    await after(dir);
+    assert.deepEqual(driftedFiles(transform ? transform(rec) : rec, await fingerprintFiles(dir)), want, name);
+  }
+});
+
 test('snapshotMatches: a hash recorded without the cache filter still matches a git target and a plain folder, and a real change does not', async (t) => {
   const { snapshotMatches } = await import('../preflight.mjs');
   const dir = await makeGitRepo(t);

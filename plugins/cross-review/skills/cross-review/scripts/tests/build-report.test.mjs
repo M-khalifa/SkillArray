@@ -1300,7 +1300,7 @@ test('self-review fixes: every format counts a NOT MET or PARTIAL criterion with
   assert.match(chat, /- VERDICTS {5}4 met, 4 partial, 4 not met$/m);
   assert.match(chat.split(NL)[0], /4 not met, no finding \(AC-3, AC-6, AC-9, AC-12\)/);
   const short = renderChat(report).split(NL)[0];
-  assert.match(short, /4 not met, no finding \(AC-3, AC-6, AC-9, AC-12\)/, 'the short banner names the unmet criteria too');
+  assert.match(short, /8 not met or partial, no finding \(AC-2, AC-3, AC-5, AC-6, AC-8, AC-9, AC-11, AC-12\)/, 'the short banner names the unmet and partial criteria too');
   assert.doesNotMatch(short, /with findings|to decide/, 'the short banner keeps the with-findings and decide parts out');
   let inCode = false;
   for (const line of chat.split(NL)) {
@@ -2663,6 +2663,27 @@ test('short chat: confirmed suspected bugs with no finding are named, first 3 on
   assert.doesNotMatch(out, /Fourth bug|H\d/);
 });
 
+test('short chat: a PARTIAL criterion with no finding is named in the banner; --all keeps its old banner', () => {
+  const packet = lines('- [AC-1] a', '- [AC-2] b', '- [AC-3] c');
+  const seat = lines('## Checks performed', '- AC-1: checked; a failing input is still accepted. PARTIAL', '- AC-2: checked. MET', '- AC-3: checked; fails. NOT MET');
+  const report = buildReport({ findingsDoc: { zero_claims: true, findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: seat, B: '' } });
+  const short = renderChat(report).split(NL)[0];
+  assert.match(short, /2 not met or partial, no finding \(AC-1, AC-3\)/);
+  const all = chatAll(report).split(NL)[0];
+  assert.match(all, / 1 not met, no finding \(AC-3\)/);
+  assert.doesNotMatch(all, /or partial/);
+});
+
+test('short chat: a partly confirmed suspected bug with no finding gets the confirmed sentence, worded for both', () => {
+  const packet = lines('# P', '## Hypotheses', '- [H1] First bug.', '- [H2] Second bug.');
+  const partly = lines('# S', '', '## Checks performed', '- H1: reproduced only with CRLF input. PARTLY CONFIRMED');
+  const one = renderChat(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: lines('# P', '## Hypotheses', '- [H1] First bug.'), seatTexts: { A: partly, B: partly } }));
+  assert.match(one, /^A suspected bug was confirmed or partly confirmed by the reviewers, but no finding is tagged with it \(a finding may still describe it\):\n {2}- First bug\.\n/m);
+  const both = lines('# S', '', '## Checks performed', '- H1: confirmed by running node t.mjs.', '- H2: reproduced only with CRLF input. PARTLY CONFIRMED');
+  const two = renderChat(buildReport({ findingsDoc: { findings: [] }, manifest: MANIFEST, packetText: packet, seatTexts: { A: both, B: both } }));
+  assert.match(two, /^2 suspected bugs were confirmed or partly confirmed by the reviewers, but no finding is tagged with them/m);
+});
+
 test('short chat: a severity the auditor changed is labelled with the reviewers value; the line stays within 100 columns', () => {
   const words = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
   const report = buildReport({ findingsDoc: { findings: [
@@ -2703,7 +2724,7 @@ test('short chat: findings only, no criteria or hypothesis lines, an important c
   assert.match(out, /^> Caveat: The target changed after Phase 1/m);
   assert.match(out, /^> Caveat: Criterion AC-1 .*no finding is tagged/m);
   assert.match(out, /^> Caveat: H3: the seats disagree/m, 'a split suspected bug is a caveat of its own, not a minor note');
-  assert.match(out.split('\n')[0], /1 not met, no finding \(AC-1\)/);
+  assert.match(out.split('\n')[0], /2 not met or partial, no finding \(AC-1, AC-2\)/);
   const m = report.minorCaveats.length;
   assert.equal(m, 1, JSON.stringify(report.minorCaveats.map((c) => c.label)));
   assert.match(out, /Ask for the full report for each finding's evidence and fix, the requirements check, the cost and 1 minor note\._?$/m);

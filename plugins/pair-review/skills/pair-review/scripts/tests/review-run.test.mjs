@@ -3673,14 +3673,75 @@ test('rules-write approves only when the rest of REVIEW.md was new, approved bef
   assert.equal((await approvedEntries(config)).approved[0].sha256, sha(await fs.readFile(file)));
 });
 
-test('rules-write trusts the rest of a REVIEW.md in a plain folder, which preflight reads from disk without approval', async (t) => {
-  await configDir(t);
+test('rules-write in a plain folder needs no approval and records none, also after the folder becomes a repository', async (t) => {
+  const config = await configDir(t);
   const { dir, file } = await plainRepo();
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.writeFile(file, '# Review instructions\n\n## Always check\n\n- written by someone else\n');
-  const out = (await cliIn('rules-write', '--repo', dir, '--line', 'x', '--dry-run')).out;
-  assert.doesNotMatch(out, /^not approved:/m);
-  assert.match(out, /^would approve: /m);
+  const dry = (await cliIn('rules-write', '--repo', dir, '--line', 'x', '--dry-run')).out;
+  assert.match(dry, /^plain folder: no approval needed \(preflight reads it from disk\)$/m);
+  assert.doesNotMatch(dry, /^not approved:|^would approve:/m);
+  const r = await cliIn('rules-write', '--repo', dir, '--line', 'x');
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(await fs.readFile(file, 'utf8'), /- x\n$/);
+  assert.match(r.out, /^plain folder: no approval needed \(preflight reads it from disk\)$/m);
+  assert.doesNotMatch(r.out, /^approved:|^not approved:/m);
+  await noApprovals(config);
+  const same = await cliIn('rules-write', '--repo', dir, '--line', 'x');
+  assert.match(same.out, /^already there: - x$/m);
+  await noApprovals(config);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir }).status, 0);
+  const head = await readReviewRules([dir]);
+  assert.notEqual(head?.record.files.find((f) => f.used)?.ref, 'approved copy');
+  assert.equal(head?.text ?? null, null, 'the uncommitted copy is not used in head mode');
+});
+
+test('rules-write in a plain folder still records an approval when the user vouched for the bytes', async (t) => {
+  const config = await configDir(t);
+  const a = await plainRepo();
+  t.after(() => fs.rm(a.dir, { recursive: true, force: true }));
+  assert.equal((await cliIn('rules-write', '--repo', a.dir, '--line', 'mine')).code, 0);
+  assert.equal((await approvedEntries(config)).approved[0].sha256, sha(await fs.readFile(a.file)), 'a new file is all the user\'s own lines');
+  const next = await cliIn('rules-write', '--repo', a.dir, '--line', 'more');
+  assert.match(next.out, /^approved: [0-9a-f]{12} at /m, 'bytes approved before stay trusted');
+  const b = await plainRepo();
+  t.after(() => fs.rm(b.dir, { recursive: true, force: true }));
+  await fs.writeFile(b.file, '## Always check\n- theirs\n');
+  assert.equal((await cliIn('rules-write', '--repo', b.dir, '--approve-existing')).code, 0);
+  assert.equal((await approvedEntries(config)).approved.find((e) => e.path === b.file).sha256, sha(await fs.readFile(b.file)));
+});
+
+async function rulesRefused(t, content, args, pattern) {
+  const config = await configDir(t);
+  const { dir, file } = await plainRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(file, content);
+  for (const extra of [[], ['--dry-run']]) {
+    const r = await cliIn('rules-write', '--repo', dir, ...args, ...extra);
+    assert.equal(r.code, 1, r.out + r.err);
+    assert.match(r.out, pattern, r.out);
+    assert.match(r.out, /nothing was written/);
+    assert.equal(await fs.readFile(file, 'utf8'), content);
+    await noApprovals(config);
+  }
+}
+
+test('rules-write refuses a REVIEW.md with an unclosed code fence, before or after the section, and writes nothing', async (t) => {
+  const line = ['--line', 'new rule'];
+  await rulesRefused(t, '# R\n\n## Always check\n\n- one\n\n```text\nexample\n', line, /unclosed code fence \(line 7\)/);
+  await rulesRefused(t, '## Always check\n\n~~~text\nexample\n', line, /unclosed code fence \(line 3\)/);
+  await rulesRefused(t, '# R\n\n```text\n## Always check\n- x\n', line, /unclosed code fence \(line 3\)/);
+  await rulesRefused(t, '## Always check\n- one\n\n```sh\nexample\n', ['--line', 'one'], /unclosed code fence \(line 4\)/);
+  await rulesRefused(t, `${BOM}## Always check\r\n- one\r\n\r\n~~~\r\nx\r\n`, line, /unclosed code fence \(line 4\)/);
+});
+
+test('rules-write --approve-existing is not refused for an unclosed code fence', async (t) => {
+  const config = await configDir(t);
+  const { dir, file } = await plainRepo();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(file, '## Always check\n- one\n\n```sh\nx\n');
+  assert.equal((await cliIn('rules-write', '--repo', dir, '--approve-existing')).code, 0);
+  assert.equal((await approvedEntries(config)).approved.length, 1);
 });
 
 test('rules-write looks for a line only in the target section outside code fences, and adds before the first sub-heading', async (t) => {

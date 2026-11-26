@@ -1857,8 +1857,8 @@ async function fingerprintFiles(cd) {
 
 // The files that differ between two fingerprintFiles records; a moved HEAD is named first.
 function driftedFiles(before, after) {
-  // Only the older record can hold untracked cache files; a cache file in the new one is a tracked file that changed.
-  const older = Object.fromEntries(Object.entries(before?.files ?? {}).filter(([key]) => !isCachePath(key)));
+  // The older record may hold untracked cache files the newer one leaves out; one of its cache keys counts only while the newer record still lists it (a tracked file).
+  const older = Object.fromEntries(Object.entries(before?.files ?? {}).filter(([key]) => !isCachePath(key) || Object.hasOwn(after.files ?? {}, key)));
   const files = diffInventories(older, after.files ?? {});
   return before?.head && after.head && before.head !== after.head ? [`HEAD (${before.head.slice(0, 7)} -> ${after.head.slice(0, 7)})`, ...files] : files;
 }

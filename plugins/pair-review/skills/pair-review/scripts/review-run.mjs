@@ -2161,7 +2161,11 @@ async function writeRules(args) {
   const section = args.section ?? 'Always check';
   const text = raw === null ? '' : raw.toString('utf8').replace(/^\u{FEFF}/u, '');
   const textLines = text.split('\n');
-  const fenced = parseFenceLines(text).lines.map((l) => l.inFence);
+  const parsed = parseFenceLines(text);
+  const fenced = parsed.lines.map((l) => l.inFence);
+  if (!args.approveExisting && parsed.unterminated) {
+    return fail(`REVIEW.md has an unclosed code fence (line ${parsed.lines.map((l) => l.isOpen).lastIndexOf(true) + 1})`, 'next: close it, then run rules-write again; nothing was written');
+  }
   const first = sectionStart(textLines, fenced, section);
   const last = first === -1 ? 0 : sectionEnd(textLines, fenced, first, /^#{1,2}\s/);
   const have = new Set(first === -1 ? [] : textLines.slice(first + 1, last).filter((_, i) => !fenced[first + 1 + i]).map((l) => /^\s*[-*]\s+(.*?)\s*$/.exec(l)?.[1]).filter((t) => t !== undefined));
@@ -2181,13 +2185,16 @@ async function writeRules(args) {
   const want = comparablePath(file);
   // The approval covers the whole file: the rest must be new, approved before or the committed copy, unless --approve-existing.
   const restTrusted = args.approveExisting || raw === null || approved.some((e) => comparablePath(e.path) === want && e.sha256 === sha256Of(raw))
-    || equalsPreflightBase(repo) || !(await isGitRepo(repo).catch(() => false));
+    || equalsPreflightBase(repo);
+  // A plain folder needs no approval (preflight reads it from disk), and none is recorded for bytes nobody vouched for.
+  const plain = !restTrusted && !(await isGitRepo(repo).catch(() => false));
+  const plainLine = 'plain folder: no approval needed (preflight reads it from disk)';
   const notApproved = `not approved: the rest of ${file} was never approved or committed; show the user the whole file, then run rules-write --repo "${repo}" --approve-existing`;
   if (args.dryRun) {
-    return { code: 0, lines: ['dry run: nothing was written', ...lines, `file: ${file}`, `final size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, restTrusted ? `would approve: ${sha.slice(0, 12)}` : notApproved] };
+    return { code: 0, lines: ['dry run: nothing was written', ...lines, `file: ${file}`, `final size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, restTrusted ? `would approve: ${sha.slice(0, 12)}` : plain ? plainLine : notApproved] };
   }
   if (add.length > 0) await fs.writeFile(file, next);
-  if (!restTrusted) return { code: 0, lines: [...lines, `file: ${file}`, `size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, notApproved] };
+  if (!restTrusted) return { code: 0, lines: [...lines, `file: ${file}`, `size: ${ruleBytes(next)} bytes (limit ${limit} bytes)`, plain ? plainLine : notApproved] };
   const at = new Date().toISOString();
   const entries = [...approved.filter((e) => comparablePath(e.path) !== want), { path: file, sha256: sha, at }];
   await fs.mkdir(path.dirname(approvedFile), { recursive: true });

@@ -1594,10 +1594,10 @@ function shortSentences(report) {
   }
   // A suspected bug a reviewer confirmed with no finding behind it, and requirements no reviewer checked, have no line of their own.
   const rows = report.criteria?.rows ?? [];
-  const confirmedRows = rows.filter((r) => r.kind === 'hypothesis' && r.status !== 'not-verified' && r.verdict === 'confirmed' && !(r.findings?.length > 0));
+  const confirmedRows = rows.filter((r) => r.kind === 'hypothesis' && r.status !== 'not-verified' && (r.verdict === 'confirmed' || r.verdict === 'partly') && !(r.findings?.length > 0));
   const confirmedHyp = confirmedRows.length;
   if (confirmedHyp > 0) {
-    out.push(`${confirmedHyp === 1 ? 'A suspected bug was' : `${confirmedHyp} suspected bugs were`} confirmed by the reviewers, but no finding is tagged with ${confirmedHyp === 1 ? 'it' : 'them'} (a finding may still describe ${confirmedHyp === 1 ? 'it' : 'them'}):`);
+    out.push(`${confirmedHyp === 1 ? 'A suspected bug was' : `${confirmedHyp} suspected bugs were`} ${confirmedRows.some((r) => r.verdict === 'partly') ? 'confirmed or partly confirmed' : 'confirmed'} by the reviewers, but no finding is tagged with ${confirmedHyp === 1 ? 'it' : 'them'} (a finding may still describe ${confirmedHyp === 1 ? 'it' : 'them'}):`);
     for (const r of confirmedRows.slice(0, 3)) out.push(`  - ${shortTitle({ title: r.text }, CHAT_LINE - 4)}`);
     if (confirmedHyp > 3) out.push(`  - and ${confirmedHyp - 3} more in the full report`);
     out.push('');
@@ -1642,10 +1642,10 @@ export function renderChat(report, { all = false } = {}) {
   const findingsText = report.total === 0 ? 'no findings' : `${report.total} finding${report.total === 1 ? '' : 's'}`;
   const critRows = (report.criteria?.rows ?? []).filter((r) => r.kind === 'criterion');
   const withFindings = critRows.filter((r) => r.status === 'issue').map((r) => r.tag);
-  const notMet = critRows.filter((r) => r.status === 'clean' && (r.met === 'NOT MET' || r.failedSeats.length > 0)).map((r) => r.tag);
+  const notMet = critRows.filter((r) => (all ? r.status === 'clean' && (r.met === 'NOT MET' || r.failedSeats.length > 0) : isUnmet(r))).map((r) => r.tag);
   const tagList = (list) => `${list.slice(0, 8).join(', ')}${list.length > 8 ? ', ...' : ''}`;
   const withFindingsText = withFindings.length > 0 ? ` · ${withFindings.length} criteri${withFindings.length === 1 ? 'on' : 'a'} with findings (${tagList(withFindings)})` : '';
-  const notMetText = notMet.length > 0 ? ` · ${notMet.length} not met, no finding (${tagList(notMet)})` : '';
+  const notMetText = notMet.length > 0 ? ` · ${notMet.length} not met${all ? '' : ' or partial'}, no finding (${tagList(notMet)})` : '';
   const out = [`> **${head}${report.round ? ` · round ${report.round}` : ''} · ${blockText}${all ? decideText + withFindingsText : ''}${notMetText} · ${findingsText}**`, ''];
   if (report.why) out.push(`Why: ${report.why}`, '');
   if (report.total > 0 && all) {
