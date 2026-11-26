@@ -3516,7 +3516,7 @@ test('rules-suggest lists the confirmed findings of one repository, read-only', 
     'sub/b-run F1 HIGH review-confirmed', '  summary: summary of F1 second line',
     'a-run F5 MEDIUM review-confirmed', '  summary: summary of F5 second line', 'e-run F1 MEDIUM review-confirmed', '  summary: summary of F1 second line',
   ]);
-  assert.doesNotMatch(r.out, /F2|F3|F4|target-copy|c-run/, 'wrong, LOW, unsettled, copy and other-repo findings are left out');
+  assert.doesNotMatch(r.out, /\bF[234]\b|target-copy|c-run/, 'wrong, LOW, unsettled, copy and other-repo findings are left out');
   assert.match(r.err, /skipping broken: run.json does not parse/);
   assert.match(r.out, /REVIEW\.md: .*REVIEW\.md\n {2}size: none \(limit 8192 bytes\)\n {2}git: not a git repository\n/);
   assert.match(r.out, /next: group findings that share one bug class across 2 or more runs into at most 3 REVIEW\.md lines; show them to the user before editing REVIEW\.md\n$/);
@@ -3865,7 +3865,7 @@ test('rules-suggest keeps a pre-existing finding the reviewers settled, drops wr
   assert.equal(r.code, 0, r.out + r.err);
   assert.equal(r.out.split('\n')[0], `1 runs of ${s.repo}, 1 confirmed findings (0 author-confirmed, 1 review-confirmed)`);
   assert.match(r.out, /^a F1 HIGH review-confirmed \(pre-existing\)$/m);
-  assert.doesNotMatch(r.out, /F2|F3|F4|F5/);
+  assert.doesNotMatch(r.out, /\bF[2345]\b/);
 });
 
 test('rules-suggest matches a run whose target is inside --repo, not a sibling with the same prefix', async (t) => {
@@ -3906,7 +3906,7 @@ test('rules-suggest uses the auditor severity for the filter and the row, and sh
   const r = await cliIn('rules-suggest', '--runs-root', s.runsRoot, '--repo', s.repo);
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /^a F1 HIGH review-confirmed\n {2}summary: raised to high$/m);
-  assert.doesNotMatch(r.out, /F2/);
+  assert.doesNotMatch(r.out, /\bF2\b/);
   assert.match(r.out, /^a F3 HIGH review-confirmed\n {2}summary: only a title$/m);
 });
 
