@@ -11,7 +11,22 @@ const entry = (await fs.readFile(path.join(root, 'SKILL.md'), 'utf8')).replace(/
 if (!entry.startsWith('---\n') || !entry.includes('\nname: ' + skill + '\n')) {
   throw new Error('SKILL.md frontmatter identity does not match its directory');
 }
-if (!/\ndescription:\s*>-?\n/.test(entry)) throw new Error('Missing description');
+const frontLines = entry.split('\n').slice(1);
+const frontEnd = frontLines.indexOf('---');
+const front = frontEnd < 0 ? frontLines : frontLines.slice(0, frontEnd);
+const descAt = front.findIndex((line) => line.startsWith('description:'));
+const descHead = descAt < 0 ? '' : front[descAt].slice('description:'.length).trim();
+const descBody = [];
+if (descAt >= 0) {
+  for (let i = descAt + 1; i < front.length && (front[i].trim() === '' || /^[ \t]/.test(front[i])); i++) descBody.push(front[i].trim());
+}
+const isBlock = /^[>|][+-]?$/.test(descHead);
+let description = (isBlock ? descBody : [descHead, ...descBody]).filter(Boolean).join(' ');
+if (!isBlock) description = description.replace(/^(["'])(.*)\1$/, '$2');
+if (!description) throw new Error('Missing description');
+if (description.length > 1024) throw new Error(`SKILL.md description is ${description.length} characters; the limit is 1024`);
+const lineCount = entry.replace(/\n$/, '').split('\n').length;
+if (lineCount > 500) throw new Error(`SKILL.md has ${lineCount} lines; the limit is 500`);
 await fs.access(path.join(root, 'LICENSE'));
 async function check(dir) {
   for (const item of await fs.readdir(dir, { withFileTypes: true })) {
