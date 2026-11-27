@@ -17,6 +17,9 @@
 - Preflight: warns when the Codex sandbox runs PowerShell in Constrained Language mode; the `rg` warning gives a copy command for a WinGet or user-profile `rg.exe` and says it matters mostly on large targets; packet paths with a `<placeholder>` are not checked (a path followed by an HTML tag still is).
 - Blind exchange: a vendor word in a folder name above the run folder (claude-work) is no longer an identity hit.
 - `--out`, `--json` and `--html` create a missing folder.
+- Windows: a job report the wrapper cannot write (its temp folder was deleted during the run) no longer turns a finished CLI into exit 1.
+- Package check: SKILL.md description (plain, quoted or `>`/`|` block) at most 1024 characters, SKILL.md at most 500 lines.
+- Run checklist: last step writes `phase3/field-report.md` (problems described, secrets as `<redacted>`, no GitHub issue).
 - Known limits: `rules-write` does not read setext (underlined) headings; the blind scan masks a vendor-word folder name above the run folder also in prose; the short report counts open findings past 20 without their IDs; on Linux and macOS a file name holding a backslash after a cache folder name counts as cache; a code fence that starts on a list-marker line makes `rules-write` refuse the file as an unclosed fence; the short report does not name a suspected bug that a seat named without an outcome word or that no seat checked (the full report does).
 - Model catalog: GPT-6.2 Astra, GPT-6.2 Sol and GPT-6.1 Terra added, GPT-5.5 removed (as listed by Codex CLI 0.171); Fable is 5.2.
 - Docs: in Claude Code auto mode `phase1 --start` is tried directly, with `!` only after a refusal; `report --all` only on request; a BOM-safe `codex debug models` example; `--a-effort`/`--b-effort` in `--help`.

@@ -274,6 +274,11 @@ means the review is incomplete; do not synthesize a completed two-vendor verdict
    auditor, translate, the scorecard, cache and worktree cleanup).
 6. `review-run manifest` and `review-run report`.
 7. After the author acts on the report: `review-run outcome`, one word per Fix now and Fix next finding.
+8. After the report: if any step failed, was retried, needed a workaround, or a script message was unclear, write
+   `<run-dir>/phase3/field-report.md`: one block per item with step, command, expected, actual, suggested fix,
+   and OBSERVED or INFERRED. Never include target code, secrets or customer data: describe the problem
+   instead of quoting it, and replace any value that could be secret or customer data with `<redacted>`.
+   Tell the user the file path; never open a GitHub issue.
 
 ## Reviewing the same code again
 

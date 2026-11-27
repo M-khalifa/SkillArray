@@ -273,6 +273,8 @@ $cmd = $env:PREFLIGHT_EXEC_COMMAND
 $modules = $env:PREFLIGHT_EXEC_PSMODULEPATH
 $dll = $env:PREFLIGHT_EXEC_JOBDLL
 $inJob = $false
+# The report only describes the run: a report folder deleted meanwhile (a temp cleanup) must not change the command's exit code.
+function Write-Report($text) { try { [IO.File]::WriteAllText($report, $text) } catch { } }
 try {
 $src = @'
 using System;
@@ -318,7 +320,7 @@ if (-not (Test-Path -LiteralPath $dll)) {
 try { [void][Reflection.Assembly]::LoadFrom($dll) } catch { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue; throw }
 [PreflightJob]::Enter()
 $inJob = $true
-} catch { [IO.File]::WriteAllText($report, "nojob " + $_.Exception.Message) }
+} catch { Write-Report ("nojob " + $_.Exception.Message) }
 foreach ($name in 'PREFLIGHT_EXEC_REPORT', 'PREFLIGHT_EXEC_COMMAND', 'PREFLIGHT_EXEC_PSMODULEPATH', 'PREFLIGHT_EXEC_JOBDLL') { [Environment]::SetEnvironmentVariable($name, $null) }
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $(if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' })
@@ -332,11 +334,11 @@ $p.WaitForExit()
 $code = $p.ExitCode
 if ($inJob) {
   # The command has ended; a timer that fires while the leftovers are checked below waits for the final report (afterJobSettles).
-  [IO.File]::WriteAllText($report, "exit " + $code)
+  Write-Report ("exit " + $code)
   $left = @([PreflightJob]::Pids() | Where-Object { $_ -ne $PID })
   # A process still exiting on its own is not a leftover: look again for up to about 1 s.
   for ($i = 0; $i -lt 20 -and $left.Count -gt 0; $i++) { Start-Sleep -Milliseconds 50; $left = @([PreflightJob]::Pids() | Where-Object { $_ -ne $PID }) }
-  [IO.File]::WriteAllText($report, "left " + ($left -join ' '))
+  Write-Report ("left " + ($left -join ' '))
   foreach ($id in $left) { try { [System.Diagnostics.Process]::GetProcessById($id).Kill() } catch { } }
 }
 exit $code

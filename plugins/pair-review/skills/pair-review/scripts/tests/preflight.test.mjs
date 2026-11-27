@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1007,6 +1008,20 @@ process.exitCode = 3;
   const final = readJobReport(report);
   assert.equal(final.left?.length, 1, 'the 30 s child is a real leftover');
   assert.deepEqual(seen[0], { exited: 3 }, 'the command\'s exit code is in the report while the wrapper still checks for leftovers');
+});
+
+test('job wrapper: a report folder deleted while the command runs does not change the command\'s exit code [slow]', { skip: process.platform !== 'win32' && 'Windows job wrapper' }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'job-report-gone-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'slow.mjs');
+  await writeFile(script, 'setTimeout(() => { process.exitCode = 0; }, 2500);\n');
+  const { child, dir: jobDir } = jobSpawn(`"${process.execPath}" "${script}"`, { cwd: dir });
+  t.after(() => rm(jobDir, { recursive: true, force: true }));
+  const removed = setTimeout(() => rm(jobDir, { recursive: true, force: true, maxRetries: 5 }), 1500);
+  const code = await new Promise((resolve) => child.on('close', resolve));
+  clearTimeout(removed);
+  assert.equal(existsSync(jobDir), false, 'the report folder was gone before the command ended');
+  assert.equal(code, 0, 'a report the wrapper cannot write does not turn a finished command into a failure');
 });
 
 test('job report: "exit <code>" means the leftover check is not done; afterJobSettles waits once for it, else runs now', async (t) => {
